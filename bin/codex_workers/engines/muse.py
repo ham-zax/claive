@@ -14,6 +14,20 @@ MUSE_MODEL = "muse-spark-1.3-contributor"
 
 class MuseEngine(WorkerEngine):
     name = "muse"
+    default_model = MUSE_MODEL
+
+    def resolve_launch(self, **options):
+        provider = options.get("provider") or "meta"
+        return {
+            "binary": os.environ.get("MUSE_WORKER_BINARY", str(Path.home() / ".local/bin/muse")),
+            "provider": provider,
+            "model": None if provider == "echo" else options.get("model") or MUSE_MODEL,
+            "read_only": bool(options.get("read_only")),
+            "web": bool(options.get("web")),
+            "output_schema": options.get("output_schema"),
+            "session_logging": bool(options.get("session_logging", True)),
+            "isolation": dict(options.get("isolation") or {}),
+        }
 
     def validate_launch(self, launch):
         binary = Path(launch["binary"])

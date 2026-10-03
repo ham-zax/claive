@@ -23,6 +23,9 @@ class TurnRequest:
 class WorkerEngine:
     name = ""
 
+    def resolve_launch(self, **options):
+        raise NotImplementedError
+
     def validate_launch(self, launch):
         raise NotImplementedError
 

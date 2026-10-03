@@ -8,6 +8,18 @@ from codex_workers.engine import WorkerEngine
 class FixtureEngine(WorkerEngine):
     name = "fixture"
 
+    def resolve_launch(self, **options):
+        return {
+            "binary": os.environ["FIXTURE_WORKER_BINARY"],
+            "provider": options.get("provider") or "fixture",
+            "model": options.get("model"),
+            "read_only": bool(options.get("read_only")),
+            "web": bool(options.get("web")),
+            "output_schema": options.get("output_schema"),
+            "session_logging": bool(options.get("session_logging", True)),
+            "isolation": dict(options.get("isolation") or {}),
+        }
+
     def validate_launch(self, launch):
         binary = Path(launch["binary"])
         if not binary.is_absolute() or not os.access(binary, os.X_OK):

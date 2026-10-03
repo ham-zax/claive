@@ -18,15 +18,13 @@ import time
 import uuid
 
 from codex_workers.engine import TurnRequest
-from codex_workers.engines import MUSE_MODEL, get_engine
+from codex_workers.engines import DEFAULT_ENGINE, get_engine
 from codex_workers.state import SCHEMA_VERSION, launch_config, session_id as worker_session_id
 
 
 ACTIVE = {"starting", "running", "cancelling", "idle"}
-MODEL = MUSE_MODEL
 EFFORTS = ["medium", "high", "xhigh", "max"]
 SCRIPT = None
-MUSE = os.environ.get("MUSE_WORKER_BINARY", str(Path.home() / ".local/bin/muse"))
 
 
 def set_launcher_path(path):
@@ -47,7 +45,7 @@ def turn_request(state, prompt_file=None, reasoning_effort=None, max_model_steps
         workspace=state["workspace"],
         prompt_file=prompt_file or state["prompt_file"],
         session_id=worker_session_id(state),
-        provider=launch.get("provider") or "meta",
+        provider=launch["provider"],
         model=launch.get("model"),
         reasoning_effort=reasoning_effort or state["reasoning_effort"],
         max_model_steps=max_model_steps or int(state.get("max_model_steps", 100)),
@@ -255,7 +253,7 @@ def supervise(job_id, control=None):
         state.pop(key, None)
     state["malformed_events"] = 0
     (path / "result.txt").unlink(missing_ok=True)
-    engine = get_engine(state.get("engine", "muse"))
+    engine = get_engine(state.get("engine", DEFAULT_ENGINE))
     state.update(supervisor_pid=os.getpid(), supervisor_identity=identity(os.getpid()),
                  status="running", phase="launching worker")
     stopping = False
@@ -424,7 +422,7 @@ def reusable_worker(job_id):
                              max_model_steps=steps,
                              label=request.get("label") or state["label"], turn=state["turn"] + 1,
                              status="running", phase="starting related follow-up")
-                engine = get_engine(state.get("engine", "muse"))
+                engine = get_engine(state.get("engine", DEFAULT_ENGINE))
                 state["command"] = engine.build_command(
                     turn_request(state, prompt_file=request["prompt_file"],
                                  reasoning_effort=effort, max_model_steps=steps,
@@ -461,12 +459,12 @@ def create_job(args):
     session_id = None if args.no_session_log else str(uuid.UUID(args.session_id)) if args.session_id else str(uuid.uuid4())
     isolation = dict(mode="create" if args.worktree else "existing" if args.worktree_existing else "none",
                      base=args.worktree_base, existing_path=args.worktree_existing)
-    launch = dict(binary=MUSE, provider=args.provider or "meta",
-                  model=None if args.provider == "echo" else MODEL,
-                  read_only=args.read_only, web=args.web,
-                  output_schema=args.output_schema, session_logging=not args.no_session_log,
-                  isolation=isolation)
     engine = get_engine(args.engine)
+    launch = engine.resolve_launch(
+        provider=args.provider, model=args.model, read_only=args.read_only, web=args.web,
+        output_schema=args.output_schema, session_logging=not args.no_session_log,
+        isolation=isolation,
+    )
     engine.validate_launch(launch)
     initial_turn = TurnRequest(
         binary=launch["binary"], workspace=str(workspace), prompt_file=str(prompt),
@@ -486,7 +484,7 @@ def create_job(args):
                  id=job_id, label=args.label or prompt.stem, workspace=str(workspace), log_dir=str(path),
                  prompt_file=str(prompt), command=command, launch=launch, status="starting", phase="starting",
                  started_at=time.time(), steps=0, task_failures=0, malformed_events=0,
-                 model=MODEL, reasoning_effort=args.reasoning_effort,
+                 model=launch.get("model"), reasoning_effort=args.reasoning_effort,
                  max_model_steps=args.max_model_steps,
                  reusable=args.action == "open", turn=1)
     if args.worktree_existing:
@@ -500,13 +498,13 @@ def report(state):
     print(f"{state['id']} {state['status']} | {clean(state['label'])}")
     session = worker_session_id(state)
     if session:
-        print(f"Session: {session} | {state.get('engine', 'muse')} | {state['model']} | {state['reasoning_effort']}")
+        print(f"Session: {session} | {state.get('engine', DEFAULT_ENGINE)} | {state.get('model')} | {state['reasoning_effort']}")
     if state.get("error"):
         print(clean(state["error"]))
     if state.get("task_failures"):
         print(f"Task failures reported: {state['task_failures']} (inspect logs before accepting work)")
     if state.get("quota_exhausted"):
-        print(f"Worker engine quota exhausted ({state.get('engine', 'muse')}). Reset: {state.get('quota_reset_at', 'not reported')}.")
+        print(f"Worker engine quota exhausted ({state.get('engine', DEFAULT_ENGINE)}). Reset: {state.get('quota_reset_at', 'not reported')}.")
         print("Ask the user to approve a specific fallback subagent/model or wait for reset; no automatic switch.")
     print(f"Logs: {path}")
     result = path / "result.txt"
@@ -563,7 +561,7 @@ def parser():
         launch.add_argument("--workspace", required=True)
         launch.add_argument("--prompt-file", required=True)
         launch.add_argument("--label")
-        launch.add_argument("--engine", default="muse")
+        launch.add_argument("--engine", default=DEFAULT_ENGINE)
         launch.add_argument("--reasoning-effort", default="high", choices=EFFORTS)
         launch.add_argument("--max-model-steps", type=int, default=100)
         launch.add_argument("--read-only", action="store_true")
@@ -572,11 +570,11 @@ def parser():
         isolation.add_argument("--worktree-existing", help="resume a lane in its existing absolute worktree path")
         launch.add_argument("--worktree-base")
         launch.add_argument("--web", action="store_true", help="enable engine web tools")
-        launch.add_argument("--model", default=MODEL, choices=[MODEL])
+        launch.add_argument("--model")
         launch.add_argument("--session-id", help="reuse this durable worker session UUID with the same workspace and policy")
         launch.add_argument("--output-schema")
         launch.add_argument("--no-session-log", action="store_true")
-        launch.add_argument("--provider", choices=["meta", "echo"])
+        launch.add_argument("--provider")
     listing = commands.add_parser("list", help="list active workers and recent results")
     listing.add_argument("--json", action="store_true")
     for action in ("show", "logs", "wait", "cancel", "close", "usage"):
@@ -656,7 +654,7 @@ def main(launcher=None):
         print(json.dumps(state, indent=2)) if args.json else report(state)
     elif args.action == "usage":
         state = load(job_path(args.id))
-        usage = get_engine(state.get("engine", "muse")).session_usage(state)
+        usage = get_engine(state.get("engine", DEFAULT_ENGINE)).session_usage(state)
         if args.json:
             print(json.dumps(usage, indent=2))
         elif not usage["model_calls"]:

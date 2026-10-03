@@ -1,6 +1,6 @@
 # Codex Muse Workers
 
-Reusable Muse Code subagents for Codex, with worker routing, private job tracking, and a live terminal dashboard. Maintained source for Hamza's installation in `~/.local/bin` and `~/.codex/skills/subagent-routing`.
+Reusable coding-worker orchestration for Codex, currently with Muse Code as the default production engine. The generic worker core handles supervision, reusable turns, state, cancellation, logs, and the live terminal dashboard; Muse-specific command/event/usage behavior lives behind an engine adapter. Maintained source for Hamza's installation in `~/.local/bin` and `~/.codex/skills/subagent-routing`.
 
 ## Native Codex progress
 
@@ -28,7 +28,7 @@ codex-workers watch --compact
 The compact pane shows one row per job with its ID, label, workspace, elapsed time, warning count, and current activity. It displays up to three jobs and indicates when more are available with `codex-workers list`. The full watch view also shows model steps observed in events. Both use the live terminal width. Running, idle, completed, failed, interrupted, and cancelled jobs have distinct states. The one-line view looks like:
 
 ```text
-Muse: 2 running | 1 idle | 3 done | 1 failed | 0 stopped
+Workers: 2 running | 1 idle | 3 done | 1 failed | 0 stopped
 ```
 
 This is an outer terminal status bar; it does not inject a widget into the Codex app or its native status line. It tracks jobs launched through these tools, not arbitrary agent processes. `done` means the CLI completed successfully; the parent must still verify the assigned work. A quiet worker remains running with an increasing last-event age.
@@ -65,7 +65,7 @@ codex-workers status-line
 
 `cancel` stops the worker process group, escalating to a kill after three seconds if necessary. `wait` returns when assigned turns finish (the reusable worker can remain idle), with zero for a valid completed turn, nonzero on failure, or 130 on cancellation. `close` drains already assigned turns before ending the supervisor; `cancel` stops it immediately. Closing a dashboard stops only the view; workers keep running or waiting until explicitly closed or cancelled.
 
-The launcher always supplies `--workspace`, `--trust-workspace`, `--disable-approval`, and `--json`. It keeps the Muse sandbox enabled. `--read-only` disables both non-shell writes and shell execution. Add `--worktree` for each concurrent writer; it maps to `-w create`. Worktree creation defaults to `HEAD`, so transfer any required uncommitted changes explicitly. Use `--worktree-base` to choose another base. Use `--worktree-existing /absolute/worktree` when reopening an existing isolated lane; its path is recorded as `actual_workspace`. File ownership must remain disjoint. Run heavy builds and test suites one at a time.
+The default Muse engine supplies `--workspace`, `--trust-workspace`, `--disable-approval`, and `--json`, and keeps Muse's sandbox enabled. `--read-only` disables both non-shell writes and shell execution. `--worktree` maps to Muse's `-w create`; `--worktree-base` selects its base ref. Muse 1.4.2 creates a real linked worktree under `.muse/worktrees` on branch `muse/session-<session UUID>`, then removes that worktree and branch when the underlying `muse exec` exits. Therefore `--worktree` is per-turn isolation, not a persistent reusable lane. Use `--worktree-existing /absolute/worktree` only for an externally retained worktree that remains present across turns. File ownership must remain disjoint. Run heavy builds and test suites one at a time.
 
 Web tools are disabled by default; `--web` enables them. `--model` accepts only `muse-spark-1.3-contributor`. Other options include `--output-schema` and `--session-id`. `--no-session-log` is available only for deliberate single-turn runs, and is rejected for reusable workers. Run `muse-worker --help` for the full list. `--provider echo` is for transport checks and does not contact a live model; Muse does not accept reasoning effort with that provider, so the launcher omits model and effort options in that case.
 
@@ -73,9 +73,9 @@ Web tools are disabled by default; `--web` enables them. `--model` accepts only 
 
 Every live Muse worker uses **`muse-spark-1.3-contributor`**. Default reasoning is **`high`** for normal work; use **`medium`** only for trivial tasks such as commit-message generation, and **`xhigh`/`max`** for complex work. The default step cap is 100; raise it when necessary. No alternate Muse model override or automatic helper fallback is permitted. Echo is an offline transport fixture.
 
-The orchestrator can override effort and step cap on each `followup`, or change future defaults with `effort`. Per-turn overrides do not replace the future default. Changes do not alter an in-flight request. Follow-ups run sequentially with the same workspace/tool policy and Muse session UUID; an isolated worktree is reused after the first turn.
+The orchestrator can override effort and step cap on each `followup`, or change future defaults with `effort`. Per-turn overrides do not replace the future default. Changes do not alter an in-flight request. Follow-ups run sequentially with the same workspace/tool policy and Muse session UUID. A Muse-created `-w create` worktree is cleaned up when that `muse exec` exits, so persistent isolated follow-ups require an externally retained worktree supplied with `--worktree-existing`.
 
-The outer supervisor stays alive, while each underlying `muse exec` exits after a turn. Session logging lets the next exec restore history. Related follow-ups should reuse this worker, without arbitrary retirement after a fixed number of tasks. After closure, `muse-worker --session-id UUID` can reopen the same lane with the same workspace, worktree, and policy; inspect `show JOB_ID --json` for that UUID. Keep unrelated lanes separate.
+The outer supervisor stays alive, while each underlying `muse exec` exits after a turn. Session logging lets the next exec restore history. Related follow-ups should reuse this worker, without arbitrary retirement after a fixed number of tasks. After closure, `muse-worker --session-id UUID` can restore retained history in the same workspace and tool policy; inspect `show JOB_ID --json` for that UUID. If isolation must persist across turns, provide an externally retained worktree with `--worktree-existing`. Keep unrelated lanes separate.
 
 Meta [prompt caching](https://dev.meta.ai/docs/prompt-caching) automatically reuses stable leading tokens on its servers. Closing a terminal does not itself flush the cache, and leaving one idle does not guarantee retention. Put changing task details after stable instructions/history; see the [cookbook](https://dev.meta.ai/docs/cookbook/prompt-caching). Muse exec currently exposes no cache-key or retention flag, so no extra CLI option is needed or invented.
 
@@ -89,7 +89,8 @@ On an explicit Muse subscription-quota exhaustion, the manager records the failu
 
 | Path | Purpose |
 | --- | --- |
-| `bin/codex-workers` | Python standard-library job manager and dashboard |
+| `bin/codex-workers` | Thin Python launcher for the worker manager |
+| `bin/codex_workers/` | Generic worker core, compatibility layer, and engine adapters |
 | `bin/muse-worker` | Reusable worker launcher in a managed terminal |
 | `bin/codex-with-workers` | Codex with the tmux worker view |
 | `skills/subagent-routing/SKILL.md` | Codex delegation and verification guidance |
@@ -99,7 +100,7 @@ On an explicit Muse subscription-quota exhaustion, the manager records the failu
 | `reference/prompt-caching.md` | Meta documentation links and observed CLI behavior |
 | `tests/test_workers.py` | Isolated behavioral checks |
 
-Requirements: Linux with Python 3 and Muse installed at `~/.local/bin/muse`. The combined terminal view also requires tmux and Codex on PATH. No Python packages are required by the tools or their checks. `MUSE_WORKER_BINARY` can select another absolute Muse executable.
+Requirements: Linux with Python 3. The default production engine requires Muse at `~/.local/bin/muse`; `MUSE_WORKER_BINARY` can select another absolute Muse executable. The combined terminal view also requires tmux and Codex on PATH. No third-party Python packages are required by the tools or their checks.
 
 Edit this repository, then refresh the installed copies:
 
@@ -108,7 +109,7 @@ Edit this repository, then refresh the installed copies:
 ./install.sh
 ```
 
-Changed destination files are backed up under `~/.local/state/muse-subagents/backups`. Identical files are skipped. Symlink and non-file destinations are rejected. The installer copies the three tools and skill; it does not overwrite global instructions or install the reference relays. Custom absolute destinations can be supplied through `MUSE_SUBAGENTS_BIN_DIR`, `CODEX_HOME`, and `XDG_STATE_HOME`.
+Changed destination files are backed up under `~/.local/state/muse-subagents/backups`. Identical files are skipped. Symlink and incompatible destination types are rejected. The installer copies the three tools, the `codex_workers` package, and the routing skill; it does not overwrite global instructions or install the reference relays. Custom absolute destinations can be supplied through `MUSE_SUBAGENTS_BIN_DIR`, `CODEX_HOME`, and `XDG_STATE_HOME`.
 
 Hamza's Muse settings (`~/.config/muse/settings.json`) also select `muse-spark-1.3-contributor` with `high` reasoning. The installer preserves those settings; the launcher pins its own model and effort independently.
 
@@ -127,4 +128,4 @@ python3 tests/test_workers.py
 shellcheck install.sh bin/muse-worker bin/codex-with-workers
 ```
 
-Checks cover pinned model/reasoning defaults, reusable follow-ups, dynamic effort, closure/cancellation, cache-usage accounting, subscription-quota notices, terminal-event validation, malformed and failed results, cancellation of process groups, concurrent jobs, stale process identities, safe arguments, private state files, and tmux with nondefault pane indices. Fake workers and temporary registries are used. The echo transport check requires an installed Muse binary; the tmux check requires tmux. These checks do not test live model authentication or model availability. Test workers and the temporary tmux server are stopped during cleanup.
+Checks cover pinned Muse defaults, structured/legacy state compatibility, the engine-neutral fixture lifecycle, reusable follow-ups, dynamic effort, closure/cancellation, cache-usage accounting, subscription-quota notices, terminal-event validation, malformed and failed results, process-group cancellation, concurrent jobs, stale process identities, installer isolation, private state files, and tmux with nondefault pane indices. A real Muse echo check characterizes linked-worktree creation and cleanup when Muse is installed; the tmux check requires tmux. These checks do not test live model authentication or model availability. Test workers and the temporary tmux server are stopped during cleanup.

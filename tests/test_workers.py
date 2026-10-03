@@ -19,6 +19,7 @@ sys.path.insert(0, str(REPO_ROOT / "bin"))
 from codex_workers import cli as module
 from codex_workers.state import launch_config, normalized
 module.set_launcher_path(CLI)
+MUSE_MODEL = "muse-spark-1.3-contributor"
 
 FAKE = """#!/usr/bin/python3
 import json, os, signal, subprocess, sys, time
@@ -83,7 +84,7 @@ class WorkerChecks(unittest.TestCase):
         return subprocess.run([CLI, *args], env=env, text=True, capture_output=True, timeout=12)
 
     def fixture_cli(self, *args, mode="success", timeout=12):
-        env = dict(self.env, MUSE_WORKER_BINARY=FIXTURE_WORKER, FIXTURE_MODE=mode)
+        env = dict(self.env, FIXTURE_WORKER_BINARY=FIXTURE_WORKER, FIXTURE_MODE=mode)
         return subprocess.run([FIXTURE_CLI, *args], env=env, text=True,
                               capture_output=True, timeout=timeout)
 
@@ -163,7 +164,7 @@ class WorkerChecks(unittest.TestCase):
         launch = state["launch"]
         self.assertEqual(launch["binary"], str(self.fake))
         self.assertEqual(launch["provider"], "meta")
-        self.assertEqual(launch["model"], module.MODEL)
+        self.assertEqual(launch["model"], MUSE_MODEL)
         self.assertTrue(launch["read_only"])
         self.assertTrue(launch["web"])
         self.assertEqual(launch["output_schema"], str(schema))
@@ -179,7 +180,7 @@ class WorkerChecks(unittest.TestCase):
                 str(self.fake), "exec", "--workspace", str(self.path), "--trust-workspace",
                 "--disable-approval", "--json", "--provider", "meta", "--max-model-steps", "17",
                 "--user-input-auto-resolve", "--prompt-file", str(self.prompt), "--session-id",
-                "2c3db702-57c9-46ba-b2a1-f2a3b1e3e09d", "--model", module.MODEL,
+                "2c3db702-57c9-46ba-b2a1-f2a3b1e3e09d", "--model", MUSE_MODEL,
                 "--reasoning-effort", "xhigh", "--disable-write", "--disable-shell",
                 "--worktree-existing", str(self.path), "-w", "existing", "--worktree-base", "HEAD~1",
                 "--output-schema", str(self.prompt), "--no-session-log"
@@ -188,7 +189,7 @@ class WorkerChecks(unittest.TestCase):
         decoded = launch_config(legacy)
         self.assertEqual(decoded["binary"], str(self.fake.resolve()))
         self.assertEqual(decoded["provider"], "meta")
-        self.assertEqual(decoded["model"], module.MODEL)
+        self.assertEqual(decoded["model"], MUSE_MODEL)
         self.assertTrue(decoded["read_only"])
         self.assertTrue(decoded["web"])
         self.assertEqual(decoded["output_schema"], str(self.prompt))
@@ -210,10 +211,10 @@ class WorkerChecks(unittest.TestCase):
             "id": job, "label": "legacy", "workspace": str(self.path), "log_dir": str(path),
             "prompt_file": str(self.prompt), "command": [str(self.fake), "exec", "--workspace", str(self.path),
             "--provider", "meta", "--max-model-steps", "100", "--prompt-file", str(self.prompt),
-            "--session-id", "2c3db702-57c9-46ba-b2a1-f2a3b1e3e09d", "--model", module.MODEL,
+            "--session-id", "2c3db702-57c9-46ba-b2a1-f2a3b1e3e09d", "--model", MUSE_MODEL,
             "--reasoning-effort", "high"], "status": "idle", "phase": "ready",
             "started_at": time.time(), "steps": 0, "task_failures": 0, "malformed_events": 0,
-            "model": module.MODEL, "reasoning_effort": "high",
+            "model": MUSE_MODEL, "reasoning_effort": "high",
             "muse_session_id": "2c3db702-57c9-46ba-b2a1-f2a3b1e3e09d",
             "reusable": True, "turn": 1
         }
@@ -301,7 +302,7 @@ class WorkerChecks(unittest.TestCase):
         self.assertEqual(state["quota_reset_at"], "2099-10-02T14:51:16Z")
         self.assertIn("Ask the user", result.stdout)
         self.assertIn("no automatic switch", result.stdout)
-        self.assertEqual(state["model"], module.MODEL)
+        self.assertEqual(state["model"], MUSE_MODEL)
         generic = {"task_failures": 0}
         native = {"payload_type": "task.lifecycle.failed",
                   "payload": {"event": {"reason": "API error 429: too many requests"}}}
@@ -344,8 +345,8 @@ class WorkerChecks(unittest.TestCase):
             return {"envelope": {"payload": {"event": dict(kind=kind, **data)}}}
         usage = dict(input_tokens=100, cached_tokens=80, output_tokens=15, reasoning_tokens=10)
         exported = {"events": [record("goal_usage_attribution", usage=usage),
-                               record("model_completed", model=module.MODEL, usage=usage),
-                               record("model_completed", model=module.MODEL,
+                               record("model_completed", model=MUSE_MODEL, usage=usage),
+                               record("model_completed", model=MUSE_MODEL,
                                       usage=dict(input_tokens=50, cached_tokens=0, output_tokens=5))]}
         muse_engine = module.get_engine("muse")
         result = muse_engine.summarize_usage(exported)
@@ -501,7 +502,7 @@ class WorkerChecks(unittest.TestCase):
             self.assertEqual(failed["status"], "failed", mode)
 
         before = set(self.registry.glob("*/state.json"))
-        env = dict(self.env, MUSE_WORKER_BINARY=FIXTURE_WORKER, FIXTURE_MODE="success")
+        env = dict(self.env, FIXTURE_WORKER_BINARY=FIXTURE_WORKER, FIXTURE_MODE="success")
         process = subprocess.Popen([
             FIXTURE_CLI, "open", "--engine", "fixture", "--workspace", str(self.path),
             "--prompt-file", str(self.prompt), "--label", "fixture-reusable"
@@ -652,6 +653,13 @@ class WorkerChecks(unittest.TestCase):
         again = subprocess.run([install], env=env, capture_output=True, text=True)
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assertEqual(len(list((state_home / "muse-subagents/backups").iterdir())), 1)
+
+        # Historical inspection does not require the default Muse adapter to import.
+        (bin_dir / "codex_workers/engines/muse.py").unlink()
+        no_muse = subprocess.run([str(bin_dir / "codex-workers"), "status-line"], env=env,
+                                 cwd=outside, capture_output=True, text=True, timeout=12)
+        self.assertEqual(no_muse.returncode, 0, no_muse.stderr)
+        self.assertIn("Workers:", no_muse.stdout)
 
     def test_install_rejects_symlink_destination(self):
         bin_dir = self.path / "installed-bin"

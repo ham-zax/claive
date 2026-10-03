@@ -1,0 +1,164 @@
+---
+name: subagent-routing
+description: Delegate bounded coding, investigation, or review tasks from Codex to Muse Code workers through the shell. Use when delegation is warranted or the user requests Muse subagents; uses reusable Muse sessions and provider cache usage checks.
+---
+
+# Subagent routing
+
+Muse Code is the main worker. Follow the global AGENTS.md delegation criteria; complete small or tightly coupled tasks directly when delegation would add overhead. The parent owns synthesis, integration, and final verification.
+
+The maintained source is `/home/hamza/repo/codex-muse-workers`. Edit its `bin/` scripts or `skills/subagent-routing/SKILL.md`, then run `install.sh` to refresh the installed copies. Its `reference/global-AGENTS.md` is a snapshot, not a file to install over current global instructions.
+
+## Model and reasoning
+
+Use **only `muse-spark-1.3-contributor`** for Muse workers. The launcher pins this model rather than inheriting another default. Do not substitute a different Muse model/provider or route through agy/OpenCode's historical defaults without explicit fallback authorization below. Their relay copies in `reference/` are archival. Native host subagents require an explicit request.
+
+- **`high`: default for normal implementation, investigation, review, and other substantive work.**
+- **`medium`: trivial work such as generating a commit message.** Do not downgrade normal tasks merely to reduce cost.
+- **`xhigh` or `max`: complex work**, difficult fixes, or consequential reasoning.
+
+The orchestrator can select effort per turn or change an existing worker's future default at any time. Changes apply to the next request; they cannot change an in-flight API call. The launcher defaults to 100 model steps. Set a cap suitable for the assignment, including a higher cap when needed; a step cap is not a monetary budget or timeout.
+
+## Prepare the assignment
+
+Write one narrow task to an absolute scratch prompt-file path. Include:
+
+`mission | inputs | authorized scope | write ownership | required output | stopping condition`
+
+Supply the absolute repository path, relevant files and symbols, existing evidence, constraints, and acceptance criteria. Workers do not automatically inherit the conversation or MCP access. Pass relevant graph findings and coverage gaps when the assignment relies on them.
+
+Tell the worker it is not alone in the codebase: preserve other edits and accommodate them. Restrict writes to its assigned files. Forbid recursive delegation, commits, pushes, and other external writes unless the assignment explicitly authorizes them. Workers may make local, reversible implementation choices; they must report a blocker rather than expand scope or make a consequential decision outside the assignment.
+
+Request a concise report: outcome, files changed, checks with results, supporting evidence, local decisions, uncertainty, blockers, and actual worktree path when isolated. Use exact check commands when known and appropriate to the authorized task. Avoid raw context dumps.
+
+## Launch and observe Muse
+
+Default to `/home/hamza/.local/bin/muse-worker` inside Codex's managed shell tool. The launcher opens a reusable worker and remains alive between related turns, so a yielded shell call is a managed background terminal and appears in the native running-terminal indicator and `/ps`. The installed manager is `/home/hamza/.local/bin/codex-workers`; it invokes Muse with the required flags below, validates JSONL and exit status, and retains private logs under `${XDG_STATE_HOME:-$HOME/.local/state}/codex-workers`. `CODEX_WORKERS_DIR` can select another absolute registry directory. The custom dashboard and tmux pane are optional additional views.
+
+```bash
+exec /home/hamza/.local/bin/muse-worker \
+  --workspace "$task_workspace" \
+  --prompt-file "$task_prompt" \
+  --label "Implement assigned feature" \
+  --reasoning-effort high \
+  --max-model-steps 100
+```
+
+For parallel writers add `--worktree` (the manager translates it to `-w create`); when reopening an isolated lane, use `--worktree-existing /absolute/worktree` instead; `--worktree-base` selects a base. For enforced read-only workers add `--read-only` (both write and shell are disabled). Web tools are disabled unless `--web` is supplied. `--model` accepts only the pinned model. `--output-schema` is forwarded. Reusable workers require session logging; `--no-session-log` is rejected by this launcher. `--provider echo` is for local transport checks, not evidence that the live model works.
+
+Use `exec_command` with a short initial `yield_time_ms` (for example 1000). A returned `session_id` means the shell command is still running: retain it and use `write_stdin` to collect output and final exit status. Independent workers can each have their own managed session; shell yielding lets the parent continue working without detaching the worker. After a turn, the reusable worker remains idle and available in the managed terminal until closed. An idle supervisor makes no model requests.
+
+The shell session ID and the 12-character worker ID printed by `muse-worker` identify different objects; the retained Muse session UUID is a third identifier. Report both when a session is yielded. Keep ownership through the related task chain and final closure. Do not append `&`, use `nohup`/`disown`, or replace the default with `codex-workers start`: those detach the worker from Codex's managed terminal. `start` is available for deliberately detached jobs and returns immediately; such jobs remain visible in the registry dashboard but not in Codex's terminal indicator.
+
+For cancellation use `codex-workers cancel WORKER_ID`, then collect the managed session's final output. Forcibly killing a terminal can bypass supervisor cleanup; if interrupted, inspect the registry and stop any surviving worker. Use:
+
+```text
+codex-workers watch                 # live view; Ctrl-C closes only the view
+codex-workers list                 # active jobs and recent results
+codex-workers show ID --json       # status, progress, exit code, log paths
+codex-workers logs ID              # recent JSONL events
+codex-workers logs ID --stderr     # diagnostic output
+codex-workers wait ID              # wait for assigned turns; idle means ready, not closed
+codex-workers followup ID --prompt-file /absolute/next.md --reasoning-effort xhigh
+codex-workers effort ID --reasoning-effort max # future default; current call unchanged
+codex-workers usage ID             # retained session provider token/cache counters
+codex-workers close ID             # drain queued turns, close supervisor, retain history
+codex-workers cancel ID            # stop the worker process group
+codex-workers status-line          # one-line counts for a shell/status bar
+codex-with-workers [codex options] # Codex + live pane + tmux status bar
+```
+
+Report the task, worker ID, and managed shell session ID at launch and report its outcome at completion. Codex's terminal view tracks the managed command and its output; it does not read the registry's detailed Muse lifecycle. The optional custom monitor shows tracked Muse jobs only; raw Muse, agy, native agents, and OpenCode invocations are not automatically discovered. A completed CLI run does not establish that the assigned work passed verification. Task failures remain visible as warnings even when the run completes. Unexpected supervisor exits are shown as interrupted, not successful. Closing the monitor does not cancel workers; end jobs explicitly when their purpose ends.
+
+The manager keeps Codex's existing internal status-line configuration intact. Its tmux view adds an outer status bar and live pane in a separate session; it does not change other tmux sessions. No always-running monitor daemon is installed.
+
+### Underlying Muse flags
+
+Always set all four options:
+
+```text
+--workspace <absolute-repo-path>
+--trust-workspace
+--disable-approval
+--json
+```
+
+Prefer `--prompt-file` over a positional prompt for more than a few lines. Write prompt contents with a file tool or a safely quoted literal heredoc; never interpolate untrusted text into shell code. Quote every path expansion. Capture stdout JSONL and stderr separately in scratch files.
+
+Use the tracked launcher above for routine work. If a task requires a Muse option the manager does not expose, extend the manager within authorized scope or report the limitation; do not silently bypass monitoring. This underlying invocation documents the manager's contract. It assumes `task_workspace`, `task_prompt`, and `task_logs` already contain absolute paths and `task_session` is the retained UUID for this lane, the prompt exists, and the log directory exists:
+
+```bash
+if /home/hamza/.local/bin/muse exec \
+  --workspace "$task_workspace" \
+  --trust-workspace \
+  --disable-approval \
+  --json \
+  --model muse-spark-1.3-contributor \
+  --session-id "$task_session" \
+  --reasoning-effort high \
+  --max-model-steps 100 \
+  --user-input-auto-resolve \
+  --prompt-file "$task_prompt" \
+  > "$task_logs/events.jsonl" 2> "$task_logs/stderr.log"
+then
+  task_rc=0
+else
+  task_rc=$?
+fi
+```
+
+- Pin `--model muse-spark-1.3-contributor`. Use `high` for normal tasks, `medium` for trivial tasks, and `xhigh`/`max` for complex work; the orchestrator chooses per turn.
+- Set `--max-model-steps` to fit the assignment; the default 100 is not a required ceiling.
+- `--user-input-auto-resolve` cancels interactive questions automatically. A worker that needs an answer must report a blocker; cancellation is not authorization.
+- For enforced read-only work add **both** `--disable-write --disable-shell`. The first disables only non-shell filesystem writes; leaving shell enabled permits writes through commands. Run any necessary verification commands in the parent or an isolated workspace.
+- Add `--disable-web-tools` when web access is unnecessary.
+- `--output-schema /absolute/schema.json` shapes the final answer for the meta provider; stdout remains a JSONL event stream.
+- Preserve session logging for related follow-ups. `--no-session-log` disables durable history and local messaging, and is allowed only for deliberate single-turn runs.
+
+## Reuse and prompt caching
+
+Keep one worker and durable Muse session for a related task chain. Keep it idle when a specific related follow-up is expected in the active workflow. If no further use is planned, close it and collect the managed terminal output; retained history can be reopened later. Do not leave an idle worker running indefinitely for hypothetical future tasks. Read `show ID --json` for `muse_session_id`; send a narrow `followup` instead of launching a new session. A per-turn effort override does not change the future default; `effort ID` does. Follow-ups can also override `--max-model-steps`. The worker appends JSONL/stderr logs and keeps each answer in `turn-000N.txt`. Queued follow-ups run sequentially. `close ID` finishes assigned turns before ending; `cancel ID` stops immediately. After closure, resuming the same lane with `--session-id UUID` restores retained history; preserve workspace, worktree, and tool policy. For an isolated lane add `--worktree-existing` using `actual_workspace` from its saved state; do not create a new worktree. Do not retire solely after two or four tasks. Start fresh for unrelated work or an actual context/quality limit.
+
+Each underlying `muse exec` child exits after its turn; the supervisor stays alive and the same UUID reloads history next turn. This preserves conversation context across process exits. It is not a persistent model connection or proof of a cache hit.
+
+Meta [prompt caching](https://dev.meta.ai/docs/prompt-caching) automatically reuses matching token prefixes on the server. Terminal exit does not itself clear that cache; eviction and inactivity can still cause misses. Keeping an idle process open cannot keep a server entry warm. Preserve stable leading instructions, tools, and history; put changing task details last, as in the [cookbook](https://dev.meta.ai/docs/cookbook/prompt-caching). Changing rules, model, reasoning, or compaction may change the rendered prefix; preserve the session when adjusting effort and measure the result rather than promising a hit.
+
+Use `codex-workers usage ID` (or `--json`) for provider-reported usage from Muse's retained session export. It counts each `model_completed` once, excluding repeated attribution records; no exposed usage means unknown, not zero. `cached_tokens > 0` proves reuse, and its ratio to reported input measures the observed hit rate. Totals include all recorded model calls in the retained session, including internal calls. These are accounting counters, not current context occupancy or an invoice; see [token usage](https://dev.meta.ai/docs/token-counting#usage). Do not add cached tokens again to input totals.
+
+The API optionally exposes `prompt_cache_key` and Responses retention hints; this installed Muse exec CLI exposes neither. Do not invent CLI flags, set a new per-session cache key, change endpoints, or bypass Muse authentication to enable them. Automatic caching needs no extra flag. The current cache price and contributor quota effects are not established by a session UUID or these counters.
+
+## Isolation and limits
+
+- Concurrent Muse writers must each add `-w create`; read-only workers may share a workspace. File ownership must remain disjoint even when worktrees are isolated.
+- Worktree creation defaults to `HEAD`. Uncommitted parent edits will not automatically be present. Choose a suitable `--worktree-base` or explicitly transfer the required patch into the worker's worktree before dependent work. Have the worker report its actual worktree path.
+- Give other shell workers their own isolated worktrees before concurrent writes; their relay scripts do not create them.
+- Run heavy builds or test suites one at a time because this WSL environment has limited shared RAM. Independent light workers may run concurrently.
+- The standard flags disable approval prompts but keep Muse's filesystem/network sandbox enabled; network defaults to `proxy-only`. Diagnose access failures from stderr and terminal events. Do not silently add `--yolo` or change sandbox permissions. Any exception must fit the task's authorization and host policy.
+- Use managed shell sessions for long runs, retain their IDs, and poll with short waits while keeping the user informed. A yielded command is still running. Close workers when their related task chain ends and collect the managed terminal output; retain isolated changes until integration is complete.
+
+## Validate and integrate
+
+For a reusable worker, use `wait ID` to obtain the assigned turns' outcome without ending its session. On final closure, collect the managed process exit status too. For a direct single-turn invocation, wait for process completion and inspect `task_rc`. A non-zero exit code is failure even if an answer appeared. Do not hide failures behind a pipeline that only reports the parser's exit code.
+
+Parse terminal events, not the last physical line or a partial output delta. The observed Muse schema uses `payload_type` beginning with `run.terminal.`, with status in `payload.terminal` and final answer in `payload.text`:
+
+```bash
+jq -es '
+  [.[] | select((.payload_type? // "") | startswith("run.terminal."))]
+  | last
+  | select(.payload.terminal == "completed")
+  | .payload
+' "$task_logs/events.jsonl"
+```
+
+Require both exit code zero and a completed terminal event. Missing, malformed, failed, or cancelled results are failures. If schema changes, inspect the local event shape before changing the parser. A completed run can still report a blocker or incomplete work; evaluate the answer against the acceptance criteria. Inspect tool/task failures and stderr even when the terminal event reports completion.
+
+Verify consequential claims against source. Inspect tracked and untracked changes in the actual worker workspace, preserve unrelated edits, and perform checks appropriate to the changed behavior. For isolated workers, review and integrate only authorized changes into the parent workspace, then verify the integrated result. A worker's report alone is not proof of completion.
+
+On failure, retry only with a changed hypothesis or clearer assignment. Report access or backend limitations honestly. Do not silently relax restrictions, change providers, or delegate recursively to get around a failure.
+
+## Five-hour quota and fallback
+
+When Muse explicitly reports `Subscription quota exhausted`, stop sending assignments against that quota. Report its reset time if present and ask Hamza whether to wait for reset or authorize a specific available fallback subagent/model for the affected lane. Explain that this routing policy requires his choice before changing the worker/model. Keep doing independent authorized work while awaiting the answer. Do not silently switch, run repeated same-quota retries, or treat every generic 429 as the five-hour subscription limit.
+
+The manager records `quota_exhausted`, `quota_reset_at` when provided, and `fallback_requires_user_approval`; `show`/`wait` print the fallback notice. It never launches an alternate provider. After explicit authorization, preserve the original assignment's scope, write ownership, isolation, monitoring, and result checks with the chosen worker. That exception does not alter Muse's pinned model or high normal default. Do not offer the broken OpenCode relay until repaired and verified. Close the Muse supervisor when no further use is planned; retained history can be resumed after reset.

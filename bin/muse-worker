@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Keep a Muse worker available for follow-ups with visible progress.
+set -euo pipefail
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+exec "$script_dir/codex-workers" open "$@"

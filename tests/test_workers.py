@@ -347,15 +347,33 @@ class WorkerChecks(unittest.TestCase):
                                record("model_completed", model=module.MODEL, usage=usage),
                                record("model_completed", model=module.MODEL,
                                       usage=dict(input_tokens=50, cached_tokens=0, output_tokens=5))]}
-        result = module.summarize_usage(exported)
+        muse_engine = module.get_engine("muse")
+        result = muse_engine.summarize_usage(exported)
         self.assertEqual(result["model_calls"], 2)
         self.assertEqual(result["totals"]["input_tokens"], 150)
         self.assertEqual(result["totals"]["cached_tokens"], 80)
         self.assertAlmostEqual(result["cache_hit_ratio"], 80 / 150)
-        self.assertEqual(module.summarize_usage({"events": []})["totals"], {})
-        incomplete = module.summarize_usage({"events": [record("model_completed", usage={"input_tokens": 10})]})
+        self.assertEqual(muse_engine.summarize_usage({"events": []})["totals"], {})
+        incomplete = muse_engine.summarize_usage({"events": [record("model_completed", usage={"input_tokens": 10})]})
         self.assertIsNone(incomplete["cache_hit_ratio"])
         self.assertNotIn("cached_tokens", incomplete["totals"])
+
+    def test_historical_inspection_works_without_muse_binary(self):
+        result, state = self.launch()
+        self.assertEqual(result.returncode, 0)
+        path = self.registry / state["id"]
+        saved = json.loads((path / "state.json").read_text())
+        saved["launch"]["binary"] = str(self.path / "missing-muse")
+        module.save(path / "state.json", saved)
+
+        for args in (("list", "--json"), ("show", state["id"], "--json"),
+                     ("logs", state["id"]), ("status-line",), ("watch", "--once", "--no-color")):
+            checked = self.cli(*args)
+            self.assertEqual(checked.returncode, 0, f"{args}: {checked.stderr}")
+
+        usage = self.cli("usage", state["id"])
+        self.assertNotEqual(usage.returncode, 0)
+        self.assertIn("Muse engine is unavailable", usage.stderr)
 
     def test_success_and_safe_arguments(self):
         result, state = self.launch(extra=("--read-only", "--worktree", "--worktree-base", "HEAD"))
@@ -626,7 +644,7 @@ class WorkerChecks(unittest.TestCase):
         installed = subprocess.run([str(bin_dir / "codex-workers"), "status-line"], env=env,
                                    cwd=outside, capture_output=True, text=True, timeout=12)
         self.assertEqual(installed.returncode, 0, installed.stderr)
-        self.assertIn("Muse:", installed.stdout)
+        self.assertIn("Workers:", installed.stdout)
         backups = list((state_home / "muse-subagents/backups").glob("*/muse-worker"))
         self.assertEqual(len(backups), 1)
         self.assertEqual(backups[0].read_text(), "previous launcher\n")
@@ -687,7 +705,7 @@ class WorkerChecks(unittest.TestCase):
                 self.assertIn(str(self.registry), right)
                 time.sleep(0.3)
                 captured = subprocess.check_output(["tmux", "capture-pane", "-p", "-t", panes[1]], text=True)
-                self.assertIn("Muse:", captured)
+                self.assertIn("Workers:", captured)
             finally:
                 subprocess.run(["tmux", "kill-server"], check=False, stderr=subprocess.DEVNULL)
 

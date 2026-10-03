@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Track Muse workers and display their progress beside Codex. No dependencies."""
+"""Track reusable coding workers and display their progress beside Codex. No dependencies."""
 
 import argparse
 import datetime
@@ -145,7 +145,7 @@ def summary(records):
     failed = sum(item["status"] in {"failed", "interrupted"} for item in records)
     stopped = sum(item["status"] == "cancelled" for item in records)
     idle_text = f" | {idle} idle" if idle else ""
-    return f"Muse: {running} running{idle_text} | {done} done | {failed} failed | {stopped} stopped"
+    return f"Workers: {running} running{idle_text} | {done} done | {failed} failed | {stopped} stopped"
 
 
 def terminal_size():
@@ -215,7 +215,7 @@ def render(records, color=False, height=None):
             idle = duration(time.time() - state.get("last_activity", state["started_at"]))
             lines.append(f"  {clean(state.get('phase', 'starting'))} | last event {idle} ago"[:width])
     if not records:
-        lines.append("No tracked workers yet. Muse jobs launched with muse-worker appear here.")
+        lines.append("No tracked workers yet. Jobs launched through codex-workers appear here.")
     lines.extend([f"{hidden} more: codex-workers list" if hidden else "Active + 20 recent results; done = CLI completed, verify the work.",
                   "codex-workers: show ID | logs ID | cancel ID | wait ID"])
     return "\n".join(lines)
@@ -379,7 +379,7 @@ def outcome_code(state):
 
 
 def reusable_worker(job_id):
-    """Keep one supervisor and durable Muse session available between turns."""
+    """Keep one supervisor and durable worker session available between turns."""
     path = job_path(job_id)
     control = {"stopping": False}
     while True:
@@ -392,7 +392,7 @@ def reusable_worker(job_id):
         state.update(status="idle", phase=f"turn {state['turn']} {state['last_turn_status']}; ready for follow-up")
         save(path / "state.json", state)
         print(f"Worker {job_id}: turn {state['turn']} {state['last_turn_status']}; "
-              f"idle in Muse session {worker_session_id(state)}", flush=True)
+              f"idle in session {worker_session_id(state)}", flush=True)
         report(state)
         while not control["stopping"]:
             pending = sorted((path / "requests").glob("*.json"))
@@ -436,7 +436,7 @@ def reusable_worker(job_id):
             if (path / "close.request").exists():
                 state.update(status=state["last_turn_status"], phase="session closed", ended_at=time.time())
                 save(path / "state.json", state)
-                print(f"Worker {job_id} closed; durable Muse session {worker_session_id(state)} retained", flush=True)
+                print(f"Worker {job_id} closed; durable session {worker_session_id(state)} retained", flush=True)
                 return outcome_code(state)
             time.sleep(0.2)
         if control["stopping"]:
@@ -500,58 +500,19 @@ def report(state):
     print(f"{state['id']} {state['status']} | {clean(state['label'])}")
     session = worker_session_id(state)
     if session:
-        print(f"Muse session: {session} | {state['model']} | {state['reasoning_effort']}")
+        print(f"Session: {session} | {state.get('engine', 'muse')} | {state['model']} | {state['reasoning_effort']}")
     if state.get("error"):
         print(clean(state["error"]))
     if state.get("task_failures"):
         print(f"Task failures reported: {state['task_failures']} (inspect logs before accepting work)")
     if state.get("quota_exhausted"):
-        print(f"Muse subscription quota exhausted. Reset: {state.get('quota_reset_at', 'not reported')}.")
+        print(f"Worker engine quota exhausted ({state.get('engine', 'muse')}). Reset: {state.get('quota_reset_at', 'not reported')}.")
         print("Ask the user to approve a specific fallback subagent/model or wait for reset; no automatic switch.")
     print(f"Logs: {path}")
     result = path / "result.txt"
     if result.exists():
         print(result.read_text())
     sys.stdout.flush()
-
-
-def summarize_usage(export):
-    """Read model usage once per completion; attribution events repeat these totals."""
-    calls = []
-    for item in export.get("events", []):
-        envelope = item.get("envelope", {})
-        event = envelope.get("payload", {}).get("event", {})
-        if event.get("kind") != "model_completed":
-            continue
-        usage = event.get("usage")
-        if not isinstance(usage, dict):
-            continue
-        calls.append(dict(model=event.get("model"), **{
-            key: value for key, value in usage.items()
-            if key in {"input_tokens", "output_tokens", "cached_tokens", "reasoning_tokens",
-                       "cache_read_tokens", "cache_write_tokens"}
-            and isinstance(value, int) and not isinstance(value, bool) and value >= 0}))
-    totals = {key: sum(call[key] for call in calls if key in call)
-              for key in {"input_tokens", "output_tokens", "cached_tokens", "reasoning_tokens"}
-              if any(key in call for call in calls)}
-    complete = bool(calls) and all("input_tokens" in c and "cached_tokens" in c for c in calls)
-    inputs = totals.get("input_tokens", 0)
-    ratio = totals["cached_tokens"] / inputs if complete and inputs else None
-    return dict(model_calls=len(calls), calls=calls, totals=totals, cache_hit_ratio=ratio)
-
-
-def session_usage(state):
-    session = worker_session_id(state)
-    if not session or "--no-session-log" in state["command"]:
-        raise ValueError("cache usage needs a retained Muse session log")
-    with tempfile.TemporaryDirectory(prefix="muse-usage-") as temporary:
-        target = Path(temporary) / "session.json"
-        result = subprocess.run([MUSE, "export", "--session", session,
-                                 "--out", str(target), "--redacted"],
-                                capture_output=True, text=True, timeout=15)
-        if result.returncode:
-            raise ValueError("Muse usage export failed: " + clean(result.stderr))
-        return summarize_usage(json.loads(target.read_text()))
 
 
 def tmux_view(arguments):
@@ -596,8 +557,8 @@ def parser():
     result = argparse.ArgumentParser(description=__doc__)
     commands = result.add_subparsers(dest="action", required=True)
     for action in ("run", "start", "open"):
-        descriptions = {"run": "run one tracked Muse turn", "start": "detach one tracked Muse turn",
-                        "open": "keep a Muse worker available for related follow-up turns"}
+        descriptions = {"run": "run one tracked worker turn", "start": "detach one tracked worker turn",
+                        "open": "keep a worker available for related follow-up turns"}
         launch = commands.add_parser(action, help=descriptions[action])
         launch.add_argument("--workspace", required=True)
         launch.add_argument("--prompt-file", required=True)
@@ -610,9 +571,9 @@ def parser():
         isolation.add_argument("--worktree", action="store_true")
         isolation.add_argument("--worktree-existing", help="resume a lane in its existing absolute worktree path")
         launch.add_argument("--worktree-base")
-        launch.add_argument("--web", action="store_true", help="enable Muse web tools")
+        launch.add_argument("--web", action="store_true", help="enable engine web tools")
         launch.add_argument("--model", default=MODEL, choices=[MODEL])
-        launch.add_argument("--session-id", help="reuse this durable Muse session UUID with the same workspace and policy")
+        launch.add_argument("--session-id", help="reuse this durable worker session UUID with the same workspace and policy")
         launch.add_argument("--output-schema")
         launch.add_argument("--no-session-log", action="store_true")
         launch.add_argument("--provider", choices=["meta", "echo"])
@@ -694,7 +655,8 @@ def main(launcher=None):
             state["next_turn_defaults"] = json.loads((job_path(args.id) / "policy.json").read_text())
         print(json.dumps(state, indent=2)) if args.json else report(state)
     elif args.action == "usage":
-        usage = session_usage(load(job_path(args.id)))
+        state = load(job_path(args.id))
+        usage = get_engine(state.get("engine", "muse")).session_usage(state)
         if args.json:
             print(json.dumps(usage, indent=2))
         elif not usage["model_calls"]:
@@ -740,7 +702,7 @@ def main(launcher=None):
         save(path / "requests" / request, dict(prompt_file=str(prompt), label=args.label,
                                                reasoning_effort=args.reasoning_effort,
                                                max_model_steps=args.max_model_steps))
-        print(f"Follow-up queued for {args.id} in Muse session {worker_session_id(state)}")
+        print(f"Follow-up queued for {args.id} in session {worker_session_id(state)}")
     elif args.action == "effort":
         path = job_path(args.id)
         state = load(path)

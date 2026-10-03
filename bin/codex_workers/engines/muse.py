@@ -1,9 +1,13 @@
 """Muse execution engine."""
+import json
 import os
 from pathlib import Path
 import re
+import subprocess
+import tempfile
 
 from codex_workers.engine import WorkerEngine
+from codex_workers.state import launch_config, session_id
 
 MUSE_MODEL = "muse-spark-1.3-contributor"
 
@@ -36,6 +40,53 @@ class MuseEngine(WorkerEngine):
             path = Path(schema)
             if not path.is_absolute() or not path.is_file():
                 raise ValueError("--output-schema must be an existing absolute file")
+
+    @staticmethod
+    def summarize_usage(export):
+        calls = []
+        for item in export.get("events", []):
+            envelope = item.get("envelope", {})
+            event = envelope.get("payload", {}).get("event", {})
+            if event.get("kind") != "model_completed":
+                continue
+            usage = event.get("usage")
+            if not isinstance(usage, dict):
+                continue
+            calls.append(dict(model=event.get("model"), **{
+                key: value for key, value in usage.items()
+                if key in {"input_tokens", "output_tokens", "cached_tokens", "reasoning_tokens",
+                           "cache_read_tokens", "cache_write_tokens"}
+                and isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            }))
+        totals = {
+            key: sum(call[key] for call in calls if key in call)
+            for key in {"input_tokens", "output_tokens", "cached_tokens", "reasoning_tokens"}
+            if any(key in call for call in calls)
+        }
+        complete = bool(calls) and all("input_tokens" in call and "cached_tokens" in call for call in calls)
+        inputs = totals.get("input_tokens", 0)
+        ratio = totals["cached_tokens"] / inputs if complete and inputs else None
+        return dict(model_calls=len(calls), calls=calls, totals=totals, cache_hit_ratio=ratio)
+
+    def session_usage(self, state):
+        session = session_id(state)
+        launch = launch_config(state)
+        if not session or not launch.get("session_logging", True):
+            raise ValueError("cache usage needs a retained Muse session log")
+        binary = Path(launch["binary"])
+        if not binary.is_absolute() or not os.access(binary, os.X_OK):
+            raise ValueError("Muse engine is unavailable; stored job metadata and logs remain accessible")
+        with tempfile.TemporaryDirectory(prefix="muse-usage-") as temporary:
+            target = Path(temporary) / "session.json"
+            result = subprocess.run(
+                [str(binary), "export", "--session", session, "--out", str(target), "--redacted"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode:
+                raise ValueError("Muse usage export failed: " + "".join(
+                    char for char in result.stderr if char.isprintable()
+                ))
+            return self.summarize_usage(json.loads(target.read_text()))
 
     def discover_workspace(self, command, stderr_text):
         if "-w" not in command:

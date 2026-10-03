@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Install the worker tools and skill, backing up any changed destination files.
+# Install the worker tools, Python package, and skill, backing up changed destinations.
 set -euo pipefail
 
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 bin_dir=${MUSE_SUBAGENTS_BIN_DIR:-$HOME/.local/bin}
 skill_dir=${CODEX_HOME:-$HOME/.codex}/skills/subagent-routing
 backup_base=${XDG_STATE_HOME:-$HOME/.local/state}/muse-subagents/backups
+package_source=$source_dir/bin/codex_workers
+package_target=$bin_dir/codex_workers
 dry_run=false
 case ${1:-} in
   --dry-run) dry_run=true ;;
@@ -22,6 +24,12 @@ sources=("$source_dir/bin/codex-workers" "$source_dir/bin/muse-worker"
 targets=("$bin_dir/codex-workers" "$bin_dir/muse-worker"
          "$bin_dir/codex-with-workers" "$skill_dir/SKILL.md")
 modes=(755 755 755 644)
+
+[[ -d $package_source ]] || { echo "Missing source package: $package_source" >&2; exit 1; }
+if [[ -L $package_target || ( -e $package_target && ! -d $package_target ) ]]; then
+  echo "Refusing to replace a symlink or non-directory: $package_target" >&2
+  exit 1
+fi
 for index in "${!sources[@]}"; do
   [[ -f ${sources[index]} ]] || { echo "Missing source: ${sources[index]}" >&2; exit 1; }
   target=${targets[index]}
@@ -32,6 +40,37 @@ for index in "${!sources[@]}"; do
 done
 
 backup_dir=''
+ensure_backup_dir() {
+  if [[ -z $backup_dir ]]; then
+    mkdir -p -- "$backup_base"
+    backup_dir=$(mktemp -d "$backup_base/$(date +%Y%m%d-%H%M%S).XXXXXX")
+  fi
+}
+
+# Install the package before the launcher that imports it.
+if [[ -d $package_target ]] &&
+   diff -qr --exclude='__pycache__' "$package_source" "$package_target" >/dev/null 2>&1; then
+  echo "Already current: $package_target"
+else
+  if "$dry_run"; then
+    echo "Would install package: $package_source -> $package_target"
+  else
+    if [[ -d $package_target ]]; then
+      ensure_backup_dir
+      cp -a -- "$package_target" "$backup_dir/codex_workers"
+    fi
+    mkdir -p -- "$bin_dir"
+    package_stage=$(mktemp -d "$bin_dir/.codex_workers.install.XXXXXX")
+    cp -a -- "$package_source/." "$package_stage/"
+    find "$package_stage" -type d -name __pycache__ -prune -exec rm -rf -- {} +
+    find "$package_stage" -type d -exec chmod 755 -- {} +
+    find "$package_stage" -type f -exec chmod 644 -- {} +
+    rm -rf -- "$package_target"
+    mv -- "$package_stage" "$package_target"
+    echo "Installed package: $package_target"
+  fi
+fi
+
 for index in "${!sources[@]}"; do
   source_file=${sources[index]}
   target=${targets[index]}
@@ -45,10 +84,7 @@ for index in "${!sources[@]}"; do
     continue
   fi
   if [[ -f $target ]]; then
-    if [[ -z $backup_dir ]]; then
-      mkdir -p -- "$backup_base"
-      backup_dir=$(mktemp -d "$backup_base/$(date +%Y%m%d-%H%M%S).XXXXXX")
-    fi
+    ensure_backup_dir
     cp -p -- "$target" "$backup_dir/$(basename -- "$target")"
   fi
   mkdir -p -- "$(dirname -- "$target")"

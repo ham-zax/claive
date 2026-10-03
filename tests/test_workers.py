@@ -13,9 +13,11 @@ from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CLI = str(REPO_ROOT / "bin/codex-workers")
-loader = importlib.machinery.SourceFileLoader("worker_manager", CLI)
+MODULE_CLI = str(REPO_ROOT / "bin/codex_workers/cli.py")
+loader = importlib.machinery.SourceFileLoader("worker_manager", MODULE_CLI)
 module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
 loader.exec_module(module)
+module.set_launcher_path(CLI)
 
 FAKE = """#!/usr/bin/python3
 import json, os, signal, subprocess, sys, time
@@ -394,6 +396,14 @@ class WorkerChecks(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual((bin_dir / "codex-workers").read_bytes(), Path(CLI).read_bytes())
         self.assertEqual((bin_dir / "codex-workers").stat().st_mode & 0o777, 0o755)
+        self.assertEqual((bin_dir / "codex_workers/cli.py").read_bytes(),
+                         (REPO_ROOT / "bin/codex_workers/cli.py").read_bytes())
+        outside = self.path / "outside"
+        outside.mkdir()
+        installed = subprocess.run([str(bin_dir / "codex-workers"), "status-line"], env=env,
+                                   cwd=outside, capture_output=True, text=True, timeout=12)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.assertIn("Muse:", installed.stdout)
         backups = list((state_home / "muse-subagents/backups").glob("*/muse-worker"))
         self.assertEqual(len(backups), 1)
         self.assertEqual(backups[0].read_text(), "previous launcher\n")

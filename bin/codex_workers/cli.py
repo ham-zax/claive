@@ -333,11 +333,11 @@ def supervise(job_id, control=None):
                     state["malformed_events"] += 1
             state["exit_code"] = child.wait()
             child.stdout.close()
-        if "-w" in state["command"] and state["command"][state["command"].index("-w") + 1] == "create":
-            matches = re.findall(r"^muse: workspace root: (.+)$", (path / "stderr.log").read_text(), re.M)
-            actual = matches[-1].rsplit(" (", 1)[0] if matches else ""
-            if actual and Path(actual).is_dir():
-                state["actual_workspace"] = actual
+        actual = engine.discover_workspace(
+            state["command"], (path / "stderr.log").read_text(errors="replace")
+        )
+        if actual:
+            state["actual_workspace"] = actual
         answer = state.pop("answer", "")
         (path / "result.txt").write_text(answer if isinstance(answer, str) else json.dumps(answer))
         if state.get("reusable"):

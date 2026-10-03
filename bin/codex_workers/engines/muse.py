@@ -37,6 +37,18 @@ class MuseEngine(WorkerEngine):
             if not path.is_absolute() or not path.is_file():
                 raise ValueError("--output-schema must be an existing absolute file")
 
+    def discover_workspace(self, command, stderr_text):
+        if "-w" not in command:
+            return None
+        try:
+            if command[command.index("-w") + 1] != "create":
+                return None
+        except (ValueError, IndexError):
+            return None
+        matches = re.findall(r"^muse: workspace root: (.+)$", stderr_text, re.M)
+        actual = matches[-1].rsplit(" (", 1)[0] if matches else ""
+        return actual if actual and Path(actual).is_dir() else None
+
     def normalize_event(self, event):
         payload = event.get("payload", {})
         kind = event.get("payload_type", "")

@@ -107,23 +107,23 @@
 - Real `git worktree list --porcelain` assertions.
 - Installed Muse echo transport checks when available; skip clearly when unavailable.
 
-## Stage 6 — Generic workspace ownership
+## Stage 6 — Encapsulate Muse worktree handling
 
 **Files**
-- Create: `bin/codex_workers/workspace.py`
 - Modify: `bin/codex_workers/cli.py`
 - Modify: `bin/codex_workers/engines/muse.py`
-- Modify: tests.
+- Modify: tests as needed.
 
 **Changes**
-- Move worktree create/existing resolution into the generic workspace component.
-- Supply Muse an already-resolved workspace.
-- Remove Muse stderr worktree discovery only after parity is established.
+- Keep worktree create/cleanup owned by Muse because characterization shows Muse removes its linked worktree and session branch when each `muse exec` exits.
+- Move Muse stderr workspace discovery behind `MuseEngine`.
+- Remove Muse path/branch parsing assumptions from generic supervision.
+- Defer manager-owned persistent worktrees to a separate behavior-changing plan.
 
 **Verification**
-- Stage 5 characterization tests continue passing.
-- Follow-ups reuse exactly the same worktree.
-- Failed creation leaves the same observable state as before.
+- Stage 5 real-Git characterization remains green.
+- Existing simulated follow-up behavior remains unchanged.
+- Generic core contains no `muse: workspace root` parsing.
 
 ## Stage 7 — Engine usage and neutral presentation
 

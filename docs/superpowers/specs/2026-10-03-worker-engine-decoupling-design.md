@@ -14,7 +14,7 @@ This design intentionally excludes Pi implementation. Pi will be a separate foll
 - Make Muse one execution engine behind a small engine contract.
 - Rebuild each turn command from structured configuration instead of mutating persisted argv arrays.
 - Keep existing v1 worker state readable and controllable after upgrade.
-- Move worktree ownership only after its current behavior has been characterized with real Git worktrees.
+- Characterize Muse worktree ownership with real Git worktrees before deciding whether ownership can move without changing behavior.
 - Keep every intermediate commit installable; no commit may deploy a launcher whose imported modules were not installed with it.
 - Prove the engine boundary with a non-Muse test engine that exercises the same lifecycle core.
 
@@ -93,7 +93,6 @@ bin/
     core.py
     state.py
     engine.py
-    workspace.py
     compat/
       __init__.py
       v1_muse.py
@@ -370,13 +369,11 @@ Where the installed Muse echo transport can create the real worktree, use it. Te
 
 The existing fake test that creates an ordinary directory and prints a simulated Muse workspace path is insufficient as characterization evidence.
 
-### Phase 2: Move ownership
+### Phase 2: Keep ownership engine-specific in this refactor
 
-Only after the characterization suite exists does `workspace.py` take responsibility for worktree creation/reuse.
+Characterization on Muse 1.4.2 shows that `-w create` creates a genuine linked Git worktree under `.muse/worktrees`, on branch `muse/session-<session UUID>`, based at the requested ref, and removes both the worktree and branch when `muse exec` exits. Moving creation into the generic core would therefore also change cleanup/lifetime semantics.
 
-The new implementation must preserve the characterized behavior. Muse then receives an already-resolved workspace and no longer owns worktree creation.
-
-The migration removes Muse stderr parsing for `actual_workspace` only after parity tests pass.
+This refactor keeps creation and cleanup owned by Muse. Muse-specific workspace discovery moves behind `MuseEngine`, so generic supervision no longer parses Muse stderr or assumes Muse worktree naming. A future isolation redesign may intentionally introduce manager-owned persistent worktrees as a separate behavior change.
 
 ## Usage Accounting
 
@@ -472,12 +469,12 @@ No commit after module introduction may require running from the source checkout
 - capture current base/path/branch/reuse/failure/retention semantics;
 - do not change production worktree ownership in this commit.
 
-### 6. Generic workspace ownership
+### 6. Encapsulate Muse worktree handling
 
-- introduce generic workspace isolation implementation;
-- move worktree creation/reuse to `workspace.py`;
-- preserve characterization behavior;
-- remove Muse stderr worktree discovery after parity is established.
+- keep Muse responsible for worktree create/cleanup;
+- move Muse stderr workspace discovery behind `MuseEngine`;
+- keep generic supervision unaware of Muse worktree paths/branch naming;
+- preserve current observable cleanup behavior.
 
 ### 7. Engine-specific usage and neutral presentation
 
@@ -507,8 +504,8 @@ The refactor is complete when all of the following are true:
 5. Generic supervision contains no Muse event names, Muse CLI argument parsing, Muse quota-string parsing, or Muse export logic.
 6. A test-only non-Muse engine passes launch, reusable follow-up, completion, failure and cancellation lifecycle tests through the same core.
 7. Outcome precedence matches the baseline: successful exit + completed terminal + no malformed events is required; task warnings remain separate.
-8. Real Git characterization exists before worktree ownership moves.
-9. Generic workspace creation preserves characterized Muse worktree semantics.
+8. Real Git characterization documents Muse worktree base, branch, path and cleanup semantics.
+9. Generic supervision contains no Muse worktree stderr/path parsing; worktree lifecycle remains engine-owned in this refactor.
 10. Historical `list/show/logs/watch/status-line` remain usable when Muse execution is unavailable.
 11. Removing the Muse execution adapter does not break generic lifecycle tests or historical-state inspection.
 12. Adding a future Pi engine should require an engine adapter, registration and Pi-specific tests rather than modifications to generic lifecycle orchestration.
@@ -522,7 +519,7 @@ Keep verification proportional to the risk of each stage rather than following s
 - run `python3 tests/test_workers.py` before each stage commit;
 - run shellcheck when shell scripts change;
 - run installer integration checks whenever package/install behavior changes;
-- use real Git worktree checks before and after worktree ownership moves;
+- keep the real Git worktree characterization check green while moving Muse-specific discovery behind the engine;
 - commit each independently reviewable architectural stage.
 
 Before final completion, run the complete suite from the repository and execute an installed copy from outside the repository.

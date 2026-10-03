@@ -31,3 +31,6 @@ class WorkerEngine:
 
     def normalize_event(self, event):
         raise NotImplementedError
+
+    def discover_workspace(self, command, stderr_text):
+        return None

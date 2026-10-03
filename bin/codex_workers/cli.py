@@ -17,6 +17,8 @@ import tempfile
 import time
 import uuid
 
+from codex_workers.state import SCHEMA_VERSION, session_id as worker_session_id
+
 
 ACTIVE = {"starting", "running", "cancelling", "idle"}
 MODEL = "muse-spark-1.3-contributor"
@@ -383,7 +385,7 @@ def reusable_worker(job_id):
         state.update(status="idle", phase=f"turn {state['turn']} {state['last_turn_status']}; ready for follow-up")
         save(path / "state.json", state)
         print(f"Worker {job_id}: turn {state['turn']} {state['last_turn_status']}; "
-              f"idle in Muse session {state['muse_session_id']}", flush=True)
+              f"idle in Muse session {worker_session_id(state)}", flush=True)
         report(state)
         while not control["stopping"]:
             pending = sorted((path / "requests").glob("*.json"))
@@ -428,7 +430,7 @@ def reusable_worker(job_id):
             if (path / "close.request").exists():
                 state.update(status=state["last_turn_status"], phase="session closed", ended_at=time.time())
                 save(path / "state.json", state)
-                print(f"Worker {job_id} closed; durable Muse session {state['muse_session_id']} retained", flush=True)
+                print(f"Worker {job_id} closed; durable Muse session {worker_session_id(state)} retained", flush=True)
                 return outcome_code(state)
             time.sleep(0.2)
         if control["stopping"]:
@@ -488,10 +490,18 @@ def create_job(args):
     (path / "requests").mkdir(mode=0o700)
     save(path / "policy.json", dict(reasoning_effort=args.reasoning_effort,
                                    max_model_steps=args.max_model_steps))
-    state = dict(id=job_id, label=args.label or prompt.stem, workspace=str(workspace), log_dir=str(path),
-                 prompt_file=str(prompt), command=command, status="starting", phase="starting",
+    isolation = dict(mode="create" if args.worktree else "existing" if args.worktree_existing else "none",
+                     base=args.worktree_base, existing_path=args.worktree_existing)
+    launch = dict(binary=MUSE, provider=args.provider or "meta",
+                  model=None if args.provider == "echo" else MODEL,
+                  read_only=args.read_only, web=args.web,
+                  output_schema=args.output_schema, session_logging=not args.no_session_log,
+                  isolation=isolation)
+    state = dict(schema_version=SCHEMA_VERSION, engine="muse", session_id=session_id,
+                 id=job_id, label=args.label or prompt.stem, workspace=str(workspace), log_dir=str(path),
+                 prompt_file=str(prompt), command=command, launch=launch, status="starting", phase="starting",
                  started_at=time.time(), steps=0, task_failures=0, malformed_events=0,
-                 model=MODEL, reasoning_effort=args.reasoning_effort, muse_session_id=session_id,
+                 model=MODEL, reasoning_effort=args.reasoning_effort,
                  reusable=args.action == "open", turn=1)
     if args.worktree_existing:
         state["actual_workspace"] = str(Path(args.worktree_existing))
@@ -502,8 +512,9 @@ def create_job(args):
 def report(state):
     path = job_path(state["id"])
     print(f"{state['id']} {state['status']} | {clean(state['label'])}")
-    if state.get("muse_session_id"):
-        print(f"Muse session: {state['muse_session_id']} | {state['model']} | {state['reasoning_effort']}")
+    session = worker_session_id(state)
+    if session:
+        print(f"Muse session: {session} | {state['model']} | {state['reasoning_effort']}")
     if state.get("error"):
         print(clean(state["error"]))
     if state.get("task_failures"):
@@ -544,11 +555,12 @@ def summarize_usage(export):
 
 
 def session_usage(state):
-    if not state.get("muse_session_id") or "--no-session-log" in state["command"]:
+    session = worker_session_id(state)
+    if not session or "--no-session-log" in state["command"]:
         raise ValueError("cache usage needs a retained Muse session log")
     with tempfile.TemporaryDirectory(prefix="muse-usage-") as temporary:
         target = Path(temporary) / "session.json"
-        result = subprocess.run([MUSE, "export", "--session", state["muse_session_id"],
+        result = subprocess.run([MUSE, "export", "--session", session,
                                  "--out", str(target), "--redacted"],
                                 capture_output=True, text=True, timeout=15)
         if result.returncode:
@@ -741,7 +753,7 @@ def main(launcher=None):
         save(path / "requests" / request, dict(prompt_file=str(prompt), label=args.label,
                                                reasoning_effort=args.reasoning_effort,
                                                max_model_steps=args.max_model_steps))
-        print(f"Follow-up queued for {args.id} in Muse session {state['muse_session_id']}")
+        print(f"Follow-up queued for {args.id} in Muse session {worker_session_id(state)}")
     elif args.action == "effort":
         path = job_path(args.id)
         state = load(path)

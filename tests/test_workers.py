@@ -1,5 +1,3 @@
-import importlib.machinery
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -9,14 +7,14 @@ import subprocess
 import tempfile
 import time
 import unittest
+import sys
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CLI = str(REPO_ROOT / "bin/codex-workers")
-MODULE_CLI = str(REPO_ROOT / "bin/codex_workers/cli.py")
-loader = importlib.machinery.SourceFileLoader("worker_manager", MODULE_CLI)
-module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
-loader.exec_module(module)
+sys.path.insert(0, str(REPO_ROOT / "bin"))
+from codex_workers import cli as module
+from codex_workers.state import launch_config, normalized
 module.set_launcher_path(CLI)
 
 FAKE = """#!/usr/bin/python3
@@ -134,6 +132,90 @@ class WorkerChecks(unittest.TestCase):
             result = self.cli("run", "--workspace", str(self.path), "--prompt-file", str(self.prompt), option, value)
             self.assertNotEqual(result.returncode, 0)
 
+    def test_new_jobs_persist_structured_v2_launch_config(self):
+        schema = self.path / "schema.json"
+        schema.write_text("{}")
+        existing = self.path / "existing-worktree"
+        existing.mkdir()
+        result, state = self.launch(extra=("--read-only", "--web", "--output-schema", str(schema),
+                                           "--worktree-existing", str(existing)))
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(state["schema_version"], 2)
+        self.assertEqual(state["engine"], "muse")
+        self.assertTrue(state["session_id"])
+        launch = state["launch"]
+        self.assertEqual(launch["binary"], str(self.fake))
+        self.assertEqual(launch["provider"], "meta")
+        self.assertEqual(launch["model"], module.MODEL)
+        self.assertTrue(launch["read_only"])
+        self.assertTrue(launch["web"])
+        self.assertEqual(launch["output_schema"], str(schema))
+        self.assertTrue(launch["session_logging"])
+        self.assertEqual(launch["isolation"],
+                         {"mode": "existing", "base": None, "existing_path": str(existing)})
+
+    def test_legacy_muse_command_decodes_without_rewriting_state(self):
+        legacy = {
+            "id": "a1b2c3d4e5f6",
+            "muse_session_id": "2c3db702-57c9-46ba-b2a1-f2a3b1e3e09d",
+            "command": [
+                str(self.fake), "exec", "--workspace", str(self.path), "--trust-workspace",
+                "--disable-approval", "--json", "--provider", "meta", "--max-model-steps", "17",
+                "--user-input-auto-resolve", "--prompt-file", str(self.prompt), "--session-id",
+                "2c3db702-57c9-46ba-b2a1-f2a3b1e3e09d", "--model", module.MODEL,
+                "--reasoning-effort", "xhigh", "--disable-write", "--disable-shell",
+                "--worktree-existing", str(self.path), "-w", "existing", "--worktree-base", "HEAD~1",
+                "--output-schema", str(self.prompt), "--no-session-log"
+            ],
+        }
+        decoded = launch_config(legacy)
+        self.assertEqual(decoded["binary"], str(self.fake.resolve()))
+        self.assertEqual(decoded["provider"], "meta")
+        self.assertEqual(decoded["model"], module.MODEL)
+        self.assertTrue(decoded["read_only"])
+        self.assertTrue(decoded["web"])
+        self.assertEqual(decoded["output_schema"], str(self.prompt))
+        self.assertFalse(decoded["session_logging"])
+        self.assertEqual(decoded["isolation"],
+                         {"mode": "existing", "base": "HEAD~1", "existing_path": str(self.path)})
+        view = normalized(legacy)
+        self.assertEqual(view["engine"], "muse")
+        self.assertEqual(view["session_id"], legacy["muse_session_id"])
+        self.assertEqual(view["source_schema_version"], 1)
+        self.assertNotIn("schema_version", legacy)
+        self.assertNotIn("launch", legacy)
+
+    def test_new_cli_preserves_v1_followup_policy_and_close_protocol(self):
+        job = "a1b2c3d4e5f6"
+        path = self.registry / job
+        (path / "requests").mkdir(parents=True)
+        legacy = {
+            "id": job, "label": "legacy", "workspace": str(self.path), "log_dir": str(path),
+            "prompt_file": str(self.prompt), "command": [str(self.fake), "exec", "--workspace", str(self.path),
+            "--provider", "meta", "--max-model-steps", "100", "--prompt-file", str(self.prompt),
+            "--session-id", "2c3db702-57c9-46ba-b2a1-f2a3b1e3e09d", "--model", module.MODEL,
+            "--reasoning-effort", "high"], "status": "idle", "phase": "ready",
+            "started_at": time.time(), "steps": 0, "task_failures": 0, "malformed_events": 0,
+            "model": module.MODEL, "reasoning_effort": "high",
+            "muse_session_id": "2c3db702-57c9-46ba-b2a1-f2a3b1e3e09d",
+            "reusable": True, "turn": 1
+        }
+        module.save(path / "state.json", legacy)
+        module.save(path / "policy.json", {"reasoning_effort": "high", "max_model_steps": 100})
+        follow = self.cli("followup", job, "--prompt-file", str(self.prompt),
+                          "--reasoning-effort", "medium", "--max-model-steps", "3")
+        self.assertEqual(follow.returncode, 0, follow.stderr)
+        request = json.loads(next((path / "requests").glob("*.json")).read_text())
+        self.assertEqual(set(request), {"prompt_file", "label", "reasoning_effort", "max_model_steps"})
+        self.assertEqual(request["reasoning_effort"], "medium")
+        effort = self.cli("effort", job, "--reasoning-effort", "xhigh", "--max-model-steps", "9")
+        self.assertEqual(effort.returncode, 0, effort.stderr)
+        self.assertEqual(json.loads((path / "policy.json").read_text()),
+                         {"reasoning_effort": "xhigh", "max_model_steps": 9})
+        close = self.cli("close", job)
+        self.assertEqual(close.returncode, 0, close.stderr)
+        self.assertTrue((path / "close.request").is_file())
+
     def test_reusable_turns_effort_history_and_graceful_close(self):
         process, initial = self.open_worker()
         job = initial["id"]
@@ -152,8 +234,8 @@ class WorkerChecks(unittest.TestCase):
         self.assertEqual(third["reasoning_effort"], "max")
         self.assertEqual(third["command"][third["command"].index("--max-model-steps") + 1], "200")
         self.assertEqual(third["supervisor_pid"], first["supervisor_pid"])
-        self.assertEqual(third["muse_session_id"], first["muse_session_id"])
-        self.assertEqual(third["command"][third["command"].index("--session-id") + 1], first["muse_session_id"])
+        self.assertEqual(third["session_id"], first["session_id"])
+        self.assertEqual(third["command"][third["command"].index("--session-id") + 1], first["session_id"])
         for turn in range(1, 4):
             self.assertEqual((self.registry / job / f"turn-{turn:04}.txt").read_text(), "fixture result")
         self.assertEqual(len((self.registry / job / "events.jsonl").read_text().splitlines()), 6)
@@ -231,7 +313,7 @@ class WorkerChecks(unittest.TestCase):
         result, state = self.launch(extra=("--session-id", session, "--worktree-existing", str(worktree)))
         self.assertEqual(result.returncode, 0)
         command = state["command"]
-        self.assertEqual(state["muse_session_id"], session)
+        self.assertEqual(state["session_id"], session)
         self.assertEqual(state["actual_workspace"], str(worktree))
         self.assertEqual(command[command.index("-w") + 1], "existing")
         self.assertNotIn("create", command)

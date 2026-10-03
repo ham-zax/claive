@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 import sys
+import uuid
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -520,6 +521,68 @@ class WorkerChecks(unittest.TestCase):
         self.assertEqual(waited.returncode, 130, waited.stdout + waited.stderr)
         cancelled = json.loads((self.registry / detached_id / "state.json").read_text())
         self.assertEqual(cancelled["status"], "cancelled")
+
+    def test_actual_muse_worktree_characterization(self):
+        muse = Path.home() / ".local/bin/muse"
+        if not muse.is_file():
+            self.skipTest("Muse is not installed; worktree characterization skipped")
+
+        repo = self.path / "worktree-repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+        (repo / "file.txt").write_text("one\n")
+        subprocess.run(["git", "add", "file.txt"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "first"], cwd=repo, check=True)
+        (repo / "file.txt").write_text("two\n")
+        subprocess.run(["git", "commit", "-qam", "second"], cwd=repo, check=True)
+        base = subprocess.check_output(["git", "rev-parse", "HEAD~1"], cwd=repo, text=True).strip()
+
+        prompt = self.path / "worktree-prompt.md"
+        prompt.write_text("echo worktree probe\n")
+        session = str(uuid.uuid4())
+        stdout_path = self.path / "worktree-out.jsonl"
+        stderr_path = self.path / "worktree-err.log"
+        command = [
+            str(muse), "exec", "--workspace", str(repo), "--trust-workspace",
+            "--disable-approval", "--json", "--provider", "echo", "--max-model-steps", "1",
+            "--user-input-auto-resolve", "--prompt-file", str(prompt), "--session-id", session,
+            "--disable-write", "--disable-shell", "--disable-web-tools",
+            "-w", "create", "--worktree-base", base,
+        ]
+        with stdout_path.open("w") as out, stderr_path.open("w") as err:
+            process = subprocess.Popen(command, stdout=out, stderr=err, text=True)
+            reported = None
+            for _ in range(2000):
+                text = stderr_path.read_text(errors="replace")
+                match = re.search(r"^muse: workspace root: (.+) \(explicit\)$", text, re.M)
+                if match and Path(match.group(1)).is_dir():
+                    reported = Path(match.group(1))
+                    break
+                if process.poll() is not None:
+                    break
+                time.sleep(0.002)
+            self.assertIsNotNone(reported, stderr_path.read_text(errors="replace"))
+            self.assertEqual(reported.parent, repo / ".muse/worktrees")
+            self.assertTrue((reported / ".git").is_file())
+            self.assertEqual(subprocess.check_output(["git", "rev-parse", "HEAD"],
+                                                    cwd=reported, text=True).strip(), base)
+            self.assertEqual(subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                                                    cwd=reported, text=True).strip(),
+                             f"muse/session-{session}")
+            listed = subprocess.check_output(["git", "worktree", "list", "--porcelain"],
+                                             cwd=repo, text=True)
+            self.assertIn(f"worktree {reported}", listed)
+            self.assertEqual(process.wait(timeout=15), 0)
+
+        self.assertFalse(reported.exists())
+        listed_after = subprocess.check_output(["git", "worktree", "list", "--porcelain"],
+                                               cwd=repo, text=True)
+        self.assertNotIn(str(reported), listed_after)
+        branches = subprocess.check_output(["git", "branch", "--format=%(refname:short)"],
+                                           cwd=repo, text=True).splitlines()
+        self.assertNotIn(f"muse/session-{session}", branches)
 
     def test_actual_muse_echo_transport(self):
         muse = Path.home() / ".local/bin/muse"

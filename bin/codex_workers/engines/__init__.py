@@ -11,4 +11,13 @@ def get_engine(name):
         raise ValueError(f"unknown worker engine: {name}") from error
 
 
-__all__ = ["get_engine", "MUSE_MODEL"]
+def register_engine(name, engine):
+    _ENGINES[name] = engine
+
+
+def unregister_engine(name):
+    if name != "muse":
+        _ENGINES.pop(name, None)
+
+
+__all__ = ["get_engine", "register_engine", "unregister_engine", "MUSE_MODEL"]

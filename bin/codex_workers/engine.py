@@ -28,3 +28,6 @@ class WorkerEngine:
 
     def build_command(self, request):
         raise NotImplementedError
+
+    def normalize_event(self, event):
+        raise NotImplementedError

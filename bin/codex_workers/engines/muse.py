@@ -1,6 +1,7 @@
 """Muse execution engine."""
 import os
 from pathlib import Path
+import re
 
 from codex_workers.engine import WorkerEngine
 
@@ -35,6 +36,55 @@ class MuseEngine(WorkerEngine):
             path = Path(schema)
             if not path.is_absolute() or not path.is_file():
                 raise ValueError("--output-schema must be an existing absolute file")
+
+    def normalize_event(self, event):
+        payload = event.get("payload", {})
+        kind = event.get("payload_type", "")
+        if not isinstance(payload, dict) or not isinstance(kind, str):
+            return []
+
+        detail = payload.get("event", {})
+        normalized = {"type": "activity", "native_kind": kind}
+        if kind == "task.lifecycle.proposed" and isinstance(detail, dict):
+            task_kind = str(detail.get("task_kind", ""))
+            if task_kind.startswith("model."):
+                normalized = {"type": "model_step", "native_kind": kind}
+            elif "tool" in task_kind or "shell" in task_kind:
+                normalized = {"type": "tool_started", "native_kind": kind, "tool": task_kind}
+        elif kind == "run.output.delta":
+            normalized = {"type": "output_delta", "native_kind": kind}
+        elif kind == "task.lifecycle.failed":
+            reason = detail.get("reason", "") if isinstance(detail, dict) else ""
+            normalized = {"type": "task_warning", "native_kind": kind, "reason": reason}
+        elif kind.startswith("run.terminal."):
+            terminal = payload.get("terminal")
+            normalized = {
+                "type": "terminal_completed" if terminal == "completed" else "terminal_failed",
+                "native_kind": kind,
+                "terminal": terminal,
+                "reason": payload.get("reason"),
+                "text": payload.get("text", ""),
+            }
+
+        result = [normalized]
+        reason = normalized.get("reason", "")
+        quota = self._quota_event(reason, kind)
+        if quota is not None:
+            result.append(quota)
+        return result
+
+    @staticmethod
+    def _quota_event(reason, native_kind):
+        if not isinstance(reason, str) or "subscription quota exhausted" not in reason.lower():
+            return None
+        event = {"type": "quota_exhausted", "native_kind": native_kind}
+        reset = re.search(
+            r"resets at\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))",
+            reason,
+        )
+        if reset:
+            event["reset_at"] = reset.group(1)
+        return event
 
     def build_command(self, request):
         command = [

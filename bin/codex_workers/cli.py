@@ -222,46 +222,29 @@ def render(records, color=False, height=None):
 
 
 def event_update(state, event):
-    payload = event.get("payload", {})
-    if not isinstance(payload, dict):
-        return
-    kind = event.get("payload_type", "")
-    if not isinstance(kind, str):
-        return
-    state["last_event"] = kind
+    kind = event.get("type", "activity")
+    state["last_event"] = event.get("native_kind", kind)
     state["last_activity"] = time.time()
-    detail = payload.get("event", {})
-    if kind == "task.lifecycle.proposed" and isinstance(detail, dict):
-        task_kind = str(detail.get("task_kind", ""))
-        if task_kind.startswith("model."):
-            state["steps"] += 1
-            state["phase"] = "model working"
-        elif "tool" in task_kind or "shell" in task_kind:
-            state["phase"] = "tool: " + task_kind
-    elif kind == "run.output.delta":
+    if kind == "model_step":
+        state["steps"] += 1
+        state["phase"] = "model working"
+    elif kind == "tool_started":
+        state["phase"] = "tool: " + str(event.get("tool", "tool"))
+    elif kind == "output_delta":
         state["phase"] = "producing answer"
-    elif kind == "task.lifecycle.failed":
+    elif kind == "task_warning":
         state["task_failures"] += 1
         state["phase"] = "task failure reported"
-        if isinstance(detail, dict):
-            quota_update(state, detail.get("reason", ""))
-    elif kind.startswith("run.terminal."):
-        state["terminal"] = payload.get("terminal")
-        state["terminal_reason"] = payload.get("reason")
-        state["answer"] = payload.get("text", "")
+    elif kind in {"terminal_completed", "terminal_failed"}:
+        state["terminal"] = event.get("terminal")
+        state["terminal_reason"] = event.get("reason")
+        state["answer"] = event.get("text", "")
         state["phase"] = "finishing"
-        quota_update(state, payload.get("reason", ""))
-
-
-def quota_update(state, reason):
-    """A generic 429 can be transient; only identify explicit subscription exhaustion."""
-    if not isinstance(reason, str) or "subscription quota exhausted" not in reason.lower():
-        return
-    state["quota_exhausted"] = True
-    state["fallback_requires_user_approval"] = True
-    reset = re.search(r"resets at\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))", reason)
-    if reset:
-        state["quota_reset_at"] = reset.group(1)
+    elif kind == "quota_exhausted":
+        state["quota_exhausted"] = True
+        state["fallback_requires_user_approval"] = True
+        if event.get("reset_at"):
+            state["quota_reset_at"] = event["reset_at"]
 
 
 def supervise(job_id, control=None):
@@ -272,8 +255,9 @@ def supervise(job_id, control=None):
         state.pop(key, None)
     state["malformed_events"] = 0
     (path / "result.txt").unlink(missing_ok=True)
+    engine = get_engine(state.get("engine", "muse"))
     state.update(supervisor_pid=os.getpid(), supervisor_identity=identity(os.getpid()),
-                 status="running", phase="launching Muse")
+                 status="running", phase="launching worker")
     stopping = False
     child = None
 
@@ -331,7 +315,8 @@ def supervise(job_id, control=None):
                                     event = json.loads(line)
                                     if not isinstance(event, dict):
                                         raise ValueError("event is not an object")
-                                    event_update(state, event)
+                                    for normalized_event in engine.normalize_event(event):
+                                        event_update(state, normalized_event)
                                 except (ValueError, UnicodeDecodeError):
                                     state["malformed_events"] += 1
                     if time.monotonic() - last_save > 0.25:
@@ -342,7 +327,8 @@ def supervise(job_id, control=None):
                     event = json.loads(pending)
                     if not isinstance(event, dict):
                         raise ValueError("event is not an object")
-                    event_update(state, event)
+                    for normalized_event in engine.normalize_event(event):
+                        event_update(state, normalized_event)
                 except (ValueError, UnicodeDecodeError):
                     state["malformed_events"] += 1
             state["exit_code"] = child.wait()
@@ -480,7 +466,7 @@ def create_job(args):
                   read_only=args.read_only, web=args.web,
                   output_schema=args.output_schema, session_logging=not args.no_session_log,
                   isolation=isolation)
-    engine = get_engine("muse")
+    engine = get_engine(args.engine)
     engine.validate_launch(launch)
     initial_turn = TurnRequest(
         binary=launch["binary"], workspace=str(workspace), prompt_file=str(prompt),
@@ -496,7 +482,7 @@ def create_job(args):
     (path / "requests").mkdir(mode=0o700)
     save(path / "policy.json", dict(reasoning_effort=args.reasoning_effort,
                                    max_model_steps=args.max_model_steps))
-    state = dict(schema_version=SCHEMA_VERSION, engine="muse", session_id=session_id,
+    state = dict(schema_version=SCHEMA_VERSION, engine=args.engine, session_id=session_id,
                  id=job_id, label=args.label or prompt.stem, workspace=str(workspace), log_dir=str(path),
                  prompt_file=str(prompt), command=command, launch=launch, status="starting", phase="starting",
                  started_at=time.time(), steps=0, task_failures=0, malformed_events=0,
@@ -616,6 +602,7 @@ def parser():
         launch.add_argument("--workspace", required=True)
         launch.add_argument("--prompt-file", required=True)
         launch.add_argument("--label")
+        launch.add_argument("--engine", default="muse")
         launch.add_argument("--reasoning-effort", default="high", choices=EFFORTS)
         launch.add_argument("--max-model-steps", type=int, default=100)
         launch.add_argument("--read-only", action="store_true")

@@ -12,6 +12,8 @@ from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CLI = str(REPO_ROOT / "bin/codex-workers")
+FIXTURE_CLI = str(REPO_ROOT / "tests/fixture-workers")
+FIXTURE_WORKER = str(REPO_ROOT / "tests/fixture_worker.py")
 sys.path.insert(0, str(REPO_ROOT / "bin"))
 from codex_workers import cli as module
 from codex_workers.state import launch_config, normalized
@@ -78,6 +80,20 @@ class WorkerChecks(unittest.TestCase):
     def cli(self, *args, mode="success"):
         env = dict(self.env, MUSE_TEST_MODE=mode)
         return subprocess.run([CLI, *args], env=env, text=True, capture_output=True, timeout=12)
+
+    def fixture_cli(self, *args, mode="success", timeout=12):
+        env = dict(self.env, MUSE_WORKER_BINARY=FIXTURE_WORKER, FIXTURE_MODE=mode)
+        return subprocess.run([FIXTURE_CLI, *args], env=env, text=True,
+                              capture_output=True, timeout=timeout)
+
+    def fixture_launch(self, action="run", mode="success", extra=()):
+        completed = self.fixture_cli(action, "--engine", "fixture",
+                                     "--workspace", str(self.path),
+                                     "--prompt-file", str(self.prompt), "--label", "fixture-engine",
+                                     *extra, mode=mode)
+        worker_id = re.search(r"Worker ([0-9a-f]{12})", completed.stdout).group(1)
+        state = json.loads((self.registry / worker_id / "state.json").read_text())
+        return completed, state
 
     def launch(self, action="run", mode="success", extra=()):
         completed = self.cli(action, "--workspace", str(self.path),
@@ -285,9 +301,13 @@ class WorkerChecks(unittest.TestCase):
         self.assertIn("Ask the user", result.stdout)
         self.assertIn("no automatic switch", result.stdout)
         self.assertEqual(state["model"], module.MODEL)
-        generic = {}
-        module.quota_update(generic, "API error 429: too many requests")
-        self.assertEqual(generic, {})
+        generic = {"task_failures": 0}
+        native = {"payload_type": "task.lifecycle.failed",
+                  "payload": {"event": {"reason": "API error 429: too many requests"}}}
+        for event in module.get_engine("muse").normalize_event(native):
+            module.event_update(generic, event)
+        self.assertEqual(generic["task_failures"], 1)
+        self.assertNotIn("quota_exhausted", generic)
 
     def test_followup_reuses_created_worktree(self):
         worktree = self.path / "isolated tree"
@@ -442,6 +462,64 @@ class WorkerChecks(unittest.TestCase):
         for job in active:
             self.assertEqual(self.cli("wait", job).returncode, 130)
         self.assertIn("0 running", self.cli("status-line").stdout)
+
+    def test_fixture_engine_exercises_generic_lifecycle(self):
+        result, state = self.fixture_launch()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(state["engine"], "fixture")
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(state["steps"], 1)
+        self.assertEqual((self.registry / state["id"] / "result.txt").read_text(), "fixture result")
+
+        warning_result, warning = self.fixture_launch(mode="warning")
+        self.assertEqual(warning_result.returncode, 0)
+        self.assertEqual(warning["status"], "completed")
+        self.assertEqual(warning["task_failures"], 1)
+
+        for mode in ("terminal-failure", "exit-failure", "malformed", "missing"):
+            failed_result, failed = self.fixture_launch(mode=mode)
+            self.assertNotEqual(failed_result.returncode, 0, mode)
+            self.assertEqual(failed["status"], "failed", mode)
+
+        before = set(self.registry.glob("*/state.json"))
+        env = dict(self.env, MUSE_WORKER_BINARY=FIXTURE_WORKER, FIXTURE_MODE="success")
+        process = subprocess.Popen([
+            FIXTURE_CLI, "open", "--engine", "fixture", "--workspace", str(self.path),
+            "--prompt-file", str(self.prompt), "--label", "fixture-reusable"
+        ], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        self.open_processes.append(process)
+        reusable = None
+        for _ in range(400):
+            new = set(self.registry.glob("*/state.json")) - before
+            if new:
+                reusable = json.loads(next(iter(new)).read_text())
+                break
+            time.sleep(0.025)
+        self.assertIsNotNone(reusable)
+        job = reusable["id"]
+        self.until_idle(job)
+        follow = self.fixture_cli("followup", job, "--prompt-file", str(self.prompt),
+                                  "--reasoning-effort", "medium", "--max-model-steps", "3")
+        self.assertEqual(follow.returncode, 0, follow.stderr)
+        second = self.until_idle(job, 2)
+        self.assertEqual(second["reasoning_effort"], "medium")
+        self.assertEqual(second["max_model_steps"], 3)
+        self.assertEqual(self.fixture_cli("close", job).returncode, 0)
+        process.communicate(timeout=5)
+        self.assertEqual(process.returncode, 0)
+
+        detached = self.fixture_cli("start", "--engine", "fixture",
+                                    "--workspace", str(self.path), "--prompt-file", str(self.prompt),
+                                    mode="slow")
+        self.assertEqual(detached.returncode, 0, detached.stderr)
+        detached_id = re.search(r"Worker ([0-9a-f]{12})", detached.stdout).group(1)
+        self.until_running(detached_id)
+        cancel = self.fixture_cli("cancel", detached_id, mode="slow")
+        self.assertEqual(cancel.returncode, 0, cancel.stderr)
+        waited = self.fixture_cli("wait", detached_id, mode="slow", timeout=15)
+        self.assertEqual(waited.returncode, 130, waited.stdout + waited.stderr)
+        cancelled = json.loads((self.registry / detached_id / "state.json").read_text())
+        self.assertEqual(cancelled["status"], "cancelled")
 
     def test_actual_muse_echo_transport(self):
         muse = Path.home() / ".local/bin/muse"

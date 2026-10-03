@@ -17,11 +17,13 @@ import tempfile
 import time
 import uuid
 
-from codex_workers.state import SCHEMA_VERSION, session_id as worker_session_id
+from codex_workers.engine import TurnRequest
+from codex_workers.engines import MUSE_MODEL, get_engine
+from codex_workers.state import SCHEMA_VERSION, launch_config, session_id as worker_session_id
 
 
 ACTIVE = {"starting", "running", "cancelling", "idle"}
-MODEL = "muse-spark-1.3-contributor"
+MODEL = MUSE_MODEL
 EFFORTS = ["medium", "high", "xhigh", "max"]
 SCRIPT = None
 MUSE = os.environ.get("MUSE_WORKER_BINARY", str(Path.home() / ".local/bin/muse"))
@@ -36,6 +38,25 @@ def launcher_path():
     if not SCRIPT:
         raise ValueError("codex-workers launcher path is not configured")
     return SCRIPT
+
+
+def turn_request(state, prompt_file=None, reasoning_effort=None, max_model_steps=None, isolation=None):
+    launch = launch_config(state)
+    return TurnRequest(
+        binary=launch["binary"],
+        workspace=state["workspace"],
+        prompt_file=prompt_file or state["prompt_file"],
+        session_id=worker_session_id(state),
+        provider=launch.get("provider") or "meta",
+        model=launch.get("model"),
+        reasoning_effort=reasoning_effort or state["reasoning_effort"],
+        max_model_steps=max_model_steps or int(state.get("max_model_steps", 100)),
+        read_only=bool(launch.get("read_only")),
+        web=bool(launch.get("web")),
+        output_schema=launch.get("output_schema"),
+        session_logging=bool(launch.get("session_logging", True)),
+        isolation=isolation if isolation is not None else dict(launch.get("isolation") or {}),
+    )
 
 
 def root():
@@ -401,12 +422,8 @@ def reusable_worker(job_id):
                 policy = json.loads((path / "policy.json").read_text())
                 effort = request.get("reasoning_effort") or policy["reasoning_effort"]
                 steps = request.get("max_model_steps") or policy["max_model_steps"]
-                command = state["command"]
-                command[command.index("--prompt-file") + 1] = request["prompt_file"]
-                if "--reasoning-effort" in command:
-                    command[command.index("--reasoning-effort") + 1] = effort
-                command[command.index("--max-model-steps") + 1] = str(steps)
-                if "-w" in command and command[command.index("-w") + 1] == "create":
+                isolation = dict((launch_config(state).get("isolation") or {}))
+                if isolation.get("mode") == "create":
                     actual = state.get("actual_workspace", "")
                     if not actual or not Path(actual).is_dir():
                         state.update(phase="cannot identify isolated worktree; follow-up rejected",
@@ -415,15 +432,18 @@ def reusable_worker(job_id):
                         pending[0].unlink()
                         print(f"Worker {job_id}: follow-up rejected; actual worktree is unknown", flush=True)
                         continue
-                    command[command.index("-w") + 1] = "existing"
-                    command += ["--worktree-existing", actual]
-                    if "--worktree-base" in command:
-                        index = command.index("--worktree-base")
-                        del command[index:index + 2]
+                    isolation = {"mode": "existing", "base": None, "existing_path": actual}
                     state["actual_workspace"] = actual
                 state.update(prompt_file=request["prompt_file"], reasoning_effort=effort,
+                             max_model_steps=steps,
                              label=request.get("label") or state["label"], turn=state["turn"] + 1,
                              status="running", phase="starting related follow-up")
+                engine = get_engine(state.get("engine", "muse"))
+                state["command"] = engine.build_command(
+                    turn_request(state, prompt_file=request["prompt_file"],
+                                 reasoning_effort=effort, max_model_steps=steps,
+                                 isolation=isolation)
+                )
                 save(path / "state.json", state)
                 pending[0].unlink()
                 break
@@ -447,49 +467,12 @@ def create_job(args):
         raise ValueError("--prompt-file must be an existing nonempty absolute file")
     if args.max_model_steps < 1:
         raise ValueError("--max-model-steps must be positive")
-    if not Path(MUSE).is_absolute() or not os.access(MUSE, os.X_OK):
-        raise ValueError("Muse binary must be an absolute executable path")
     if args.action == "open" and args.no_session_log:
         raise ValueError("reusable workers require session logging to preserve follow-up history")
     if args.session_id and args.no_session_log:
         raise ValueError("--session-id requires retained session logging")
+
     session_id = None if args.no_session_log else str(uuid.UUID(args.session_id)) if args.session_id else str(uuid.uuid4())
-    command = [MUSE, "exec", "--workspace", str(workspace), "--trust-workspace",
-               "--disable-approval", "--json", "--provider", args.provider or "meta",
-               "--max-model-steps", str(args.max_model_steps), "--user-input-auto-resolve",
-               "--prompt-file", str(prompt)]
-    if session_id:
-        command += ["--session-id", session_id]
-    if args.provider != "echo":
-        command += ["--model", MODEL, "--reasoning-effort", args.reasoning_effort]
-    if args.read_only:
-        command += ["--disable-write", "--disable-shell"]
-    if not args.web:
-        command += ["--disable-web-tools"]
-    if args.worktree:
-        command += ["-w", "create"]
-    if args.worktree_existing:
-        actual = Path(args.worktree_existing)
-        if not actual.is_absolute() or not actual.is_dir():
-            raise ValueError("--worktree-existing must be an existing absolute directory")
-        command += ["-w", "existing", "--worktree-existing", str(actual)]
-    if args.worktree_base:
-        if not args.worktree:
-            raise ValueError("--worktree-base requires --worktree")
-        command += ["--worktree-base", args.worktree_base]
-    if args.output_schema:
-        schema = Path(args.output_schema)
-        if not schema.is_absolute() or not schema.is_file():
-            raise ValueError("--output-schema must be an existing absolute file")
-        command += ["--output-schema", str(schema)]
-    if args.no_session_log:
-        command += ["--no-session-log"]
-    job_id = uuid.uuid4().hex[:12]
-    path = root() / job_id
-    path.mkdir(mode=0o700)
-    (path / "requests").mkdir(mode=0o700)
-    save(path / "policy.json", dict(reasoning_effort=args.reasoning_effort,
-                                   max_model_steps=args.max_model_steps))
     isolation = dict(mode="create" if args.worktree else "existing" if args.worktree_existing else "none",
                      base=args.worktree_base, existing_path=args.worktree_existing)
     launch = dict(binary=MUSE, provider=args.provider or "meta",
@@ -497,11 +480,28 @@ def create_job(args):
                   read_only=args.read_only, web=args.web,
                   output_schema=args.output_schema, session_logging=not args.no_session_log,
                   isolation=isolation)
+    engine = get_engine("muse")
+    engine.validate_launch(launch)
+    initial_turn = TurnRequest(
+        binary=launch["binary"], workspace=str(workspace), prompt_file=str(prompt),
+        session_id=session_id, provider=launch["provider"], model=launch["model"],
+        reasoning_effort=args.reasoning_effort, max_model_steps=args.max_model_steps,
+        read_only=launch["read_only"], web=launch["web"], output_schema=launch["output_schema"],
+        session_logging=launch["session_logging"], isolation=launch["isolation"],
+    )
+    command = engine.build_command(initial_turn)
+    job_id = uuid.uuid4().hex[:12]
+    path = root() / job_id
+    path.mkdir(mode=0o700)
+    (path / "requests").mkdir(mode=0o700)
+    save(path / "policy.json", dict(reasoning_effort=args.reasoning_effort,
+                                   max_model_steps=args.max_model_steps))
     state = dict(schema_version=SCHEMA_VERSION, engine="muse", session_id=session_id,
                  id=job_id, label=args.label or prompt.stem, workspace=str(workspace), log_dir=str(path),
                  prompt_file=str(prompt), command=command, launch=launch, status="starting", phase="starting",
                  started_at=time.time(), steps=0, task_failures=0, malformed_events=0,
                  model=MODEL, reasoning_effort=args.reasoning_effort,
+                 max_model_steps=args.max_model_steps,
                  reusable=args.action == "open", turn=1)
     if args.worktree_existing:
         state["actual_workspace"] = str(Path(args.worktree_existing))

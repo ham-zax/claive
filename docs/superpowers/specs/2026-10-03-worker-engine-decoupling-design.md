@@ -515,15 +515,14 @@ The refactor is complete when all of the following are true:
 
 ## Verification Strategy
 
-At each implementation task:
+Keep verification proportional to the risk of each stage rather than following strict TDD ceremony.
 
-- write/adjust the focused failing tests first;
-- run the focused test and confirm the intended failure;
-- implement the minimum structural change;
-- run the focused tests;
-- run `python3 tests/test_workers.py`;
-- run shellcheck on shell scripts when they change;
-- run installer integration tests when package/install behavior changes;
-- commit each independently reviewable stage.
+- add or adjust focused regression tests for behavior that could break during a stage;
+- run the relevant focused tests after structural changes;
+- run `python3 tests/test_workers.py` before each stage commit;
+- run shellcheck when shell scripts change;
+- run installer integration checks whenever package/install behavior changes;
+- use real Git worktree checks before and after worktree ownership moves;
+- commit each independently reviewable architectural stage.
 
 Before final completion, run the complete suite from the repository and execute an installed copy from outside the repository.

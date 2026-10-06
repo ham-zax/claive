@@ -7,6 +7,7 @@ from codex_workers.engine import WorkerEngine
 
 class FixtureEngine(WorkerEngine):
     name = "fixture"
+    default_max_model_steps = 100
 
     def resolve_launch(self, **options):
         return {

@@ -1,0 +1,12 @@
+{"type": "session", "version": 3, "id": "pi-probe-session", "cwd": "/fixture/workspace"}
+{"type": "agent_start"}
+{"type": "turn_start"}
+{"type": "message_start", "message": {"role": "system", "content": []}}
+{"type": "message_end", "message": {"role": "system", "content": []}}
+{"type": "message_start", "message": {"role": "user", "content": []}}
+{"type": "message_end", "message": {"role": "user", "content": []}}
+{"type": "message_start", "message": {"role": "assistant", "content": [], "stopReason": "error", "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0}, "model": "probe-model", "errorMessage": "400: PI_CHARACTERIZATION_FAILURE"}}
+{"type": "message_end", "message": {"role": "assistant", "content": [], "stopReason": "error", "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0}, "model": "probe-model", "errorMessage": "400: PI_CHARACTERIZATION_FAILURE"}}
+{"type": "turn_end"}
+{"type": "agent_end", "willRetry": false}
+{"type": "agent_settled"}

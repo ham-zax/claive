@@ -19,9 +19,9 @@ for path in "$bin_dir" "$skill_dir" "$backup_base"; do
   [[ $path == /* ]] || { echo "Installation paths must be absolute: $path" >&2; exit 2; }
 done
 
-sources=("$source_dir/bin/codex-workers" "$source_dir/bin/muse-worker"
+sources=("$source_dir/bin/codex-workers" "$source_dir/bin/codex-subagent-worker"
          "$source_dir/bin/codex-with-workers" "$source_dir/skills/subagent-routing/SKILL.md")
-targets=("$bin_dir/codex-workers" "$bin_dir/muse-worker"
+targets=("$bin_dir/codex-workers" "$bin_dir/codex-subagent-worker"
          "$bin_dir/codex-with-workers" "$skill_dir/SKILL.md")
 modes=(755 755 755 644)
 
@@ -91,5 +91,27 @@ for index in "${!sources[@]}"; do
   install -m "${modes[index]}" -- "$source_file" "$target"
   echo "Installed: $target"
 done
+
+# Retire only the exact launcher previously installed by this project.
+# Preserve unrelated files and symlinks at the old name.
+legacy_launcher=$bin_dir/muse-worker
+if [[ -f $legacy_launcher && ! -L $legacy_launcher ]] &&
+   cmp -s -- "$legacy_launcher" <(cat <<'LEGACY'
+#!/usr/bin/env bash
+# Keep a Muse worker available for follow-ups with visible progress.
+set -euo pipefail
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+exec "$script_dir/codex-workers" open "$@"
+LEGACY
+); then
+  if "$dry_run"; then
+    echo "Would retire launcher: $legacy_launcher"
+  else
+    ensure_backup_dir
+    cp -p -- "$legacy_launcher" "$backup_dir/muse-worker"
+    rm -- "$legacy_launcher"
+    echo "Retired launcher: $legacy_launcher"
+  fi
+fi
 [[ -z $backup_dir ]] || echo "Previous files saved in: $backup_dir"
 echo 'Global AGENTS.md is managed separately; reference/global-AGENTS.md is a snapshot.'

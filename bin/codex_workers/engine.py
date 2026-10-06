@@ -1,6 +1,7 @@
 """Engine-neutral turn request contract."""
 from dataclasses import dataclass
 from typing import Optional
+import uuid
 
 
 @dataclass(frozen=True)
@@ -12,16 +13,25 @@ class TurnRequest:
     provider: str
     model: Optional[str]
     reasoning_effort: str
-    max_model_steps: int
+    max_model_steps: Optional[int]
     read_only: bool
     web: bool
     output_schema: Optional[str]
     session_logging: bool
     isolation: dict
+    session_dir: Optional[str] = None
 
 
 class WorkerEngine:
     name = ""
+    default_reasoning_effort = "high"
+    default_max_model_steps = None
+
+    def resolve_session_id(self, value, session_logging=True):
+        return (value or str(uuid.uuid4())) if session_logging else None
+
+    def validate_turn(self, request):
+        """Reject unsupported turn options before launch or queue acceptance."""
 
     def resolve_launch(self, **options):
         raise NotImplementedError

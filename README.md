@@ -2,9 +2,14 @@
 
 Reusable coding-worker orchestration for Codex, currently with Muse Code as the default production engine. The generic worker core handles supervision, reusable turns, state, cancellation, logs, and the live terminal dashboard; Muse-specific command/event/usage behavior lives behind an engine adapter. Maintained source for Hamza's installation in `~/.local/bin` and `~/.codex/skills/subagent-routing`.
 
+Pi is available explicitly with `--engine pi`, using only `opencode2api`. Its initial model is
+`muse-spark-1.3-contributor-free`; new Pi workers inherit the last explicitly selected
+Pi model when `--model` is omitted. See [Pi setup, sessions, supported options and verification](docs/pi-engine.md).
+Muse remains the default engine. Use `codex-subagent-worker --engine pi` to select Pi.
+
 ## Native Codex progress
 
-The default integration uses Codex's existing background-terminal indicator and `/ps`. The agent runs `muse-worker` through its managed shell tool with a short yield, retains the returned terminal session ID, and collects the final output. The launcher stays alive between related turns until explicitly closed, so Codex can track it while the parent continues working. The worker also appears in the optional registry dashboard.
+The default integration uses Codex's existing background-terminal indicator and `/ps`. The agent runs `codex-subagent-worker` through its managed shell tool with a short yield, retains the returned terminal session ID, and collects the final output. The launcher stays alive between related turns until explicitly closed, so Codex can track it while the parent continues working. The worker also appears in the optional registry dashboard.
 
 `codex-workers start` deliberately detaches and immediately returns. Its worker appears in the registry, but the launch command finishes too quickly for Codex to keep tracking it as a background terminal. Use `start` only when detachment is intended. Likewise, do not append `&` or use `nohup` when native terminal visibility is wanted. Reusable workers remain idle between turns and make no model requests while waiting. Single-turn jobs may finish before the first yield.
 
@@ -38,7 +43,7 @@ This is an outer terminal status bar; it does not inject a widget into the Codex
 Put the task in a prompt file with a narrow mission, inputs, scope, file ownership, expected output, and stopping condition. Include repository rules and relevant evidence; shell workers do not inherit the parent conversation.
 
 ```bash
-muse-worker \
+codex-subagent-worker \
   --workspace /home/hamza/repo/my-project \
   --prompt-file /tmp/worker-task.md \
   --label "Review authentication changes" \
@@ -47,7 +52,7 @@ muse-worker \
   --max-model-steps 100
 ```
 
-`muse-worker` opens a reusable worker. After each turn it prints the outcome and stays idle for a related follow-up, preserving the same Muse session UUID. Keep it idle for a specific related follow-up expected in the active workflow. If no further use is planned, close it when that task chain ends; its retained history can be reopened later. Use `codex-workers run` for a deliberate single-turn job. Inside Codex, keep it in a managed shell session to use native background-terminal visibility. Replace it with `codex-workers start` only to detach intentionally and manage the job through the registry.
+`codex-subagent-worker` opens a reusable worker. After each turn it prints the outcome and stays idle for a related follow-up, preserving the same Muse session UUID. Keep it idle for a specific related follow-up expected in the active workflow. If no further use is planned, close it when that task chain ends; its retained history can be reopened later. Use `codex-workers run` for a deliberate single-turn job. Inside Codex, keep it in a managed shell session to use native background-terminal visibility. Replace it with `codex-workers start` only to detach intentionally and manage the job through the registry.
 
 ```bash
 codex-workers list
@@ -67,7 +72,7 @@ codex-workers status-line
 
 The default Muse engine supplies `--workspace`, `--trust-workspace`, `--disable-approval`, and `--json`, and keeps Muse's sandbox enabled. `--read-only` disables both non-shell writes and shell execution. `--worktree` maps to Muse's `-w create`; `--worktree-base` selects its base ref. Muse 1.4.2 creates a real linked worktree under `.muse/worktrees` on branch `muse/session-<session UUID>`, then removes that worktree and branch when the underlying `muse exec` exits. Therefore `--worktree` is per-turn isolation, not a persistent reusable lane. Use `--worktree-existing /absolute/worktree` only for an externally retained worktree that remains present across turns. File ownership must remain disjoint. Run heavy builds and test suites one at a time.
 
-Web tools are disabled by default; `--web` enables them. `--model` accepts only `muse-spark-1.3-contributor`. Other options include `--output-schema` and `--session-id`. `--no-session-log` is available only for deliberate single-turn runs, and is rejected for reusable workers. Run `muse-worker --help` for the full list. `--provider echo` is for transport checks and does not contact a live model; Muse does not accept reasoning effort with that provider, so the launcher omits model and effort options in that case.
+Web tools are disabled by default; `--web` enables them. `--model` accepts only `muse-spark-1.3-contributor`. Other options include `--output-schema` and `--session-id`. `--no-session-log` is available only for deliberate single-turn runs, and is rejected for reusable workers. Run `codex-subagent-worker --help` for the full list. `--provider echo` is for transport checks and does not contact a live model; Muse does not accept reasoning effort with that provider, so the launcher omits model and effort options in that case.
 
 ## Model, reasoning, and caching
 
@@ -75,7 +80,7 @@ Every live Muse worker uses **`muse-spark-1.3-contributor`**. Default reasoning 
 
 The orchestrator can override effort and step cap on each `followup`, or change future defaults with `effort`. Per-turn overrides do not replace the future default. Changes do not alter an in-flight request. Follow-ups run sequentially with the same workspace/tool policy and Muse session UUID. A Muse-created `-w create` worktree is cleaned up when that `muse exec` exits, so persistent isolated follow-ups require an externally retained worktree supplied with `--worktree-existing`.
 
-The outer supervisor stays alive, while each underlying `muse exec` exits after a turn. Session logging lets the next exec restore history. Related follow-ups should reuse this worker, without arbitrary retirement after a fixed number of tasks. After closure, `muse-worker --session-id UUID` can restore retained history in the same workspace and tool policy; inspect `show JOB_ID --json` for that UUID. If isolation must persist across turns, provide an externally retained worktree with `--worktree-existing`. Keep unrelated lanes separate.
+The outer supervisor stays alive, while each underlying `muse exec` exits after a turn. Session logging lets the next exec restore history. Related follow-ups should reuse this worker, without arbitrary retirement after a fixed number of tasks. After closure, `codex-subagent-worker --session-id UUID` can restore retained history in the same workspace and tool policy; inspect `show JOB_ID --json` for that UUID. If isolation must persist across turns, provide an externally retained worktree with `--worktree-existing`. Keep unrelated lanes separate.
 
 Meta [prompt caching](https://dev.meta.ai/docs/prompt-caching) automatically reuses stable leading tokens on its servers. Closing a terminal does not itself flush the cache, and leaving one idle does not guarantee retention. Put changing task details after stable instructions/history; see the [cookbook](https://dev.meta.ai/docs/cookbook/prompt-caching). Muse exec currently exposes no cache-key or retention flag, so no extra CLI option is needed or invented.
 
@@ -91,7 +96,7 @@ On an explicit Muse subscription-quota exhaustion, the manager records the failu
 | --- | --- |
 | `bin/codex-workers` | Thin Python launcher for the worker manager |
 | `bin/codex_workers/` | Generic worker core, compatibility layer, and engine adapters |
-| `bin/muse-worker` | Reusable worker launcher in a managed terminal |
+| `bin/codex-subagent-worker` | Reusable worker launcher in a managed terminal |
 | `bin/codex-with-workers` | Codex with the tmux worker view |
 | `skills/subagent-routing/SKILL.md` | Codex delegation and verification guidance |
 | `reference/global-AGENTS.md` | Snapshot of the configured global instructions |
@@ -124,8 +129,8 @@ Job metadata, JSONL events, diagnostic output, and final answers are retained un
 Run checks from the repository root:
 
 ```bash
-python3 tests/test_workers.py
-shellcheck install.sh bin/muse-worker bin/codex-with-workers
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+shellcheck install.sh bin/codex-subagent-worker bin/codex-with-workers
 ```
 
 Checks cover pinned Muse defaults, structured/legacy state compatibility, the engine-neutral fixture lifecycle, reusable follow-ups, dynamic effort, closure/cancellation, cache-usage accounting, subscription-quota notices, terminal-event validation, malformed and failed results, process-group cancellation, concurrent jobs, stale process identities, installer isolation, private state files, and tmux with nondefault pane indices. A real Muse echo check characterizes linked-worktree creation and cleanup when Muse is installed; the tmux check requires tmux. These checks do not test live model authentication or model availability. Test workers and the temporary tmux server are stopped during cleanup.

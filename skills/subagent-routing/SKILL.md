@@ -1,11 +1,11 @@
 ---
 name: subagent-routing
-description: Delegate bounded coding, investigation, or review tasks from Codex to Muse Code workers through the shell. Use when delegation is warranted or the user requests Muse subagents; uses reusable Muse sessions and provider cache usage checks.
+description: Delegate bounded coding, investigation, or review tasks from Codex to Muse or Pi workers through codex-subagent-worker. Use when delegation is warranted or the user requests subagents; supports reusable sessions and provider usage checks.
 ---
 
 # Subagent routing
 
-Muse Code is the main worker. Follow the global AGENTS.md delegation criteria; complete small or tightly coupled tasks directly when delegation would add overhead. The parent owns synthesis, integration, and final verification.
+Muse Code is the default engine; Pi is available explicitly with `--engine pi` through `opencode2api`. Follow the global AGENTS.md delegation criteria; complete small or tightly coupled tasks directly when delegation would add overhead. The parent owns synthesis, integration, and final verification.
 
 The maintained source is `/home/hamza/repo/codex-muse-workers`. Edit its `bin/` scripts or `skills/subagent-routing/SKILL.md`, then run `install.sh` to refresh the installed copies. Its `reference/global-AGENTS.md` is a snapshot, not a file to install over current global instructions.
 
@@ -17,7 +17,7 @@ Use **only `muse-spark-1.3-contributor`** for Muse workers. The launcher pins th
 - **`medium`: trivial work such as generating a commit message.** Do not downgrade normal tasks merely to reduce cost.
 - **`xhigh` or `max`: complex work**, difficult fixes, or consequential reasoning.
 
-The orchestrator can select effort per turn or change an existing worker's future default at any time. Changes apply to the next request; they cannot change an in-flight API call. The launcher defaults to 100 model steps. Set a cap suitable for the assignment, including a higher cap when needed; a step cap is not a monetary budget or timeout.
+The orchestrator can select effort per turn or change an existing worker's future default at any time. Changes apply to the next request; they cannot change an in-flight API call. Muse defaults to 100 model steps; Pi rejects `--max-model-steps`. Set a cap suitable for the assignment, including a higher cap when needed; a step cap is not a monetary budget or timeout.
 
 ## Prepare the assignment
 
@@ -31,12 +31,12 @@ Tell the worker it is not alone in the codebase: preserve other edits and accomm
 
 Request a concise report: outcome, files changed, checks with results, supporting evidence, local decisions, uncertainty, blockers, and actual worktree path when isolated. Use exact check commands when known and appropriate to the authorized task. Avoid raw context dumps.
 
-## Launch and observe Muse
+## Launch and observe workers
 
-Default to `/home/hamza/.local/bin/muse-worker` inside Codex's managed shell tool. The launcher opens a reusable worker and remains alive between related turns, so a yielded shell call is a managed background terminal and appears in the native running-terminal indicator and `/ps`. The installed manager is `/home/hamza/.local/bin/codex-workers`; its generic supervisor owns state, follow-ups, cancellation, and logs, while the Muse engine adapter builds Muse commands and interprets Muse events and usage. Private logs are retained under `${XDG_STATE_HOME:-$HOME/.local/state}/codex-workers`. `CODEX_WORKERS_DIR` can select another absolute registry directory. The custom dashboard and tmux pane are optional additional views.
+Default to `/home/hamza/.local/bin/codex-subagent-worker` inside Codex's managed shell tool. The launcher opens a reusable worker and remains alive between related turns, so a yielded shell call is a managed background terminal and appears in the native running-terminal indicator and `/ps`. The installed manager is `/home/hamza/.local/bin/codex-workers`; its generic supervisor owns state, follow-ups, cancellation, and logs, while each engine adapter builds its commands and interprets its events and usage. Private logs are retained under `${XDG_STATE_HOME:-$HOME/.local/state}/codex-workers`. `CODEX_WORKERS_DIR` can select another absolute registry directory. The custom dashboard and tmux pane are optional additional views.
 
 ```bash
-exec /home/hamza/.local/bin/muse-worker \
+exec /home/hamza/.local/bin/codex-subagent-worker \
   --workspace "$task_workspace" \
   --prompt-file "$task_prompt" \
   --label "Implement assigned feature" \
@@ -48,7 +48,9 @@ For a single Muse turn that needs isolation, add `--worktree` (the Muse engine t
 
 Use `exec_command` with a short initial `yield_time_ms` (for example 1000). A returned `session_id` means the shell command is still running: retain it and use `write_stdin` to collect output and final exit status. Independent workers can each have their own managed session; shell yielding lets the parent continue working without detaching the worker. After a turn, the reusable worker remains idle and available in the managed terminal until closed. An idle supervisor makes no model requests.
 
-The shell session ID and the 12-character worker ID printed by `muse-worker` identify different objects; the retained worker `session_id` (a Muse session UUID for this engine) is a third identifier. Report both when a session is yielded. Keep ownership through the related task chain and final closure. Do not append `&`, use `nohup`/`disown`, or replace the default with `codex-workers start`: those detach the worker from Codex's managed terminal. `start` is available for deliberately detached jobs and returns immediately; such jobs remain visible in the registry dashboard but not in Codex's terminal indicator.
+For Pi, use the same launcher with `--engine pi --provider opencode2api` and omit `--max-model-steps`. Omit `--model` to inherit the last selected Pi model from its global settings; the initial model is `muse-spark-1.3-contributor-free`. An explicit `--model ID` becomes the shared selection after launch-option validation, even if the subsequent model request fails. Existing workers and their follow-ups retain their launch model. This preference is separate from Muse's pinned model and never switches engines automatically. Pi supports only `opencode2api` here. Use `--workspace` for an externally retained worktree; Pi rejects worktree-management, `--web`, and `--output-schema`. Pi read-only tools are `read,grep,find,ls`, with extensions disabled; Pi has no Muse OS sandbox. See `/home/hamza/repo/codex-muse-workers/docs/pi-engine.md` for the verified runtime contract.
+
+The shell session ID and the 12-character worker ID printed by `codex-subagent-worker` identify different objects; the retained worker `session_id` (a Muse session UUID for this engine) is a third identifier. Report both when a session is yielded. Keep ownership through the related task chain and final closure. Do not append `&`, use `nohup`/`disown`, or replace the default with `codex-workers start`: those detach the worker from Codex's managed terminal. `start` is available for deliberately detached jobs and returns immediately; such jobs remain visible in the registry dashboard but not in Codex's terminal indicator.
 
 For cancellation use `codex-workers cancel WORKER_ID`, then collect the managed session's final output. Forcibly killing a terminal can bypass supervisor cleanup; if interrupted, inspect the registry and stop any surviving worker. Use:
 

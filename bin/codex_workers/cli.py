@@ -23,7 +23,6 @@ from codex_workers.state import SCHEMA_VERSION, launch_config, session_id as wor
 
 
 ACTIVE = {"starting", "running", "cancelling", "idle"}
-EFFORTS = ["medium", "high", "xhigh", "max"]
 SCRIPT = None
 
 
@@ -48,12 +47,13 @@ def turn_request(state, prompt_file=None, reasoning_effort=None, max_model_steps
         provider=launch["provider"],
         model=launch.get("model"),
         reasoning_effort=reasoning_effort or state["reasoning_effort"],
-        max_model_steps=max_model_steps or int(state.get("max_model_steps", 100)),
+        max_model_steps=state.get("max_model_steps", 100) if max_model_steps is None else max_model_steps,
         read_only=bool(launch.get("read_only")),
         web=bool(launch.get("web")),
         output_schema=launch.get("output_schema"),
         session_logging=bool(launch.get("session_logging", True)),
         isolation=isolation if isolation is not None else dict(launch.get("isolation") or {}),
+        session_dir=launch.get("session_dir"),
     )
 
 
@@ -418,16 +418,24 @@ def reusable_worker(job_id):
                         continue
                     isolation = {"mode": "existing", "base": None, "existing_path": actual}
                     state["actual_workspace"] = actual
+                engine = get_engine(state.get("engine", DEFAULT_ENGINE))
+                try:
+                    next_turn = turn_request(state, prompt_file=request["prompt_file"],
+                                             reasoning_effort=effort, max_model_steps=steps,
+                                             isolation=isolation)
+                    engine.validate_turn(next_turn)
+                    command = engine.build_command(next_turn)
+                except ValueError as error:
+                    state.update(last_turn_status="failed", error=str(error),
+                                 phase="follow-up rejected; ready for another assignment")
+                    save(path / "state.json", state)
+                    pending[0].unlink()
+                    print(f"Worker {job_id}: follow-up rejected: {clean(error)}", flush=True)
+                    continue
                 state.update(prompt_file=request["prompt_file"], reasoning_effort=effort,
-                             max_model_steps=steps,
+                             max_model_steps=steps, command=command,
                              label=request.get("label") or state["label"], turn=state["turn"] + 1,
                              status="running", phase="starting related follow-up")
-                engine = get_engine(state.get("engine", DEFAULT_ENGINE))
-                state["command"] = engine.build_command(
-                    turn_request(state, prompt_file=request["prompt_file"],
-                                 reasoning_effort=effort, max_model_steps=steps,
-                                 isolation=isolation)
-                )
                 save(path / "state.json", state)
                 pending[0].unlink()
                 break
@@ -449,43 +457,46 @@ def create_job(args):
         raise ValueError("--workspace must be an existing absolute directory")
     if not prompt.is_absolute() or not prompt.is_file() or not prompt.stat().st_size:
         raise ValueError("--prompt-file must be an existing nonempty absolute file")
-    if args.max_model_steps < 1:
+    if args.max_model_steps is not None and args.max_model_steps < 1:
         raise ValueError("--max-model-steps must be positive")
     if args.action == "open" and args.no_session_log:
         raise ValueError("reusable workers require session logging to preserve follow-up history")
     if args.session_id and args.no_session_log:
         raise ValueError("--session-id requires retained session logging")
 
-    session_id = None if args.no_session_log else str(uuid.UUID(args.session_id)) if args.session_id else str(uuid.uuid4())
+    engine = get_engine(args.engine)
+    session_id = engine.resolve_session_id(args.session_id, not args.no_session_log)
+    effort = args.reasoning_effort or engine.default_reasoning_effort
+    steps = args.max_model_steps if args.max_model_steps is not None else engine.default_max_model_steps
     isolation = dict(mode="create" if args.worktree else "existing" if args.worktree_existing else "none",
                      base=args.worktree_base, existing_path=args.worktree_existing)
-    engine = get_engine(args.engine)
     launch = engine.resolve_launch(
         provider=args.provider, model=args.model, read_only=args.read_only, web=args.web,
         output_schema=args.output_schema, session_logging=not args.no_session_log,
-        isolation=isolation,
+        isolation=isolation, session_id=session_id, session_root=str(root() / "sessions"),
+        workspace=str(workspace),
     )
     engine.validate_launch(launch)
     initial_turn = TurnRequest(
         binary=launch["binary"], workspace=str(workspace), prompt_file=str(prompt),
         session_id=session_id, provider=launch["provider"], model=launch["model"],
-        reasoning_effort=args.reasoning_effort, max_model_steps=args.max_model_steps,
+        reasoning_effort=effort, max_model_steps=steps,
         read_only=launch["read_only"], web=launch["web"], output_schema=launch["output_schema"],
         session_logging=launch["session_logging"], isolation=launch["isolation"],
+        session_dir=launch.get("session_dir"),
     )
+    engine.validate_turn(initial_turn)
     command = engine.build_command(initial_turn)
     job_id = uuid.uuid4().hex[:12]
     path = root() / job_id
     path.mkdir(mode=0o700)
     (path / "requests").mkdir(mode=0o700)
-    save(path / "policy.json", dict(reasoning_effort=args.reasoning_effort,
-                                   max_model_steps=args.max_model_steps))
+    save(path / "policy.json", dict(reasoning_effort=effort, max_model_steps=steps))
     state = dict(schema_version=SCHEMA_VERSION, engine=args.engine, session_id=session_id,
                  id=job_id, label=args.label or prompt.stem, workspace=str(workspace), log_dir=str(path),
                  prompt_file=str(prompt), command=command, launch=launch, status="starting", phase="starting",
                  started_at=time.time(), steps=0, task_failures=0, malformed_events=0,
-                 model=launch.get("model"), reasoning_effort=args.reasoning_effort,
-                 max_model_steps=args.max_model_steps,
+                 model=launch.get("model"), reasoning_effort=effort, max_model_steps=steps,
                  reusable=args.action == "open", turn=1)
     if args.worktree_existing:
         state["actual_workspace"] = str(Path(args.worktree_existing))
@@ -562,8 +573,8 @@ def parser():
         launch.add_argument("--prompt-file", required=True)
         launch.add_argument("--label")
         launch.add_argument("--engine", default=DEFAULT_ENGINE)
-        launch.add_argument("--reasoning-effort", default="high", choices=EFFORTS)
-        launch.add_argument("--max-model-steps", type=int, default=100)
+        launch.add_argument("--reasoning-effort", help="engine-specific effort; defaults to high")
+        launch.add_argument("--max-model-steps", type=int, help="engine step cap, when supported")
         launch.add_argument("--read-only", action="store_true")
         isolation = launch.add_mutually_exclusive_group()
         isolation.add_argument("--worktree", action="store_true")
@@ -571,7 +582,7 @@ def parser():
         launch.add_argument("--worktree-base")
         launch.add_argument("--web", action="store_true", help="enable engine web tools")
         launch.add_argument("--model")
-        launch.add_argument("--session-id", help="reuse this durable worker session UUID with the same workspace and policy")
+        launch.add_argument("--session-id", help="reuse this engine's session ID with the same workspace and policy")
         launch.add_argument("--output-schema")
         launch.add_argument("--no-session-log", action="store_true")
         launch.add_argument("--provider")
@@ -589,11 +600,11 @@ def parser():
     followup.add_argument("id")
     followup.add_argument("--prompt-file", required=True)
     followup.add_argument("--label")
-    followup.add_argument("--reasoning-effort", choices=EFFORTS, help="override this turn; otherwise use worker policy")
+    followup.add_argument("--reasoning-effort", help="override this turn; otherwise use worker policy")
     followup.add_argument("--max-model-steps", type=int, help="override this turn's step cap")
     effort = commands.add_parser("effort", help="change a reusable worker's default effort for future turns")
     effort.add_argument("id")
-    effort.add_argument("--reasoning-effort", required=True, choices=EFFORTS)
+    effort.add_argument("--reasoning-effort", required=True)
     effort.add_argument("--max-model-steps", type=int)
     watch = commands.add_parser("watch", help="live dashboard; Ctrl-C stops the view, not workers")
     watch.add_argument("--interval", type=float, default=1.0)
@@ -696,6 +707,12 @@ def main(launcher=None):
             raise ValueError("--prompt-file must be an existing nonempty absolute file")
         if args.max_model_steps is not None and args.max_model_steps < 1:
             raise ValueError("--max-model-steps must be positive")
+        policy = json.loads((path / "policy.json").read_text())
+        get_engine(state.get("engine", DEFAULT_ENGINE)).validate_turn(turn_request(
+            state, prompt_file=str(prompt),
+            reasoning_effort=args.reasoning_effort or policy["reasoning_effort"],
+            max_model_steps=args.max_model_steps if args.max_model_steps is not None else policy["max_model_steps"],
+        ))
         request = f"{time.time_ns():020}-{uuid.uuid4().hex}.json"
         save(path / "requests" / request, dict(prompt_file=str(prompt), label=args.label,
                                                reasoning_effort=args.reasoning_effort,
@@ -709,6 +726,10 @@ def main(launcher=None):
         if args.max_model_steps is not None and args.max_model_steps < 1:
             raise ValueError("--max-model-steps must be positive")
         policy = json.loads((path / "policy.json").read_text())
+        get_engine(state.get("engine", DEFAULT_ENGINE)).validate_turn(turn_request(
+            state, reasoning_effort=args.reasoning_effort,
+            max_model_steps=args.max_model_steps if args.max_model_steps is not None else policy["max_model_steps"],
+        ))
         policy["reasoning_effort"] = args.reasoning_effort
         if args.max_model_steps is not None:
             policy["max_model_steps"] = args.max_model_steps

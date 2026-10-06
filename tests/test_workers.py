@@ -632,8 +632,12 @@ class WorkerChecks(unittest.TestCase):
         self.assertEqual(dry.returncode, 0, dry.stderr)
         self.assertFalse(bin_dir.exists())
         bin_dir.mkdir()
-        previous = bin_dir / "muse-worker"
+        previous = bin_dir / "codex-subagent-worker"
         previous.write_text("previous launcher\n")
+        legacy = bin_dir / "muse-worker"
+        legacy.write_text('#!/usr/bin/env bash\n# Keep a Muse worker available for follow-ups with visible progress.\n'
+                          'set -euo pipefail\nscript_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)\n'
+                          'exec "$script_dir/codex-workers" open "$@"\n')
         done = subprocess.run([install], env=env, capture_output=True, text=True)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual((bin_dir / "codex-workers").read_bytes(), Path(CLI).read_bytes())
@@ -646,9 +650,15 @@ class WorkerChecks(unittest.TestCase):
                                    cwd=outside, capture_output=True, text=True, timeout=12)
         self.assertEqual(installed.returncode, 0, installed.stderr)
         self.assertIn("Workers:", installed.stdout)
-        backups = list((state_home / "muse-subagents/backups").glob("*/muse-worker"))
+        backups = list((state_home / "muse-subagents/backups").glob("*/codex-subagent-worker"))
         self.assertEqual(len(backups), 1)
         self.assertEqual(backups[0].read_text(), "previous launcher\n")
+        self.assertFalse(legacy.exists())
+        self.assertEqual(len(list((state_home / "muse-subagents/backups").glob("*/muse-worker"))), 1)
+        launcher = subprocess.run([str(bin_dir / "codex-subagent-worker"), "--help"], env=env,
+                                  cwd=outside, capture_output=True, text=True, timeout=12)
+        self.assertEqual(launcher.returncode, 0, launcher.stderr)
+        self.assertIn("--engine", launcher.stdout)
         self.assertEqual(global_file.read_text(), "Existing personal instructions.\n")
         again = subprocess.run([install], env=env, capture_output=True, text=True)
         self.assertEqual(again.returncode, 0, again.stderr)
@@ -672,7 +682,7 @@ class WorkerChecks(unittest.TestCase):
         result = subprocess.run([str(REPO_ROOT / "install.sh")], env=env, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(protected.read_text(), "keep me")
-        self.assertFalse((bin_dir / "muse-worker").exists())
+        self.assertFalse((bin_dir / "codex-subagent-worker").exists())
 
     def test_tmux_session_with_nondefault_pane_indices(self):
         import shutil

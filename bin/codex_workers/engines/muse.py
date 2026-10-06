@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import uuid
 
 from codex_workers.engine import WorkerEngine
 from codex_workers.state import launch_config, session_id
@@ -15,6 +16,18 @@ MUSE_MODEL = "muse-spark-1.3-contributor"
 class MuseEngine(WorkerEngine):
     name = "muse"
     default_model = MUSE_MODEL
+    default_max_model_steps = 100
+
+    def resolve_session_id(self, value, session_logging=True):
+        if not session_logging:
+            return None
+        return str(uuid.UUID(value)) if value else str(uuid.uuid4())
+
+    def validate_turn(self, request):
+        if request.reasoning_effort not in {"medium", "high", "xhigh", "max"}:
+            raise ValueError(f"unsupported Muse reasoning effort: {request.reasoning_effort}")
+        if request.max_model_steps is None or request.max_model_steps < 1:
+            raise ValueError("--max-model-steps must be positive")
 
     def resolve_launch(self, **options):
         provider = options.get("provider") or "meta"

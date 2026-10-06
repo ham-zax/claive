@@ -1,6 +1,6 @@
 ---
 name: subagent-routing
-description: Claude Code rules for delegating work. Workers are Muse and Pi, driven through the worker-orchestration skill (codex-workers / codex-orch). Sonnet 5.5 only when the user asks for it. Load only after the user explicitly permits subagents for the current task.
+description: Claude Code rules for delegating work. Workers are Muse and Pi, driven through the worker-orchestration skill (codex-workers / codex-orch). Sonnet 5.5 only when the user asks for it. Hamza grants standing, unrestricted permission for Muse and Pi workers; load before delegating.
 ---
 
 # Subagent routing (Claude Code)
@@ -14,10 +14,13 @@ never proof.
 
 1. **Muse and Pi through this repository's tooling**. This is the default and the
    only preferred route. Load the `worker-orchestration` skill and follow it:
-   - Muse (`muse-spark-1.3-contributor`) implements.
-   - Pi (`--engine pi --provider opencode2api --model <id>`) critiques, makes the
-     diverse second attempt, or reviews. It never critiques Muse with a
-     muse-spark model.
+   - Muse (`muse-spark-1.3-contributor`) implements at effort `xhigh`, or `max`
+     for very complicated tasks. `high`/`medium` only rarely, for trivial chores.
+   - Pi (`--engine pi --provider opencode2api --model <id>`, effort always
+     `max`) critiques, makes the diverse second attempt, or reviews. Prefer
+     `mimo-v2.6-flash-free`, `big-pickle`, `space-bunny-free`; rarely
+     `longcat-2.5-preview-free`. Never `nemotron-*` or `ling-3.1-flash-free`, and
+     never a muse-spark model against Muse.
    - A task with an executable check goes through the `codex-orch` ladder
      (default arm D). Independent chores without a check go to plain
      `codex-workers` workers.
@@ -40,11 +43,13 @@ agent, unless the user names it for the task.
   design, public behaviour, a data format, scope, or the acceptance criteria.
 - Give exact files, symbols, and the planned change so workers skip exploration.
   Ask for raw evidence (verbatim output, file:line), not conclusions.
-- RAM is about 7 GB: at most 2–3 concurrent workers, and only one test or build
-  run at a time.
+- No cap on concurrent Muse/Pi workers, but RAM is about 7 GB: only one test or
+  build run at a time, and back off if memory gets tight.
 - Verify every change myself (`git diff --stat` plus a focused check) before
   reporting it done.
-- Muse quota exhausted: stop giving it work, report the reset time, and ask the
-  user. Never fall back silently, and never substitute Sonnet.
+- Muse quota exhausted: switch the affected lane to the pre-approved fallback,
+  Pi `muse-spark-1.3-contributor-free` at `max`, and tell the user (with the
+  reset time). Any other fallback needs the user's approval; never substitute
+  Sonnet. Return to Muse after the reset.
 - Retire workers when their task chain ends (`codex-workers close`). Start fresh
   ones with a compact handoff rather than growing one worker's context forever.

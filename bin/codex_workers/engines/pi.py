@@ -12,6 +12,7 @@ from codex_workers.state import launch_config, session_id
 
 class PiEngine(WorkerEngine):
     name = "pi"
+    default_reasoning_effort = "max"  # free models; Pi clamps to each model's highest level
     efforts = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
 
     def __init__(self):

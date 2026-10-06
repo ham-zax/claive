@@ -48,7 +48,7 @@ codex-subagent-worker \
   --prompt-file /tmp/worker-task.md \
   --label "Review authentication changes" \
   --read-only \
-  --reasoning-effort high \
+  --reasoning-effort xhigh \
   --max-model-steps 100
 ```
 
@@ -78,7 +78,7 @@ Web tools are disabled by default; `--web` enables them. `--model` accepts only 
 
 Every live Muse worker uses **`muse-spark-1.3-contributor`**. Default reasoning is **`high`** for normal work; use **`medium`** only for trivial tasks such as commit-message generation, and **`xhigh`/`max`** for complex work. The default step cap is 100; raise it when necessary. No alternate Muse model override or automatic helper fallback is permitted. Echo is an offline transport fixture.
 
-The orchestrator can override effort and step cap on each `followup`, or change future defaults with `effort`. Per-turn overrides do not replace the future default. Changes do not alter an in-flight request. Follow-ups run sequentially with the same workspace/tool policy and Muse session UUID. A Muse-created `-w create` worktree is cleaned up when that `muse exec` exits, so persistent isolated follow-ups require an externally retained worktree supplied with `--worktree-existing`.
+Default effort is `xhigh` for Muse (`max` for very complicated tasks; `high`/`medium` only rarely) and `max` for Pi, which clamps it to each model's highest level. The orchestrator can override effort and step cap on each `followup`, or change future defaults with `effort`. Per-turn overrides do not replace the future default. Changes do not alter an in-flight request. Follow-ups run sequentially with the same workspace/tool policy and Muse session UUID. A Muse-created `-w create` worktree is cleaned up when that `muse exec` exits, so persistent isolated follow-ups require an externally retained worktree supplied with `--worktree-existing`.
 
 The outer supervisor stays alive, while each underlying `muse exec` exits after a turn. Session logging lets the next exec restore history. Related follow-ups should reuse this worker, without arbitrary retirement after a fixed number of tasks. After closure, `codex-subagent-worker --session-id UUID` can restore retained history in the same workspace and tool policy; inspect `show JOB_ID --json` for that UUID. If isolation must persist across turns, provide an externally retained worktree with `--worktree-existing`. Keep unrelated lanes separate.
 
@@ -127,7 +127,7 @@ The paper, design, plan, protocol, environment facts, and implementation mapping
 
 ## Five-hour quota
 
-On an explicit Muse subscription-quota exhaustion, the manager records the failure and reported reset time and prints a notice to ask Hamza whether to wait or approve a specific available fallback subagent/model. The orchestrator stops sending work to that exhausted quota and continues independent authorized work while awaiting the choice. A generic 429 alone is not proof of the five-hour limit. Nothing in the manager switches providers or retries automatically. A confirmed fallback applies to the affected assignment and does not change Muse's defaults. OpenCode's historical relay remains unavailable until repaired and verified.
+On an explicit Muse subscription-quota exhaustion, the manager records the failure and reported reset time and prints a notice naming the pre-approved fallback, Pi `muse-spark-1.3-contributor-free` at `max`; any other fallback needs Hamza's approval. The orchestrator stops sending work to that exhausted quota and switches the affected lane to that fallback, telling Hamza. A generic 429 alone is not proof of the five-hour limit. Nothing in the manager switches providers or retries automatically. The orchestrator (not the manager) makes the switch; the fallback applies to the affected assignment and does not change Muse's defaults. OpenCode's historical relay remains unavailable until repaired and verified.
 
 ## Files and installation
 

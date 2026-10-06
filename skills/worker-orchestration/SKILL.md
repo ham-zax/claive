@@ -26,23 +26,35 @@ Background and evidence: `/home/hamza/repo/codex-muse-workers/docs/experiment/`
 - **No verifier?** Write one first: a small test or check script that fails now.
   If that is impossible, use a plain `codex-workers` fan-out (below) and review
   the result yourself. Do not pretend a model review is verification.
-- Respect the host's rules on delegation. If the user has not asked for workers
-  or subagents and the host instructions require permission, ask first.
+- Respect the host's rules on delegation. Hamza's Claude Code setup grants
+  standing permission for Muse and Pi workers, so no per-task ask is needed
+  there; elsewhere, ask first if the host requires it.
 
 ## Roles and roster
 
 | Role | Default | Why |
 |---|---|---|
-| Implementer (lane a) | Muse `muse-spark-1.3-contributor` (engine `muse`, model pinned, effort `high`) | Workhorse: follows instructions precisely |
-| Critic (read-only) | Pi, a family **other than muse-spark**: `nemotron-3-ultra-free`, `mimo-v2.6-flash-free`, `big-pickle`, `longcat-2.5-preview-free`, `ling-3.1-flash-free`, `space-bunny-free` | A different family sees different blind spots; Muse is a weak critic of itself |
-| Second candidate (lane b, arm D) | Pi, a family different from lane a, **plus a different strategy** | Diversity must be deliberate (paper: resampling saturates) |
+| Implementer (lane a) | Muse `muse-spark-1.3-contributor` (engine `muse`, model pinned, effort `xhigh`; `max` for very complicated tasks) | Workhorse: follows instructions precisely |
+| Implementer fallback (Muse quota exhausted only) | Pi `muse-spark-1.3-contributor-free`, effort `max` | Same model family through the free gateway; pre-approved by the user |
+| Critic (read-only) | Pi, in this order: `mimo-v2.6-flash-free`, `big-pickle`, `space-bunny-free`; rarely `longcat-2.5-preview-free` | A different family sees different blind spots; Muse is a weak critic of itself |
+| Second candidate (lane b, arm D) | Pi, from the same preferred list, a family different from lane a and the last critic, **plus a different strategy** | Diversity must be deliberate (paper: resampling saturates) |
 | Reviewer (tie only) | Pi read-only, a different family from both lanes if possible | Called at most once |
 | Verifier | The verify command | Final judge |
 
-Families: big-pickle, ling, longcat, mimo, muse-spark, nemotron, space-bunny.
-`muse-spark-1.3-free` and `muse-spark-1.3-contributor-free` on Pi count as **the
-same family as Muse**: never use them to critique Muse. `codex-orch worker`
-refuses same-family critics.
+**Do not use** `nemotron-*` or `ling-3.1-flash-free` (user preference). Use
+`longcat-2.5-preview-free` only when the three preferred families are already
+used in the run or failing. `muse-spark-1.3-free` and
+`muse-spark-1.3-contributor-free` on Pi count as **the same family as Muse**:
+never use them as critic or lane b against Muse. `codex-orch worker` refuses
+same-family critics.
+
+**Reasoning effort.** Pi models are free, so always run them at `max`
+(`--reasoning-effort max`, the Pi engine default). Pi clamps it to each model's
+highest level: measured mimo and big-pickle → `high`,
+muse-spark-1.3-contributor-free → `xhigh`, space-bunny → `max`. Muse uses `xhigh`
+for normal tasks (the default) and `max` for very complicated ones (deep
+debugging, cross-cutting design, subtle concurrency or data-format work). Use
+`high` or `medium` only rarely, for trivial mechanical chores, and say why.
 
 Pi rules: **always pass `--model`** (an explicit model also becomes Pi's global
 default, and omitting it inherits whatever was used last), plus `--engine pi
@@ -100,11 +112,11 @@ Then loop on `codex-orch next RUN` and do what it names:
 | `next` says | Do |
 |---|---|
 | `add_lane a` | `codex-orch lane RUN a --engine muse --model muse-spark-1.3-contributor` |
-| `implement a` | `P=$(codex-orch prompt RUN implement a)`; launch `codex-workers open --workspace <lane path> --prompt-file "$P" --label RUN-a --reasoning-effort high --max-model-steps 100` (background, see host mechanics); `codex-orch worker RUN a --role implementer --worker-id W`; `codex-workers wait W` |
+| `implement a` | `P=$(codex-orch prompt RUN implement a)`; launch `codex-workers open --workspace <lane path> --prompt-file "$P" --label RUN-a --reasoning-effort xhigh --max-model-steps 100` (`max` for very complicated tasks; for a Pi lane use `--engine pi --provider opencode2api --model <lane model> --reasoning-effort max` and no step cap) (background, see host mechanics); `codex-orch worker RUN a --role implementer --worker-id W`; `codex-workers wait W` |
 | `verify a` | after the implementer's turn ends: `codex-orch verify RUN a`. It runs the tests, then checkpoints or **reverts a regression automatically** |
-| `critique a` | `P=$(codex-orch prompt RUN critique a)`; `codex-workers start --engine pi --provider opencode2api --model <other family> --read-only --workspace <lane path> --prompt-file "$P" --label RUN-a-critic`; `codex-orch worker RUN a --role critic --worker-id C`; `codex-workers wait C`; `codex-orch critique RUN a --worker-id C` (the lane argument is required) |
+| `critique a` | `P=$(codex-orch prompt RUN critique a)`; `codex-workers start --engine pi --provider opencode2api --model <next preferred critic> --reasoning-effort max --read-only --workspace <lane path> --prompt-file "$P" --label RUN-a-critic`; `codex-orch worker RUN a --role critic --worker-id C`; `codex-workers wait C`; `codex-orch critique RUN a --worker-id C` (the lane argument is required) |
 | `correct a` | `P=$(codex-orch prompt RUN correct a)`; `codex-workers followup W --prompt-file "$P"` (**same session**: it keeps its context); `codex-workers wait W`; `codex-orch verify RUN a` |
-| `add_lane b` | lane a stalled. `codex-orch lane RUN b --engine pi --model <family ≠ a and ≠ the last critic> --strategy "<a materially different approach>"`, then the same implement, verify, critique and correct cycle in lane b, with a critic of yet another family where possible. Lane b **never** sees lane a's diff |
+| `add_lane b` | lane a stalled. `codex-orch lane RUN b --engine pi --model <preferred family ≠ a and ≠ the last critic> --strategy "<a materially different approach>"`, then the same implement, verify, critique and correct cycle in lane b, with a critic of yet another family where possible. Lane b **never** sees lane a's diff |
 | `review` | `P=$(codex-orch prompt RUN review)`; start a read-only Pi reviewer; `codex-orch review RUN --worker-id R` |
 | `finish` | `codex-orch finish RUN`, `codex-orch usage RUN`, `codex-orch report RUN`, then integrate (below), close workers, `codex-orch cleanup RUN` |
 
@@ -160,8 +172,9 @@ for unverifiable chores, use plain `codex-workers open` workers, each in its own
 worktree. Rules:
 
 - One writer per worktree. Read-only workers may share.
-- At most 2–3 concurrent workers and **one verifier at a time**: the machine has
-  about 7 GB RAM, shared.
+- No fixed cap on concurrent workers (the models run remotely), but keep
+  **one verifier, test or build at a time**: the machine has about 7 GB RAM,
+  shared. Back off if memory gets tight.
 - Give each worker its scope, the files it owns, "do not commit, do not delegate,
   others are editing nearby", and the report format: outcome, files, checks run,
   doubts, blockers.
@@ -170,8 +183,15 @@ worktree. Rules:
 ## Quota and failures
 
 - Muse reports `Subscription quota exhausted` (a five-hour quota): stop assigning
-  Muse work. Report the reset time and **ask the user** whether to wait or use a
-  specific Pi model for that lane. Never switch silently.
+  Muse work and use the **pre-approved fallback**, Pi
+  `muse-spark-1.3-contributor-free` at `max`. Tell the user the reset time and
+  that the fallback is in use. A run's lane cannot switch engines, so: note the
+  best checkpoint commit (`codex-orch report RUN`), `codex-orch finish RUN
+  --abort --reason "muse quota"`, then `codex-orch init` a new run with
+  `--base <that commit>` (or the original base if none) and
+  `codex-orch lane NEW a --engine pi --model muse-spark-1.3-contributor-free`.
+  Any other fallback model needs the user's approval. Go back to Muse after the
+  reset.
 - A worker that fails (non-zero `wait`) is not success. Read
   `codex-workers logs ID --stderr`, retry once only with a changed hypothesis,
   otherwise `codex-orch finish RUN --abort --reason "..."` and report.

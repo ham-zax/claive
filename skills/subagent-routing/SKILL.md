@@ -15,9 +15,11 @@ For a task with an executable check, prefer the verifier-gated ladder in the `wo
 
 Use **only `muse-spark-1.3-contributor`** for Muse workers. The launcher pins this model rather than inheriting another default. Do not substitute a different Muse model/provider or route through agy/OpenCode's historical defaults without explicit fallback authorization below. Their relay copies in `reference/` are archival. Native host subagents require an explicit request.
 
-- **`high`: default for normal implementation, investigation, review, and other substantive work.**
-- **`medium`: trivial work such as generating a commit message.** Do not downgrade normal tasks merely to reduce cost.
-- **`xhigh` or `max`: complex work**, difficult fixes, or consequential reasoning.
+- **`xhigh`: default for normal implementation, investigation, review, and other substantive work** (the Muse engine default).
+- **`max`: very complicated work**, difficult fixes, or consequential reasoning.
+- **`high`/`medium`: rarely**, only for trivial mechanical work such as generating a commit message.
+- **Pi workers: always `max`** (the Pi engine default). They are free; Pi clamps `max` to each model's highest supported level.
+- **Pi models:** prefer `mimo-v2.6-flash-free`, `big-pickle`, `space-bunny-free`; `longcat-2.5-preview-free` only rarely. Do not use `nemotron-*` or `ling-3.1-flash-free`.
 
 The orchestrator can select effort per turn or change an existing worker's future default at any time. Changes apply to the next request; they cannot change an in-flight API call. Muse defaults to 100 model steps; Pi rejects `--max-model-steps`. Set a cap suitable for the assignment, including a higher cap when needed; a step cap is not a monetary budget or timeout.
 
@@ -42,7 +44,7 @@ exec /home/hamza/.local/bin/codex-subagent-worker \
   --workspace "$task_workspace" \
   --prompt-file "$task_prompt" \
   --label "Implement assigned feature" \
-  --reasoning-effort high \
+  --reasoning-effort xhigh \
   --max-model-steps 100
 ```
 
@@ -99,7 +101,7 @@ if /home/hamza/.local/bin/muse exec \
   --json \
   --model muse-spark-1.3-contributor \
   --session-id "$task_session" \
-  --reasoning-effort high \
+  --reasoning-effort xhigh \
   --max-model-steps 100 \
   --user-input-auto-resolve \
   --prompt-file "$task_prompt" \
@@ -111,7 +113,7 @@ else
 fi
 ```
 
-- Pin `--model muse-spark-1.3-contributor`. Use `high` for normal tasks, `medium` for trivial tasks, and `xhigh`/`max` for complex work; the orchestrator chooses per turn.
+- Pin `--model muse-spark-1.3-contributor`. Use `xhigh` for normal tasks and `max` for very complicated work; `high`/`medium` only rarely for trivial chores. The orchestrator chooses per turn.
 - Set `--max-model-steps` to fit the assignment; the default 100 is not a required ceiling.
 - `--user-input-auto-resolve` cancels interactive questions automatically. A worker that needs an answer must report a blocker; cancellation is not authorization.
 - For enforced read-only work add **both** `--disable-write --disable-shell`. The first disables only non-shell filesystem writes; leaving shell enabled permits writes through commands. Run any necessary verification commands in the parent or an isolated workspace.
@@ -163,6 +165,6 @@ On failure, retry only with a changed hypothesis or clearer assignment. Report a
 
 ## Five-hour quota and fallback
 
-When Muse explicitly reports `Subscription quota exhausted`, stop sending assignments against that quota. Report its reset time if present and ask Hamza whether to wait for reset or authorize a specific available fallback subagent/model for the affected lane. Explain that this routing policy requires his choice before changing the worker/model. Keep doing independent authorized work while awaiting the answer. Do not silently switch, run repeated same-quota retries, or treat every generic 429 as the five-hour subscription limit.
+When Muse explicitly reports `Subscription quota exhausted`, stop sending assignments against that quota. Hamza has pre-approved one fallback: Pi `muse-spark-1.3-contributor-free` (`--engine pi --provider opencode2api`, effort `max`) for the affected lane. Switch to it, report the reset time if present, and tell Hamza the fallback is in use. Any other fallback model or subagent still needs his explicit choice. Return to Muse after the reset. Do not run repeated same-quota retries or treat every generic 429 as the five-hour subscription limit.
 
-The manager records `quota_exhausted`, `quota_reset_at` when provided, and `fallback_requires_user_approval`; `show`/`wait` print the fallback notice. It never launches an alternate provider. After explicit authorization, preserve the original assignment's scope, write ownership, isolation, monitoring, and result checks with the chosen worker. That exception does not alter Muse's pinned model or high normal default. Do not offer the broken OpenCode relay until repaired and verified. Close the Muse supervisor when no further use is planned; retained history can be resumed after reset.
+The manager records `quota_exhausted`, `quota_reset_at` when provided, and `fallback_requires_user_approval`; `show`/`wait` print the fallback notice. It never launches an alternate provider itself. When switching to the fallback, preserve the original assignment's scope, write ownership, isolation, monitoring, and result checks with the chosen worker. The fallback does not alter Muse's pinned model or its xhigh normal default. Do not offer the broken OpenCode relay until repaired and verified. Close the Muse supervisor when no further use is planned; retained history can be resumed after reset.

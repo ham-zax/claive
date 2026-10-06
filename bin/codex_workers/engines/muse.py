@@ -16,6 +16,7 @@ MUSE_MODEL = "muse-spark-1.3-contributor"
 class MuseEngine(WorkerEngine):
     name = "muse"
     default_model = MUSE_MODEL
+    default_reasoning_effort = "xhigh"
     default_max_model_steps = 100
 
     def resolve_session_id(self, value, session_logging=True):

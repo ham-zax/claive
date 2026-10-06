@@ -7,7 +7,7 @@ the default engine; selecting Pi never changes or falls back to another engine.
 codex-subagent-worker --engine pi \
   --workspace /absolute/repository \
   --prompt-file /absolute/task.md \
-  --provider opencode2api --reasoning-effort high
+  --provider opencode2api --model mimo-v2.6-flash-free --reasoning-effort max
 ```
 
 Pi uses `opencode2api` and high thinking. The initial model is

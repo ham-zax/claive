@@ -516,7 +516,8 @@ def report(state):
         print(f"Task failures reported: {state['task_failures']} (inspect logs before accepting work)")
     if state.get("quota_exhausted"):
         print(f"Worker engine quota exhausted ({state.get('engine', DEFAULT_ENGINE)}). Reset: {state.get('quota_reset_at', 'not reported')}.")
-        print("Ask the user to approve a specific fallback subagent/model or wait for reset; no automatic switch.")
+        print("Pre-approved fallback: Pi muse-spark-1.3-contributor-free (opencode2api) for the affected lane; "
+              "tell the user. Any other fallback needs their approval; this manager never switches automatically.")
     print(f"Logs: {path}")
     result = path / "result.txt"
     if result.exists():
@@ -573,7 +574,7 @@ def parser():
         launch.add_argument("--prompt-file", required=True)
         launch.add_argument("--label")
         launch.add_argument("--engine", default=DEFAULT_ENGINE)
-        launch.add_argument("--reasoning-effort", help="engine-specific effort; defaults to high")
+        launch.add_argument("--reasoning-effort", help="engine-specific effort; defaults to xhigh (Muse) or max (Pi)")
         launch.add_argument("--max-model-steps", type=int, help="engine step cap, when supported")
         launch.add_argument("--read-only", action="store_true")
         isolation = launch.add_mutually_exclusive_group()

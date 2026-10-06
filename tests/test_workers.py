@@ -139,12 +139,12 @@ class WorkerChecks(unittest.TestCase):
             time.sleep(0.025)
         self.fail("worker did not become idle after assigned turn")
 
-    def test_pinned_model_high_defaults_and_rejected_overrides(self):
+    def test_pinned_model_xhigh_defaults_and_rejected_overrides(self):
         result, state = self.launch()
         self.assertEqual(result.returncode, 0)
         command = state["command"]
         self.assertEqual(command[command.index("--model") + 1], "muse-spark-1.3-contributor")
-        self.assertEqual(command[command.index("--reasoning-effort") + 1], "high")
+        self.assertEqual(command[command.index("--reasoning-effort") + 1], "xhigh")
         self.assertEqual(command[command.index("--max-model-steps") + 1], "100")
         for option, value in [("--model", "other-model"), ("--reasoning-effort", "low")]:
             result = self.cli("run", "--workspace", str(self.path), "--prompt-file", str(self.prompt), option, value)
@@ -268,8 +268,8 @@ class WorkerChecks(unittest.TestCase):
         process, initial = self.open_worker(mode="brief")
         job = initial["id"]
         self.until_running(job)
-        self.assertEqual(self.cli("effort", job, "--reasoning-effort", "xhigh").returncode, 0)
-        self.assertEqual(json.loads(self.cli("show", job, "--json").stdout)["reasoning_effort"], "high")
+        self.assertEqual(self.cli("effort", job, "--reasoning-effort", "max").returncode, 0)
+        self.assertEqual(json.loads(self.cli("show", job, "--json").stdout)["reasoning_effort"], "xhigh")
         for _ in range(2):
             self.assertEqual(self.cli("followup", job, "--prompt-file", str(self.prompt)).returncode, 0)
         self.assertEqual(self.cli("close", job).returncode, 0)
@@ -277,7 +277,7 @@ class WorkerChecks(unittest.TestCase):
         self.assertEqual(process.returncode, 0)
         final = json.loads(self.cli("show", job, "--json").stdout)
         self.assertEqual(final["turn"], 3)
-        self.assertEqual(final["reasoning_effort"], "xhigh")
+        self.assertEqual(final["reasoning_effort"], "max")
         self.assertNotEqual(self.cli("followup", job, "--prompt-file", str(self.prompt)).returncode, 0)
 
     def test_reusable_failure_and_idle_cancellation(self):
@@ -300,8 +300,8 @@ class WorkerChecks(unittest.TestCase):
         self.assertTrue(state["quota_exhausted"])
         self.assertTrue(state["fallback_requires_user_approval"])
         self.assertEqual(state["quota_reset_at"], "2099-10-02T14:51:16Z")
-        self.assertIn("Ask the user", result.stdout)
-        self.assertIn("no automatic switch", result.stdout)
+        self.assertIn("muse-spark-1.3-contributor-free", result.stdout)
+        self.assertIn("never switches automatically", result.stdout)
         self.assertEqual(state["model"], MUSE_MODEL)
         generic = {"task_failures": 0}
         native = {"payload_type": "task.lifecycle.failed",

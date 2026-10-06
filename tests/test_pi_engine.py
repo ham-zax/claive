@@ -143,6 +143,7 @@ class PiChecks(unittest.TestCase):
         settings = json.loads(self.settings.read_text())
         self.assertEqual(settings["defaultModel"], "big-pickle")
         self.assertEqual(settings["theme"], "custom")
+        self.assertEqual(selected["reasoning_effort"], "max")
         self.assertEqual(settings["defaultThinkingLevel"], "max")
         self.assertEqual(self.command("followup", original["id"], "--prompt-file", str(self.prompt)).returncode, 0)
         resumed = self.idle(original["id"], turn=2)

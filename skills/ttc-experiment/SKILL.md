@@ -34,7 +34,10 @@ identical to the `worker-orchestration` skill. Load it too and follow its
    model; lane-b engine, model and strategy text; rounds D; harness versions. No
    critic rotation within a batch unless critic diversity is the variable under
    test. A free gateway model that fails is an incident, **not** a reason to swap
-   models silently. Pause and ask the user.
+   models silently. Pause and ask the user. Defaults: Muse at `xhigh`, every Pi
+   model at `max`, Pi models from `mimo-v2.6-flash-free`, `big-pickle`,
+   `space-bunny-free` (rarely `longcat-2.5-preview-free`; never `nemotron-*` or
+   `ling-3.1-flash-free`).
 4. **Never reveal** `difficulty`, the reference commit, other arms' results, or
    held-out checks to any worker. Task text is the manifest's `task` field
    verbatim.
@@ -56,7 +59,7 @@ identical to the `worker-orchestration` skill. Load it too and follow its
   `python3 --version`, `git --version`. Compare them with `04-webhmf-environment.md`.
 - Check that Muse quota is available and the chosen Pi models answer. Per model,
   `echo 'Reply OK' > /abs/scratch/ping.md` and then `codex-workers run --engine pi
-  --provider opencode2api --model M --read-only --workspace /abs/scratch
+  --provider opencode2api --model M --reasoning-effort max --read-only --workspace /abs/scratch
   --prompt-file /abs/scratch/ping.md` is enough.
 
 ## Corpus validation (once per task, before it enters the corpus)
@@ -110,7 +113,8 @@ experiment diffs into the corpus repos.
 - Introduce arms per the plan's gates: **A and R first**, then **B and B0**, then
   **R' and D**. Stop at a failed gate (below).
 - Muse quota exhausted: pause the batch, report the reset time, and ask the user.
-  Never fill in with Pi as the implementer.
+  The daily-use Pi fallback (`muse-spark-1.3-contributor-free`) does **not**
+  apply inside a batch: it changes the implementer, which is fixed per batch.
 
 ## Analysis
 

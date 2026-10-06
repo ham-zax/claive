@@ -8,6 +8,7 @@ See docs/experiment/06-skill-driven-implementation.md.
 
 import argparse
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -209,7 +210,43 @@ def fold(events):
             lane["no_progress"] += 1
             lane["reverted_last"] = True
         elif kind == "critique.completed" and lane is not None:
-            lane["critiques"].append(data)
+            entry = dict(data)
+            entry["rejected"] = list(data.get("rejected") or [])
+            entry["_original_defects"] = [dict(d) for d in data.get("defects") or []]
+            lane["critiques"].append(entry)
+        elif kind == "verification.rescored" and lane is not None:
+            if lane["verifications"]:
+                lane["verifications"][-1] = data["result"]
+                lane["best"] = data["result"]
+                rounds = max(len(lane["verifications"]) - 1, 0)
+                lane["critiques"] = [c for c in lane["critiques"] if c["round"] <= rounds]
+        elif kind == "critique.rejected" and lane is not None:
+            matches = [c for c in lane["critiques"] if c.get("round") == data.get("round")]
+            if matches:
+                crit = matches[-1]
+                orig = crit.get("_original_defects")
+                if orig is None:
+                    orig = list(crit.get("defects") or [])
+                    crit["_original_defects"] = [dict(d) for d in orig]
+                if crit.get("rejected") is None:
+                    crit["rejected"] = []
+                seen = {r.get("index") for r in crit["rejected"]}
+                for number in data.get("defects") or []:
+                    try:
+                        index = int(number)
+                    except (TypeError, ValueError):
+                        continue
+                    if index in seen:
+                        continue
+                    if index < 1 or index > len(orig):
+                        continue
+                    description = orig[index - 1].get("description", "") if isinstance(orig[index - 1], dict) else ""
+                    crit["rejected"].append({"index": index, "description": description,
+                                            "reason": data.get("reason", "")})
+                    seen.add(index)
+                crit["defects"] = [dict(d) for i, d in enumerate(orig, 1) if i not in seen]
+                if not crit["defects"]:
+                    crit["no_concrete_defect"] = True
         elif kind == "review.completed":
             state["review"] = data
         elif kind == "usage.collected":
@@ -414,6 +451,100 @@ def bounded(text, limit):
     return text[:half] + f"\n\n[... {len(text) - limit} characters omitted ...]\n\n" + text[-half:]
 
 
+def cache_root_for_repo(repo_path):
+    """Cache root for one repository; created on demand for CLAIVE_ORCH_CACHE."""
+    digest = hashlib.sha256(str(repo_path).encode()).hexdigest()[:16]
+    root = runs_root().parent / "orch-cache" / digest
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return root
+
+
+def lane_local_paths(lane, config=None):
+    """Repo-relative paths that stay out of checkpoints (setup outputs plus cache paths)."""
+    paths = set()
+    for entry in (lane.get("local_paths") if lane else None) or []:
+        cleaned = str(entry).strip().rstrip("/")
+        if cleaned and cleaned != ".":
+            paths.add(cleaned)
+    for entry in ((config or {}).get("cache_paths") or []):
+        cleaned = str(entry).strip().rstrip("/")
+        if cleaned and cleaned != ".":
+            paths.add(cleaned)
+    return sorted(paths)
+
+
+def list_untracked(worktree):
+    """Untracked paths in a worktree (repo-relative, trailing slashes stripped)."""
+    output = git(worktree, "ls-files", "--others", "--exclude-standard", "--directory",
+                 "--no-empty-directory", check=False)
+    entries = set()
+    for line in output.splitlines():
+        cleaned = line.strip().rstrip("/")
+        if cleaned:
+            entries.add(cleaned)
+    return entries
+
+
+def porcelain_is_local(line, local_paths):
+    """True when a porcelain status line refers only to local paths."""
+    if len(line) < 4:
+        return False
+    cleaned_locals = [p.rstrip("/") for p in local_paths if p.rstrip("/")]
+    if not cleaned_locals:
+        return False
+
+    def is_local(path):
+        candidate = path.strip().strip('"').rstrip("/")
+        for local in cleaned_locals:
+            if candidate == local or candidate.startswith(local + "/"):
+                return True
+        return False
+
+    part = line[3:]
+    if " -> " in part:
+        return all(is_local(piece) for piece in part.split(" -> "))
+    return is_local(part)
+
+
+def dirty_outside_local(worktree, local_paths):
+    """Porcelain lines for changes outside the local paths."""
+    output = git(worktree, "status", "--porcelain", check=False)
+    return [line for line in output.splitlines()
+            if line.strip() and not porcelain_is_local(line, local_paths)]
+
+
+def remove_tree(path):
+    """Remove a file, directory or symlink without following symlinks."""
+    target = Path(path)
+    try:
+        if target.is_symlink() or target.is_file():
+            target.unlink()
+        elif target.is_dir():
+            shutil.rmtree(target)
+        elif os.path.lexists(target):
+            target.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def copy_cached_entry(source, destination):
+    """Copy one cached path, keeping symlinks as symlinks."""
+    src, dst = Path(source), Path(destination)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if src.is_symlink():
+        remove_tree(dst)
+        dst.symlink_to(os.readlink(src))
+    elif src.is_dir() and not src.is_symlink():
+        remove_tree(dst)
+        shutil.copytree(src, dst, symlinks=True)
+    else:
+        remove_tree(dst)
+        shutil.copy2(src, dst)
+
+
 def copy_acceptance(source, target):
     """Copy held-out checks into a workspace; return the created paths for removal."""
     created = []
@@ -445,15 +576,39 @@ def remove_paths(paths):
             path.unlink(missing_ok=True)
 
 
+def clear_stale_pycache(created):
+    """Drop .pyc caches for copied held-out checks so an edited check is re-read."""
+    for entry in created:
+        path = Path(entry)
+        if not path.is_file() or path.suffix != ".py":
+            continue
+        cache_dir = path.parent / "__pycache__"
+        if cache_dir.is_dir():
+            for cached in cache_dir.glob(f"{path.stem}.*.pyc"):
+                try:
+                    cached.unlink()
+                except OSError:
+                    pass
+        legacy = path.with_suffix(".pyc")
+        try:
+            if legacy.is_file():
+                legacy.unlink()
+        except OSError:
+            pass
+
+
 def run_verifier(config, workspace, output_file):
     """Run the configured verifier in a workspace; return a VerificationResult dict."""
     created = []
     started = time.time()
+    cache_root = cache_root_for_repo(config.get("repo", ""))
+    env = dict(os.environ, CLAIVE_ORCH_CACHE=str(cache_root), CLAIVE_ORCH_REPO=str(config.get("repo", "")))
     try:
         if config.get("acceptance_dir"):
             created = copy_acceptance(config["acceptance_dir"], workspace)
+            clear_stale_pycache(created)
         process = subprocess.run(["bash", "-c", config["verify"]], cwd=workspace, capture_output=True,
-                                 text=True, timeout=config["verify_timeout"], stdin=subprocess.DEVNULL)
+                                 text=True, timeout=config["verify_timeout"], stdin=subprocess.DEVNULL, env=env)
         output, code, status = process.stdout + process.stderr, process.returncode, None
     except subprocess.TimeoutExpired as error:
         output = (error.stdout or "") if isinstance(error.stdout, str) else ""
@@ -475,9 +630,102 @@ def run_verifier(config, workspace, output_file):
             "seconds": round(time.time() - started, 1), "output": str(output_file)}
 
 
+def run_cache_key(config, workspace):
+    """Run the cache-key command; return the hex key or raise ValueError."""
+    cache_root = cache_root_for_repo(config.get("repo", ""))
+    env = dict(os.environ, CLAIVE_ORCH_CACHE=str(cache_root))
+    try:
+        process = subprocess.run(["bash", "-c", config["cache_key"]], cwd=str(workspace),
+                                 capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL, env=env)
+    except subprocess.TimeoutExpired as error:
+        raise ValueError(f"cache-key command timed out: {(error.stdout or '')[-500:]}")
+    if process.returncode:
+        detail = ((process.stdout or "") + (process.stderr or "")).strip()[-500:]
+        raise ValueError(f"cache-key command failed: {detail}")
+    stripped = (process.stdout or "").strip()
+    return hashlib.sha256(stripped.encode()).hexdigest()
+
+
+def restore_cache(cache_dir, workspace, cache_paths):
+    for entry in cache_paths:
+        cleaned = str(entry).strip().rstrip("/")
+        if not cleaned:
+            continue
+        source, destination = Path(cache_dir) / cleaned, Path(workspace) / cleaned
+        if os.path.lexists(source):
+            copy_cached_entry(source, destination)
+
+
+def store_cache(cache_root, key, workspace, cache_paths):
+    cache_dir = Path(cache_root) / key
+    if cache_dir.exists():
+        return False
+    tmpdir = Path(cache_root) / f"{key}.tmp-{os.getpid()}"
+    try:
+        if os.path.lexists(tmpdir):
+            remove_tree(tmpdir)
+        tmpdir.mkdir(parents=True, exist_ok=True)
+        for entry in cache_paths:
+            cleaned = str(entry).strip().rstrip("/")
+            if not cleaned:
+                continue
+            source, destination = Path(workspace) / cleaned, tmpdir / cleaned
+            if os.path.lexists(source):
+                copy_cached_entry(source, destination)
+        try:
+            os.rename(tmpdir, cache_dir)
+        except OSError:
+            if cache_dir.exists():
+                remove_tree(tmpdir)
+                return False
+            remove_tree(tmpdir)
+            return False
+    except OSError:
+        try:
+            remove_tree(tmpdir)
+        except OSError:
+            pass
+        return False
+    return True
+
+
+def verifier_timed_out(result):
+    if result.get("exit_code") is not None:
+        return False
+    try:
+        return "timed out" in Path(result["output"]).read_text()
+    except OSError:
+        return result.get("status") == "error"
+
+
+def verify_with_cache(config, workspace, output_file, run_path):
+    """Run the verifier with build-cache restore/store around it (lanes and base check)."""
+    cache_key, cache_paths = config.get("cache_key"), config.get("cache_paths") or []
+    if not cache_key or not cache_paths:
+        return run_verifier(config, workspace, output_file)
+    try:
+        key = run_cache_key(config, workspace)
+    except ValueError as error:
+        append(run_path, "warning", message=f"verifier cache skipped: {error}")
+        return run_verifier(config, workspace, output_file)
+    root = cache_root_for_repo(config.get("repo", ""))
+    cache_dir = root / key
+    hit = cache_dir.exists()
+    if hit:
+        restore_cache(cache_dir, workspace, cache_paths)
+        print(f"Cache hit {key[:12]}")
+    result = run_verifier(config, workspace, output_file)
+    if not verifier_timed_out(result) and not cache_dir.exists():
+        if store_cache(root, key, workspace, cache_paths):
+            print(f"Cache stored {key[:12]}")
+    return result
+
+
 def run_setup(repo, worktree, command, timeout):
     """Run the lane setup command in a worktree; raise ValueError with the output tail on failure."""
-    env = dict(os.environ, CLAIVE_ORCH_REPO=str(repo), CLAIVE_ORCH_LANE=str(worktree))
+    cache_root = cache_root_for_repo(repo)
+    env = dict(os.environ, CLAIVE_ORCH_REPO=str(repo), CLAIVE_ORCH_LANE=str(worktree),
+               CLAIVE_ORCH_CACHE=str(cache_root))
     try:
         process = subprocess.run(["bash", "-c", command], cwd=str(worktree), capture_output=True,
                                  text=True, timeout=timeout, stdin=subprocess.DEVNULL, env=env)
@@ -574,7 +822,12 @@ CRITIC_SCHEMA = """Answer with a short explanation, then exactly one fenced ```j
 
 def lane_diff(state, lane):
     workspace = lane["path"]
-    git(workspace, "add", "-A", "--intent-to-add", check=False)
+    locals_ = lane_local_paths(lane, state.get("config"))
+    if locals_:
+        git(workspace, "add", "-A", "--intent-to-add", "--", ".",
+            *[f":(exclude,top){p}" for p in locals_], check=False)
+    else:
+        git(workspace, "add", "-A", "--intent-to-add", check=False)
     return git(workspace, "diff", lane["base_commit"], check=False)
 
 
@@ -628,6 +881,8 @@ def build_prompt(state, kind, lane_name=None):
         history = "\n".join(f"- round {c['round']}: " + "; ".join(d["description"][:200] for d in c["defects"])
                             for c in previous if c["defects"]) or "(none)"
         diff = bounded(lane_diff(state, lane), DIFF_LIMIT) or "(no changes)"
+        binding = ("Treat the task's constraints as binding: never propose relaxing, bypassing or weakening "
+                   "a check, gate, validation or test to make verification pass.")
         if config.get("post_pass_critic"):
             limit = config["rounds"] if lane_name == "a" else min(config["rounds"], BREADTH_ROUNDS)
             status, _ = lane_status(config, lane, limit)
@@ -635,7 +890,7 @@ def build_prompt(state, kind, lane_name=None):
                 return (f"# Post-pass review\n\nYou are a critic. You do not edit files. The verifier passes "
                         f"({describe(current_result(lane))}), so look for behaviour changes beyond the task: "
                         f"regressions, changed public behaviour, swallowed errors, wrong counts on error paths, "
-                        f"untested paths.\n\n## Task\n\n{task}\n\n"
+                        f"untested paths. {binding}\n\n## Task\n\n{task}\n\n"
                         f"## Verification\n\n`{command or '(held-out checks only)'}` -> "
                         f"{describe(current_result(lane))}"
                         f"{' (plus held-out checks)' if held_out else ''}\n{held_out}\n\n"
@@ -644,7 +899,7 @@ def build_prompt(state, kind, lane_name=None):
                         f"The workspace is {lane['path']}; you may read files there for context.\n\n"
                         f"{CRITIC_SCHEMA}\n")
         return (f"# Critique a candidate solution\n\nYou are a critic. You do not edit files. "
-                f"Find concrete defects that explain why verification fails.\n\n## Task\n\n{task}\n\n"
+                f"Find concrete defects that explain why verification fails. {binding}\n\n## Task\n\n{task}\n\n"
                 f"## Verification\n\n`{command or '(held-out checks only)'}` -> {describe(current_result(lane))}"
                 f"{' (plus held-out checks)' if held_out else ''}\n{held_out}\n\n"
                 f"## Verifier output (bounded)\n\n```text\n{last_output(lane)}\n```\n\n"
@@ -659,12 +914,17 @@ def build_prompt(state, kind, lane_name=None):
             reverted = (f"\nIMPORTANT: your previous changes made verification worse and were reverted. "
                         f"The workspace is back at the best checkpoint ({describe(lane['best'])}). "
                         f"Re-read the files before editing.\n")
+        rejected_section = ""
+        if critique and critique[-1].get("rejected"):
+            lines = "\n".join(f"{r['index']}. {r['description']} (reason: {r['reason']}) Do not apply this."
+                              for r in critique[-1]["rejected"])
+            rejected_section = f"\n## Rejected suggestions\n\n{lines}\n"
         if critique and critique[-1]["defects"]:
             defects = "\n".join(f"{i}. [{d['location']}] {d['description']} (evidence: {d['evidence']})"
                                 for i, d in enumerate(critique[-1]["defects"], 1))
-            body = f"An independent critic found these defects:\n\n{defects}\n"
+            body = f"An independent critic found these defects:\n\n{defects}\n{rejected_section}"
         else:
-            body = "Use the verifier output below to find and fix the failure.\n"
+            body = "Use the verifier output below to find and fix the failure.\n" + rejected_section
         return (f"# Correction round {rounds}\n\nVerification currently: {describe(current_result(lane))}."
                 f"\n{reverted}\n{body}\n## Verifier output (bounded)\n\n```text\n{last_output(lane)}\n```\n\n"
                 f"Fix these problems in place. Keep everything that already passes passing. "
@@ -704,6 +964,15 @@ def command_init(args):
             raise ValueError("--acceptance-dir must be an existing absolute directory")
         if acceptance.resolve().is_relative_to(repo.resolve()):
             raise ValueError("--acceptance-dir must be outside the repository so workers cannot see it")
+    cache_key = getattr(args, "cache_key", None)
+    raw_cache_paths = getattr(args, "cache_path", None) or []
+    cache_paths = [p for group in raw_cache_paths for p in (group if isinstance(group, list) else [group])]
+    if bool(cache_key) != bool(cache_paths):
+        raise ValueError("--cache-key and --cache-path go together (both or neither)")
+    for entry in cache_paths:
+        cleaned = str(entry).strip()
+        if not cleaned or Path(cleaned).is_absolute() or ".." in Path(cleaned).parts:
+            raise ValueError(f"--cache-path must be repo-relative without '..': {entry}")
     base = git(repo, "rev-parse", "--verify", (args.base or "HEAD") + "^{commit}")
     run_id = uuid.uuid4().hex[:12]
     path = runs_root() / run_id
@@ -717,7 +986,7 @@ def command_init(args):
               "score_regex": args.score_regex, "acceptance_dir": args.acceptance_dir,
               "experiment": args.experiment, "repeat": args.repeat, "max_minutes": args.max_minutes,
               "label": args.label or task.stem, "post_pass_critic": bool(args.post_pass_critic),
-              "setup": args.setup}
+              "setup": args.setup, "cache_key": cache_key, "cache_paths": cache_paths}
     append(path, "run.started", config=config)
     print(f"Run {run_id} | arm {args.arm} | base {base[:12]} | {path}")
     if args.skip_base_check:
@@ -728,7 +997,7 @@ def command_init(args):
         try:
             if config.get("setup"):
                 run_setup(repo, base_dir, config["setup"], config["verify_timeout"])
-            result = run_verifier(config, base_dir, path / "verify" / "base.txt")
+            result = verify_with_cache(config, base_dir, path / "verify" / "base.txt", path)
         finally:
             git(repo, "worktree", "remove", "--force", str(base_dir), check=False)
         append(path, "base.verified", result=result)
@@ -769,6 +1038,7 @@ def command_lane(args):
     branch = f"orch/{config['run_id']}/{name}"
     workspace = path / "lanes" / name
     git(config["repo"], "worktree", "add", "-b", branch, str(workspace), config["base"])
+    before = list_untracked(workspace)
     if config.get("setup"):
         try:
             run_setup(config["repo"], workspace, config["setup"], config["verify_timeout"])
@@ -776,8 +1046,12 @@ def command_lane(args):
             git(config["repo"], "worktree", "remove", "--force", str(workspace), check=False)
             git(config["repo"], "branch", "-D", branch, check=False)
             raise
+    after = list_untracked(workspace) if config.get("setup") else set(before)
+    local_paths = sorted((after - before) | {str(p).strip().rstrip("/")
+                                             for p in config.get("cache_paths") or [] if str(p).strip().rstrip("/")})
     append(path, "lane.added", lane=name, engine=args.engine, model=args.model, family=family,
-           strategy=args.strategy, branch=branch, path=str(workspace), base_commit=config["base"])
+           strategy=args.strategy, branch=branch, path=str(workspace), base_commit=config["base"],
+           local_paths=local_paths)
     print(f"Lane {name} | {args.engine} {args.model or '(engine default)'} | family {family} | {workspace}")
     return 0
 
@@ -797,11 +1071,18 @@ def command_worker(args):
                              f"({lane['engine']}/{lane.get('model')})")
         if Path(record.get("actual_workspace") or record["workspace"]).resolve() != Path(lane["path"]).resolve():
             raise ValueError(f"implementer workspace must be the lane worktree {lane['path']}")
-    elif family == lane["family"]:
-        if not args.allow_same_family:
-            raise ValueError(f"{args.role} family {family} matches the implementer's; choose another model "
-                             "family or pass --allow-same-family (recorded)")
-        append(path, "warning", message=f"{args.role} {args.worker_id} shares family {family} with lane {args.lane}")
+    else:
+        candidates = [(model, family)]
+        for fallback in record.get("fallback_models") or []:
+            candidates.append((fallback, model_family(fallback, engine)))
+        clash = next((candidate_family for _, candidate_family in candidates
+                      if candidate_family == lane["family"]), None)
+        if clash is not None:
+            if not args.allow_same_family:
+                raise ValueError(f"{args.role} family {clash} matches the implementer's; choose another model "
+                                 "family or pass --allow-same-family (recorded)")
+            append(path, "warning", message=f"{args.role} {args.worker_id} shares family {clash} "
+                                            f"with lane {args.lane}")
     append(path, "worker.registered", lane=args.lane, role=args.role, worker_id=args.worker_id,
            engine=engine, model=model, family=family)
     print(f"Registered {args.role} {args.worker_id} ({engine} {model or 'default'}) on lane {args.lane}")
@@ -846,20 +1127,29 @@ def command_verify(args):
             if worker_busy(job, record):
                 raise ValueError(f"implementer {worker['worker_id']} is still running; wait for it first")
     round_number = len(lane["verifications"])
-    result = run_verifier(config, lane["path"], path / "verify" / f"{args.lane}-r{round_number}.txt")
+    locals_ = lane_local_paths(lane, config)
+    result = verify_with_cache(config, lane["path"], path / "verify" / f"{args.lane}-r{round_number}.txt", path)
     result["round"] = round_number
     append(path, "verification.completed", lane=args.lane, result=result)
     best = lane["best"] or state["base"]
     refining = config["arm"] in REFINING
     if refining and best is not None and verification_key(result) < verification_key(best):
         git(lane["path"], "reset", "-q", "--hard", lane["best_commit"])
-        git(lane["path"], "clean", "-fdq")
+        clean_args = ["clean", "-fdq"]
+        for entry in locals_:
+            clean_args += ["-e", f"/{entry}"]
+        git(lane["path"], *clean_args)
         append(path, "checkpoint.reverted", lane=args.lane, round=round_number, result=result,
                to_commit=lane["best_commit"], best=best)
         print(f"Lane {args.lane} round {round_number}: {describe(result)} is worse than {describe(best)}; "
               f"reverted to {lane['best_commit'][:12]}")
     else:
-        git(lane["path"], "add", "-A")
+        # Local setup/cache outputs are never committed; a worker change inside a local
+        # path is therefore also left uncommitted (documented limitation).
+        if locals_:
+            git(lane["path"], "add", "-A", "--", ".", *[f":(exclude,top){p}" for p in locals_])
+        else:
+            git(lane["path"], "add", "-A")
         git(lane["path"], "commit", "-q", "--no-verify", "--allow-empty", "-m",
             f"claive-orch {config['run_id']} lane {args.lane} round {round_number}: {describe(result)}",
             env=GIT_IDENTITY)
@@ -886,11 +1176,12 @@ def command_critique(args):
     if expected["action"] != "critique" or expected["lane"] != args.lane:
         raise ValueError(f"the arbiter does not expect a critique of lane {args.lane} now "
                          f"(next action: {expected['action']})")
-    model = family = None
+    model = family = fallbacks = None
     if args.worker_id:
         _, record = worker_record(args.worker_id)
         model = record.get("model") or (record.get("launch") or {}).get("model")
         family = model_family(model, record.get("engine"))
+        fallbacks = record.get("fallbacks")
         if not any(w["worker_id"] == args.worker_id and w["role"] == "critic" for w in lane["workers"]):
             raise ValueError(f"register the critic first: claive-orch worker {args.run} {args.lane} "
                              f"--role critic --worker-id {args.worker_id}")
@@ -904,6 +1195,8 @@ def command_critique(args):
                     "error": f"unparseable critique: {error}"}
     critique.update(lane=args.lane, round=expected["round"], worker_id=args.worker_id,
                     model=model, family=family, post_pass=bool(expected.get("post_pass")))
+    if fallbacks:
+        critique["fallbacks"] = fallbacks
     append(path, "critique.completed", **critique)
     summary = "no concrete defect" if critique["no_concrete_defect"] else f"{len(critique['defects'])} defect(s)"
     print(f"Critique for lane {args.lane} round {expected['round']}: {summary}"
@@ -929,6 +1222,79 @@ def command_review(args):
         prefer = "none"
     append(path, "review.completed", prefer=prefer, reason=reason, worker_id=args.worker_id)
     print(f"Review: prefer {prefer}")
+    return 0
+
+
+def command_rescore(args):
+    path, state = load_state(args.run)
+    config = state["config"]
+    reason = getattr(args, "reason", None)
+    if reason is None or not str(reason).strip():
+        raise ValueError("--reason is required for rescore")
+    if state["finished"]:
+        raise ValueError(f"run {args.run} is already finished; rescore needs a running run")
+    targets = [name for name in state["lane_order"] if state["lanes"][name]["verifications"]]
+    for name in targets:
+        lane = state["lanes"][name]
+        locals_ = lane_local_paths(lane, config)
+        if dirty_outside_local(lane["path"], locals_):
+            raise ValueError(f"lane {name} has uncommitted changes outside local paths; "
+                             "commit or discard them before rescore")
+        for worker in lane["workers"]:
+            if worker["role"] == "implementer":
+                job, record = worker_record(worker["worker_id"])
+                if worker_busy(job, record):
+                    raise ValueError(f"lane {name} has uncommitted work: implementer "
+                                     f"{worker['worker_id']} is still running")
+    prior = [e for e in events(path) if e["type"] == "verification.rescored"]
+    for name in targets:
+        lane = state["lanes"][name]
+        old = lane["verifications"][-1]
+        count = sum(1 for e in prior if e["data"].get("lane") == name) + 1
+        while (path / "verify" / f"{name}-rescore-{count}.txt").exists():
+            count += 1
+        result = verify_with_cache(config, lane["path"], path / "verify" / f"{name}-rescore-{count}.txt", path)
+        result["round"] = old.get("round", len(lane["verifications"]) - 1)
+        append(path, "verification.rescored", lane=name, reason=str(reason), result=result)
+        prior.append({"type": "verification.rescored", "data": {"lane": name}})
+        print(f"Lane {name} rescored: {describe(old)} -> {describe(result)}")
+    return 0
+
+
+def command_reject(args):
+    path, state = load_state(args.run)
+    lane = state["lanes"].get(args.lane)
+    if lane is None:
+        raise ValueError(f"unknown lane: {args.lane}")
+    reason = getattr(args, "reason", None)
+    if reason is None or not str(reason).strip():
+        raise ValueError("--reason is required for reject")
+    pending_round = lane_rounds(lane) + 1
+    pending = [c for c in lane["critiques"] if c["round"] == pending_round]
+    if not pending:
+        raise ValueError(f"lane {args.lane} has no pending critique for round {pending_round}")
+    critique = pending[-1]
+    original = critique.get("_original_defects", critique.get("defects") or [])
+    raw = getattr(args, "defect", None) or []
+    numbers = []
+    for group in raw:
+        items = group if isinstance(group, list) else [group]
+        numbers.extend(items)
+    if not numbers:
+        raise ValueError("--defect is required for reject")
+    defects = []
+    for number in numbers:
+        try:
+            index = int(number)
+        except (TypeError, ValueError):
+            raise ValueError(f"defect numbers are 1-based: {number}")
+        if index < 1 or index > len(original):
+            raise ValueError(f"defect {index} is out of range (1-{len(original)})")
+        if index not in defects:
+            defects.append(index)
+    append(path, "critique.rejected", lane=args.lane, round=pending_round, defects=defects,
+           reason=str(reason))
+    print(f"Rejected defect(s) {','.join(str(n) for n in defects)} for lane {args.lane} round {pending_round}")
     return 0
 
 
@@ -998,8 +1364,8 @@ def command_finish(args):
     return 0
 
 
-def command_usage(args):
-    path, state = load_state(args.run)
+def collect_usage(path, state):
+    """Snapshot provider token usage for the run's workers; record and return it."""
     collected = {}
     for name in state["lane_order"]:
         for worker in state["lanes"][name]["workers"]:
@@ -1012,6 +1378,12 @@ def command_usage(args):
                 collected[worker["worker_id"]] = {"role": worker["role"], "lane": name,
                                                   "model": worker.get("model"), "error": str(error)[:300]}
     append(path, "usage.collected", workers=collected)
+    return collected
+
+
+def command_usage(args):
+    path, state = load_state(args.run)
+    collected = collect_usage(path, state)
     print(json.dumps(collected, indent=2) if args.json else
           f"Collected usage for {len(collected)} worker(s); see claive-orch report {args.run}")
     return 0
@@ -1022,14 +1394,17 @@ def summarize(run_id):
     config = state["config"]
     trail = [e["data"] for e in events(path) if e["type"] == "arbiter.action"]
     tokens = {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
-    unknown = False
+    unknown_workers = 0
+    has_totals = False
     for usage in state["usage"].values():
         totals = usage.get("totals") or {}
-        if "error" in usage or not totals:
-            unknown = True
-        for key in tokens:
-            if isinstance(totals.get(key), int):
-                tokens[key] += totals[key]
+        valid = [key for key in tokens if isinstance(totals.get(key), int)]
+        if "error" in usage or not totals or not valid:
+            unknown_workers += 1
+        if valid:
+            has_totals = True
+        for key in valid:
+            tokens[key] += totals[key]
     end = state["finished"] and next((e["time"] for e in reversed(events(path)) if e["type"] == "run.finished"), None)
     lanes = {}
     for name in state["lane_order"]:
@@ -1051,19 +1426,32 @@ def summarize(run_id):
             "integrated": bool(state.get("integrated")),
             "l0_passed": bool(first and first[0]["passed"]),
             "wall_seconds": round((end or time.time()) - state["started_at"], 1),
-            "tokens": None if unknown or not state["usage"] else tokens,
+            "tokens": tokens if has_totals else None, "tokens_unknown_workers": unknown_workers,
             "lanes": lanes, "review": state["review"], "warnings": state["warnings"],
             "trail": [f"{t['action']} {t.get('lane') or ''}: {t['reason']}" for t in trail]}
 
 
+def format_tokens(summary):
+    tokens, unknown = summary["tokens"], summary.get("tokens_unknown_workers", 0)
+    if tokens is not None:
+        return (f"tokens: in {tokens['input_tokens']}, out {tokens['output_tokens']}, "
+                f"cached {tokens['cached_tokens']} ({unknown} worker(s) unknown)")
+    if unknown:
+        return f"tokens: unknown ({unknown} worker(s) without usage)"
+    return "tokens: not collected"
+
+
 def command_report(args):
+    path, state = load_state(args.run)
+    if state["finished"] and not any(e["type"] == "usage.collected" for e in events(path)):
+        collect_usage(path, state)
     summary = summarize(args.run)
     if args.json:
         print(json.dumps(summary, indent=2))
         return 0
     print(f"Run {summary['run_id']} | task {summary['task_id']} | arm {summary['arm']} | "
           f"outcome {summary['outcome']} | winner {summary['winner'] or '-'} | {summary['wall_seconds']}s")
-    print(f"Base score: {summary['base']} | tokens: {summary['tokens'] or 'not collected/unknown'}")
+    print(f"Base score: {summary['base']} | {format_tokens(summary)}")
     for name, lane in summary["lanes"].items():
         print(f"  lane {name}: {lane['engine']} {lane['model'] or ''} [{lane['family']}] "
               f"rounds {lane['rounds']} trajectory {lane['trajectory']} best {lane['best']} "
@@ -1146,7 +1534,8 @@ def command_cleanup(args):
     for name in state["lane_order"]:
         lane = state["lanes"][name]
         if Path(lane["path"]).exists():
-            dirty = git(lane["path"], "status", "--porcelain", check=False)
+            locals_ = lane_local_paths(lane, state["config"])
+            dirty = dirty_outside_local(lane["path"], locals_)
             if dirty and not args.force:
                 raise ValueError(f"lane {name} has uncheckpointed changes; pass --force to discard them")
             git(state["config"]["repo"], "worktree", "remove", "--force", lane["path"])
@@ -1168,6 +1557,13 @@ def command_cleanup(args):
     return 0
 
 
+def flatten_paths(raw):
+    flattened = []
+    for group in raw or []:
+        flattened.extend(group if isinstance(group, list) else [group])
+    return [str(p).strip() for p in flattened if str(p).strip()]
+
+
 def command_integrate(args):
     path, state = load_state(args.run)
     config = state["config"]
@@ -1183,7 +1579,19 @@ def command_integrate(args):
         raise ValueError(f"run {args.run} outcome is {outcome}, not verified")
     repo = config["repo"]
     base = config["base"]
-    patch = git(repo, "diff", "--binary", base, commit, check=False)
+    include = flatten_paths(getattr(args, "paths", None))
+    exclude = flatten_paths(getattr(args, "exclude", None))
+    spec = list(include) + [f":(exclude){p}" for p in exclude]
+    diff_extra = ["--", *spec] if spec else []
+
+    def filtered_names():
+        output = git(repo, "diff", base, commit, "--name-only", *diff_extra, check=False)
+        return [line.strip() for line in output.splitlines() if line.strip()]
+
+    patch = git(repo, "diff", "--binary", base, commit, *diff_extra, check=False)
+    if not patch.strip():
+        if spec:
+            raise ValueError("nothing to integrate for the selected paths")
     if patch.strip():
         patch = patch if patch.endswith("\n") else patch + "\n"
         first = subprocess.run(["git", "-C", str(repo), "apply"], input=patch,
@@ -1192,29 +1600,27 @@ def command_integrate(args):
             second = subprocess.run(["git", "-C", str(repo), "apply", "--3way"], input=patch,
                                     capture_output=True, text=True)
             if second.returncode == 0:
-                names = [line.strip() for line in
-                         git(repo, "diff", base, commit, "--name-only", check=False).splitlines()
-                         if line.strip()]
+                names = filtered_names()
                 if names:
                     subprocess.run(["git", "-C", str(repo), "reset", "-q", "--", *names],
                                    capture_output=True, text=True)
             else:
                 output = ((second.stdout or "") + (second.stderr or "")
                           + (first.stdout or "") + (first.stderr or ""))
-                names = [line.strip() for line in
-                         git(repo, "diff", base, commit, "--name-only", check=False).splitlines()
-                         if line.strip()]
+                names = filtered_names()
                 conflicting = [name for name in names if name and name in output]
                 if not conflicting:
                     conflicting = names or ["(unknown)"]
                 for name in conflicting:
                     print(f"Conflict: {name}")
                 return 1
+        for applied in filtered_names():
+            print(f"Applied: {applied}")
     result = None
     if not args.no_verify:
         result = run_verifier(config, repo, path / "verify" / "integrate.txt")
         print(f"Verifier in {repo}: {describe(result)}")
-    append(path, "run.integrated", commit=commit, result=result)
+    append(path, "run.integrated", commit=commit, result=result, paths=include, exclude=exclude)
     close_idle_reusable_workers(state)
     if result is not None and not result["passed"]:
         return 1
@@ -1283,6 +1689,11 @@ def parser():
                       help="after a pass, run one post-pass critic review (arms B and D only)")
     init.add_argument("--setup", help="shell command run with bash -c in each new worktree "
                       "(CLAIVE_ORCH_REPO/CLAIVE_ORCH_LANE in env; keep its files gitignored)")
+    init.add_argument("--cache-key", help="shell command printing the cache key for build outputs "
+                      "(with --cache-path; the verifier should skip its build when the cached outputs exist)")
+    init.add_argument("--cache-path", action="append", nargs="+", metavar="PATH",
+                      help="repo-relative build output to cache, repeatable "
+                      "(with --cache-key; the verifier should skip its build when the cached outputs exist)")
     lane = commands.add_parser("lane", help="add a candidate lane (git worktree at the base revision)")
     lane.add_argument("run")
     lane.add_argument("name")
@@ -1317,6 +1728,16 @@ def parser():
     source.add_argument("--worker-id")
     source.add_argument("--prefer", choices=["a", "b", "none"])
     review.add_argument("--reason")
+    rescore = commands.add_parser("rescore", help="re-verify lanes after fixing the verifier or held-out "
+                                  "checks without using a round")
+    rescore.add_argument("run")
+    rescore.add_argument("--reason", required=True, help="why the lanes are rescored (required)")
+    reject = commands.add_parser("reject", help="override critic suggestions before the correction prompt")
+    reject.add_argument("run")
+    reject.add_argument("lane")
+    reject.add_argument("--defect", action="append", nargs="+", metavar="N", required=True,
+                        help="1-based defect number to reject (repeatable)")
+    reject.add_argument("--reason", required=True, help="why the suggestions are rejected (required)")
     for name, text in (("next", "print the single legal next action"), ("report", "summarize one run")):
         command = commands.add_parser(name, help=text)
         command.add_argument("run")
@@ -1343,6 +1764,10 @@ def parser():
     integrate.add_argument("run")
     integrate.add_argument("--no-verify", action="store_true",
                            help="skip running the verifier in the repo checkout")
+    integrate.add_argument("--paths", action="append", nargs="+", metavar="PATH",
+                           help="limit the applied diff to these repo-relative pathspecs")
+    integrate.add_argument("--exclude", action="append", nargs="+", metavar="PATH",
+                           help="drop these repo-relative paths from the applied diff (:(exclude)P)")
     prune = commands.add_parser("prune", help="list or delete stale orch/<run>/<lane> branches")
     prune.add_argument("--repo", required=True, help="repository whose local orch branches are inspected")
     prune.add_argument("--apply", action="store_true", help="delete deletable branches (default is a dry run)")
@@ -1354,7 +1779,8 @@ def main():
     args = parser().parse_args()
     handlers = {"init": command_init, "lane": command_lane, "worker": command_worker,
                 "prompt": command_prompt, "verify": command_verify, "critique": command_critique,
-                "review": command_review, "next": command_next, "finish": command_finish,
+                "review": command_review, "rescore": command_rescore, "reject": command_reject,
+                "next": command_next, "finish": command_finish,
                 "usage": command_usage, "report": command_report, "list": command_list,
                 "compare": command_compare, "cleanup": command_cleanup, "integrate": command_integrate,
                 "prune": command_prune}

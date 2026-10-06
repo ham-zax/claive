@@ -52,6 +52,37 @@ def check_model_policy(model):
         raise ValueError(f"model {model} is disallowed by claive policy")
 
 
+def parse_turn_timeout(raw):
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        raise ValueError("--turn-timeout must be a positive number")
+    try:
+        value = float(raw) if isinstance(raw, str) else float(raw)
+    except (TypeError, ValueError):
+        raise ValueError("--turn-timeout must be a positive number")
+    if not value > 0:
+        raise ValueError("--turn-timeout must be a positive number")
+    if value != value or value in (float("inf"), float("-inf")):
+        raise ValueError("--turn-timeout must be a positive number")
+    if float(value).is_integer():
+        return int(value)
+    return float(value)
+
+
+def parse_fallback_models(raw):
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        models = [str(item).strip() for item in raw]
+    else:
+        models = [part.strip() for part in str(raw).split(",")]
+    models = [model for model in models if model]
+    for model in models:
+        check_model_policy(model)
+    return models
+
+
 def check_nested():
     if os.environ.get("CLAIVE_WORKER_ID") and os.environ.get("CLAIVE_ALLOW_NESTED") != "1":
         raise ValueError("claive workers may not launch workers (CLAIVE_WORKER_ID is set)")
@@ -317,7 +348,14 @@ def render(records, color=False, height=None):
             badge = f"\033[{palette.get(status, '0')}m{badge}\033[0m"
         label = clean(state["label"])
         if state.get("task_failures"):
-            label += f" [!{state['task_failures']} task failures]"
+            reasons = state.get("task_failure_reasons") or []
+            if reasons:
+                last = str(reasons[-1])
+                if len(last) > 60:
+                    last = last[:60] + "..."
+                label += f" [!{state['task_failures']} task failures: {clean(last)}]"
+            else:
+                label += f" [!{state['task_failures']} task failures]"
         workspace = clean(Path(state["workspace"]).name)
         prefix = f"{shown:12} {state['id']}  {age:8}  {state.get('steps', 0):5}  "
         detail = f"{label} / {workspace}"[:max(8, width - len(prefix))]
@@ -367,20 +405,63 @@ def event_update(state, event):
             state["quota_reset_at"] = event["reset_at"]
 
 
+FALLBACKABLE_FAILURES = {"timeout", "quota", "worker", "protocol"}
+
+PER_TURN_RESET_KEYS = ("ended_at", "error", "terminal", "terminal_reason", "quota_exhausted",
+                       "quota_reset_at", "fallback_requires_user_approval", "report", "report_state",
+                       "report_error", "needs_parent", "failure_kind")
+
+
+def rebuild_for_fallback(state, engine, new_model):
+    launch = launch_config(state)
+    provider = launch.get("provider")
+    read_only = bool(launch.get("read_only"))
+    web = bool(launch.get("web"))
+    output_schema = launch.get("output_schema")
+    session_logging = bool(launch.get("session_logging", True))
+    isolation = dict(launch.get("isolation") or {})
+    workspace = state["workspace"]
+    prompt_file = state["prompt_file"]
+    effort = state["reasoning_effort"]
+    steps = state.get("max_model_steps")
+    fresh_session = engine.resolve_session_id(None, session_logging)
+    fresh_launch = engine.resolve_launch(
+        provider=provider, model=new_model, read_only=read_only, web=web,
+        output_schema=output_schema, session_logging=session_logging,
+        isolation=isolation, session_id=fresh_session,
+        session_root=str(root() / "sessions"), workspace=workspace,
+    )
+    request = TurnRequest(
+        binary=fresh_launch["binary"], workspace=workspace, prompt_file=prompt_file,
+        session_id=fresh_session, provider=fresh_launch["provider"], model=fresh_launch["model"],
+        reasoning_effort=effort, max_model_steps=steps,
+        read_only=fresh_launch["read_only"], web=fresh_launch["web"],
+        output_schema=fresh_launch["output_schema"],
+        session_logging=fresh_launch["session_logging"], isolation=fresh_launch["isolation"],
+        session_dir=fresh_launch.get("session_dir"),
+    )
+    command = engine.build_command(request)
+    return fresh_launch, command, fresh_session
+
+
 def supervise(job_id, control=None):
     path = job_path(job_id)
     state = load(path, check_alive=False)
-    for key in ("ended_at", "error", "terminal", "terminal_reason", "quota_exhausted",
-                "quota_reset_at", "fallback_requires_user_approval", "report", "report_state",
-                "report_error", "needs_parent", "failure_kind"):
+    for key in PER_TURN_RESET_KEYS:
         state.pop(key, None)
     state["malformed_events"] = 0
     (path / "result.txt").unlink(missing_ok=True)
     engine = get_engine(state.get("engine", DEFAULT_ENGINE))
+    if not isinstance(state.get("fallbacks"), list):
+        state["fallbacks"] = []
+    if not isinstance(state.get("fallback_models"), list):
+        fallback_raw = state.get("fallback_models")
+        state["fallback_models"] = parse_fallback_models(fallback_raw) if fallback_raw else []
     state.update(supervisor_pid=os.getpid(), supervisor_identity=identity(os.getpid()),
                  status="running", phase="launching worker")
     stopping = False
     child = None
+    timed_out = False
 
     def stop_requested(_signum, _frame):
         nonlocal stopping
@@ -391,109 +472,187 @@ def supervise(job_id, control=None):
     signal.signal(signal.SIGTERM, stop_requested)
     signal.signal(signal.SIGINT, stop_requested)
     save(path / "state.json", state)
+    attempt = 0
     try:
-        log_mode = "a" if state.get("reusable") else "w"
-        with (path / "events.jsonl").open(log_mode) as events, (path / "stderr.log").open(log_mode) as errors:
-            child = subprocess.Popen(state["command"], stdout=subprocess.PIPE, stderr=errors,
-                                     stdin=subprocess.DEVNULL, start_new_session=True,
-                                     cwd=state["workspace"],
-                                     env=dict(os.environ, CLAIVE_WORKER_ID=job_id))
-            state["worker_pid"] = child.pid
-            state["worker_identity"] = identity(child.pid)
-            state["phase"] = "waiting for first event"
-            save(path / "state.json", state)
-            pending = b""
-            cancelled_at = None
-            last_save = 0
-            with selectors.DefaultSelector() as selector:
-                selector.register(child.stdout, selectors.EVENT_READ)
-                while selector.get_map() or child.poll() is None:
-                    if stopping and cancelled_at is None:
-                        state["status"] = "cancelling"
-                        state["phase"] = "stopping worker"
-                        save(path / "state.json", state)
-                        cancelled_at = time.monotonic()
-                        try:
-                            os.killpg(child.pid, signal.SIGTERM)
-                        except ProcessLookupError:
-                            pass
-                    if cancelled_at is not None and time.monotonic() - cancelled_at > 3:
-                        try:
-                            os.killpg(child.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                    for key, _mask in selector.select(0.25):
-                        chunk = os.read(key.fd, 65536)
-                        if not chunk:
-                            selector.unregister(key.fileobj)
-                            continue
-                        events.write(chunk.decode("utf-8", errors="replace"))
-                        events.flush()
-                        pending += chunk
-                        while b"\n" in pending:
-                            line, pending = pending.split(b"\n", 1)
-                            if line.strip():
-                                try:
-                                    event = json.loads(line)
-                                    if not isinstance(event, dict):
-                                        raise ValueError("event is not an object")
-                                    for normalized_event in engine.normalize_event(event):
-                                        event_update(state, normalized_event)
-                                except (ValueError, UnicodeDecodeError):
-                                    state["malformed_events"] += 1
-                    if time.monotonic() - last_save > 0.25:
-                        save(path / "state.json", state)
-                        last_save = time.monotonic()
-            if pending.strip():
+        while True:
+            if attempt > 0:
+                for key in PER_TURN_RESET_KEYS:
+                    state.pop(key, None)
+                state.pop("answer", None)
+                state.pop("exit_code", None)
+                state["malformed_events"] = 0
+                (path / "result.txt").unlink(missing_ok=True)
+                state.update(status="running", phase="launching worker")
+                save(path / "state.json", state)
+            turn_timeout = state.get("turn_timeout")
+            if turn_timeout is not None:
                 try:
-                    event = json.loads(pending)
-                    if not isinstance(event, dict):
-                        raise ValueError("event is not an object")
-                    for normalized_event in engine.normalize_event(event):
-                        event_update(state, normalized_event)
-                except (ValueError, UnicodeDecodeError):
-                    state["malformed_events"] += 1
-            state["exit_code"] = child.wait()
-            child.stdout.close()
-        actual = engine.discover_workspace(
-            state["command"], (path / "stderr.log").read_text(errors="replace")
-        )
-        if actual:
-            state["actual_workspace"] = actual
-        answer = state.pop("answer", "")
-        (path / "result.txt").write_text(answer if isinstance(answer, str) else json.dumps(answer))
-        if state.get("reusable"):
-            (path / f"turn-{state['turn']:04}.txt").write_text(
-                answer if isinstance(answer, str) else json.dumps(answer))
-        if stopping:
-            state["status"] = "cancelled"
-        elif state["exit_code"] != 0 or state.get("terminal") != "completed" or state["malformed_events"]:
-            state["status"] = "failed"
-            state["error"] = (f"exit={state['exit_code']}; terminal={state.get('terminal', 'missing')}; "
-                              f"malformed events={state['malformed_events']}")
-            if state.get("quota_exhausted"):
-                state["failure_kind"] = "quota"
-            elif state.get("malformed_events") or state.get("terminal") is None:
-                state["failure_kind"] = "protocol"
+                    turn_timeout = parse_turn_timeout(turn_timeout)
+                except ValueError:
+                    turn_timeout = None
+            log_mode = "a" if (state.get("reusable") or attempt > 0) else "w"
+            child = None
+            timed_out = False
+            kill_at = None
+            turn_start = None
+            with (path / "events.jsonl").open(log_mode) as events, (path / "stderr.log").open(log_mode) as errors:
+                child = subprocess.Popen(state["command"], stdout=subprocess.PIPE, stderr=errors,
+                                         stdin=subprocess.DEVNULL, start_new_session=True,
+                                         cwd=state["workspace"],
+                                         env=dict(os.environ, CLAIVE_WORKER_ID=job_id))
+                turn_start = time.monotonic()
+                state["worker_pid"] = child.pid
+                state["worker_identity"] = identity(child.pid)
+                state["phase"] = "waiting for first event"
+                save(path / "state.json", state)
+                pending = b""
+                last_save = 0
+                with selectors.DefaultSelector() as selector:
+                    selector.register(child.stdout, selectors.EVENT_READ)
+                    while selector.get_map() or child.poll() is None:
+                        now = time.monotonic()
+                        if (turn_timeout is not None and not timed_out and not stopping
+                                and child.poll() is None and now - turn_start > turn_timeout):
+                            timed_out = True
+                            state["status"] = "cancelling"
+                            state["phase"] = "stopping worker"
+                            save(path / "state.json", state)
+                            kill_at = now
+                            try:
+                                os.killpg(child.pid, signal.SIGTERM)
+                            except ProcessLookupError:
+                                pass
+                        elif stopping and kill_at is None:
+                            state["status"] = "cancelling"
+                            state["phase"] = "stopping worker"
+                            save(path / "state.json", state)
+                            kill_at = time.monotonic()
+                            try:
+                                os.killpg(child.pid, signal.SIGTERM)
+                            except ProcessLookupError:
+                                pass
+                        if kill_at is not None and time.monotonic() - kill_at > 3:
+                            try:
+                                os.killpg(child.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                        for key, _mask in selector.select(0.25):
+                            chunk = os.read(key.fd, 65536)
+                            if not chunk:
+                                selector.unregister(key.fileobj)
+                                continue
+                            events.write(chunk.decode("utf-8", errors="replace"))
+                            events.flush()
+                            pending += chunk
+                            while b"\n" in pending:
+                                line, pending = pending.split(b"\n", 1)
+                                if line.strip():
+                                    try:
+                                        event = json.loads(line)
+                                        if not isinstance(event, dict):
+                                            raise ValueError("event is not an object")
+                                        for normalized_event in engine.normalize_event(event):
+                                            event_update(state, normalized_event)
+                                    except (ValueError, UnicodeDecodeError):
+                                        state["malformed_events"] += 1
+                        if time.monotonic() - last_save > 0.25:
+                            save(path / "state.json", state)
+                            last_save = time.monotonic()
+                if pending.strip():
+                    try:
+                        event = json.loads(pending)
+                        if not isinstance(event, dict):
+                            raise ValueError("event is not an object")
+                        for normalized_event in engine.normalize_event(event):
+                            event_update(state, normalized_event)
+                    except (ValueError, UnicodeDecodeError):
+                        state["malformed_events"] += 1
+                state["exit_code"] = child.wait()
+                child.stdout.close()
+            actual = engine.discover_workspace(
+                state["command"], (path / "stderr.log").read_text(errors="replace")
+            )
+            if actual:
+                state["actual_workspace"] = actual
+            answer = state.pop("answer", "")
+            (path / "result.txt").write_text(answer if isinstance(answer, str) else json.dumps(answer))
+            if state.get("reusable"):
+                (path / f"turn-{state['turn']:04}.txt").write_text(
+                    answer if isinstance(answer, str) else json.dumps(answer))
+            if stopping:
+                state["status"] = "cancelled"
+            elif timed_out:
+                state["status"] = "failed"
+                state["failure_kind"] = "timeout"
+                state["error"] = f"turn timed out after {'%g' % turn_timeout}s"
+            elif state["exit_code"] != 0 or state.get("terminal") != "completed" or state["malformed_events"]:
+                state["status"] = "failed"
+                state["error"] = (f"exit={state['exit_code']}; terminal={state.get('terminal', 'missing')}; "
+                                  f"malformed events={state['malformed_events']}")
+                if state.get("quota_exhausted"):
+                    state["failure_kind"] = "quota"
+                elif state.get("malformed_events") or state.get("terminal") is None:
+                    state["failure_kind"] = "protocol"
+                else:
+                    state["failure_kind"] = "worker"
             else:
-                state["failure_kind"] = "worker"
-        else:
-            state["status"] = "completed"
-        if state.get("report_contract"):
-            record_report(state, answer)
+                state["status"] = "completed"
+            if state.get("report_contract"):
+                record_report(state, answer)
+            if (state["status"] == "failed" and not stopping
+                    and state.get("failure_kind") in FALLBACKABLE_FAILURES):
+                fallbacks = state.get("fallbacks")
+                if not isinstance(fallbacks, list):
+                    fallbacks = []
+                    state["fallbacks"] = fallbacks
+                fallback_models = state.get("fallback_models") or []
+                if len(fallbacks) < len(fallback_models):
+                    next_model = fallback_models[len(fallbacks)]
+                    try:
+                        fresh_launch, fresh_command, fresh_session = rebuild_for_fallback(
+                            state, engine, next_model)
+                    except Exception:
+                        break
+                    fallbacks.append({"model": state.get("model"),
+                                      "failure_kind": state.get("failure_kind"),
+                                      "error": state.get("error")})
+                    state["fallbacks"] = fallbacks
+                    state["model"] = fresh_launch.get("model")
+                    state["launch"] = fresh_launch
+                    state["command"] = fresh_command
+                    state["session_id"] = fresh_session
+                    save(path / "state.json", state)
+                    attempt += 1
+                    continue
+            break
     except Exception as error:
-        state["status"] = "cancelled" if stopping else "failed"
-        state["error"] = str(error)
-        if state["status"] == "failed":
-            state["failure_kind"] = "supervisor" if child is not None else "launch"
+        if timed_out and not stopping:
+            state["status"] = "failed"
+            state["failure_kind"] = "timeout"
+            turn_timeout = state.get("turn_timeout")
+            try:
+                label = "%g" % parse_turn_timeout(turn_timeout)
+            except ValueError:
+                label = str(turn_timeout)
+            state["error"] = f"turn timed out after {label}s"
             if state.get("report_contract"):
                 record_report(state, state.get("answer", ""))
+        else:
+            state["status"] = "cancelled" if stopping else "failed"
+            state["error"] = str(error)
+            if state["status"] == "failed":
+                state["failure_kind"] = "supervisor" if child is not None else "launch"
+                if state.get("report_contract"):
+                    record_report(state, state.get("answer", ""))
         if child is not None:
             try:
                 os.killpg(child.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            child.wait()
+            try:
+                child.wait()
+            except Exception:
+                pass
     state.pop("answer", None)
     state["ended_at"] = time.time()
     state["phase"] = state["status"]
@@ -612,6 +771,11 @@ def create_job(args):
         raise ValueError("--prompt-file must be an existing nonempty absolute file")
     if args.max_model_steps is not None and args.max_model_steps < 1:
         raise ValueError("--max-model-steps must be positive")
+    turn_timeout = parse_turn_timeout(getattr(args, "turn_timeout", None))
+    fallback_raw = getattr(args, "fallback_models", None)
+    if args.action == "open" and fallback_raw is not None:
+        raise ValueError("--fallback-models is only supported for single-turn workers (run/start), not open")
+    fallback_models = parse_fallback_models(fallback_raw)
     if args.action == "open" and args.no_session_log:
         raise ValueError("reusable workers require session logging to preserve follow-up history")
     if args.session_id and args.no_session_log:
@@ -685,7 +849,10 @@ def create_job(args):
                  prompt_file=effective_prompt, command=command, launch=launch, status="starting", phase="starting",
                  started_at=time.time(), steps=0, task_failures=0, malformed_events=0,
                  model=launch.get("model"), reasoning_effort=effort, max_model_steps=steps,
-                 reusable=args.action == "open", turn=1)
+                 reusable=args.action == "open", turn=1,
+                 fallback_models=fallback_models, fallbacks=[])
+    if turn_timeout is not None:
+        state["turn_timeout"] = turn_timeout
     if report_contract:
         state["report_contract"] = True
     if role:
@@ -721,6 +888,9 @@ def report(state):
               "tell the user. Any other fallback needs their approval; this manager never switches automatically.")
     if state.get("failure_kind"):
         print(f"Failure kind: {state['failure_kind']}")
+    for entry in state.get("fallbacks") or []:
+        print(f"Fallback from {clean(entry.get('model', ''))}: {clean(entry.get('failure_kind', ''))} "
+              f"({clean(entry.get('error', ''))})")
     report_state = state.get("report_state")
     if report_state == "missing":
         print("Report missing: no claive-report block in final answer")
@@ -969,6 +1139,10 @@ def parser():
         launch.add_argument("--no-session-log", action="store_true")
         launch.add_argument("--provider")
         launch.add_argument("--mission", help="link the new worker to a mission")
+        launch.add_argument("--turn-timeout",
+                            help="fail a turn that runs longer than SECONDS (positive number)")
+        launch.add_argument("--fallback-models",
+                            help="comma-separated fallback models for single-turn workers (run/start only)")
         if action == "open":
             launch.add_argument("--detach", action="store_true", help="run the reusable loop in the background")
     listing = commands.add_parser("list", help="list active workers and recent results")

@@ -128,7 +128,11 @@ claive-orch init --repo /abs/repo --task-file /abs/task.md \
 #    Options: --post-pass-critic (arms B/D) adds one critic pass after the
 #    tests pass, looking for behaviour changes beyond the task.
 #    --setup 'ln -s "$CLAIVE_ORCH_REPO/node_modules" node_modules' runs in the
-#    base check and in every new lane worktree (keep its files gitignored).
+#    base check and in every new lane worktree. Files it creates are lane-local:
+#    never committed into checkpoints and kept on revert.
+#    --cache-key 'sha256sum package-lock.json' --cache-path dist reuses build
+#    outputs across verifies with the same key (the verifier should skip its
+#    build when the cached outputs exist). $CLAIVE_ORCH_CACHE is exported too.
 
 claive-orch next RUN          # always ask; it prints NEXT / Why / How
 ```
@@ -140,11 +144,11 @@ Then loop on `claive-orch next RUN` and do what it names:
 | `add_lane a` | `claive-orch lane RUN a --engine muse --model muse-spark-1.3-contributor` |
 | `implement a` | `P=$(claive-orch prompt RUN implement a)`; launch `claive open --detach --workspace <lane path> --prompt-file "$P" --label RUN-a --reasoning-effort xhigh --max-model-steps 100` (`max` for very complicated tasks; for a Pi lane use `--engine pi --provider opencode2api --model <lane model> --reasoning-effort max` and no step cap); `claive-orch worker RUN a --role implementer --worker-id W`; `claive wait W` |
 | `verify a` | after the implementer's turn ends: `claive-orch verify RUN a`. It runs the tests, then checkpoints or **reverts a regression automatically** |
-| `critique a` | `P=$(claive-orch prompt RUN critique a)`; `claive start --engine pi --provider opencode2api --model <next preferred critic> --reasoning-effort max --read-only --workspace <lane path> --prompt-file "$P" --label RUN-a-critic`; `claive-orch worker RUN a --role critic --worker-id C`; `claive wait C`; `claive-orch critique RUN a --worker-id C` (the lane argument is required) |
-| `correct a` | `P=$(claive-orch prompt RUN correct a)`; `claive followup W --prompt-file "$P"` (**same session**: it keeps its context); `claive wait W`; `claive-orch verify RUN a` |
+| `critique a` | `P=$(claive-orch prompt RUN critique a)`; `claive start --engine pi --provider opencode2api --model <next preferred critic> --reasoning-effort max --read-only --turn-timeout 900 --fallback-models big-pickle,space-bunny-free --workspace <lane path> --prompt-file "$P" --label RUN-a-critic` (fallbacks: the remaining preferred critics, never lane a's family); `claive-orch worker RUN a --role critic --worker-id C`; `claive wait C`; `claive-orch critique RUN a --worker-id C` (the lane argument is required) |
+| `correct a` | if a suggested defect is wrong (e.g. relaxes a task constraint), first `claive-orch reject RUN a --defect N --reason "..."`; then `P=$(claive-orch prompt RUN correct a)`; `claive followup W --prompt-file "$P"` (**same session**: it keeps its context); `claive wait W`; `claive-orch verify RUN a` |
 | `add_lane b` | lane a stalled. `claive-orch lane RUN b --engine pi --model <preferred family ≠ a and ≠ the last critic> --strategy "<a materially different approach>"`, then the same implement, verify, critique and correct cycle in lane b, with a critic of yet another family where possible. Lane b **never** sees lane a's diff |
 | `review` | `P=$(claive-orch prompt RUN review)`; start a read-only Pi reviewer; `claive-orch review RUN --worker-id R` |
-| `finish` | `claive-orch finish RUN`, `claive-orch usage RUN`, `claive-orch report RUN`, then integrate (below) |
+| `finish` | `claive-orch finish RUN`, `claive-orch report RUN` (collects token usage automatically), then integrate (below) |
 
 Lane paths are printed by `claive-orch lane` and in `next`'s `How:` line.
 Every step is guarded: if `claive-orch` refuses a command, read its message and
@@ -152,7 +156,9 @@ re-run `next`. Do not work around it with `--force`.
 Held-out checks: put them in a directory **outside** the repository, pass
 `--acceptance-dir DIR`, and pass `--worker-verify '<visible-only command>'` so
 workers can still run the visible tests. Hidden check names are never shown to
-workers.
+workers. If a held-out check (or the verifier) itself was wrong, fix it, then
+`claive-orch rescore RUN --reason "..."` re-verifies every lane without using a
+round.
 
 Arms for daily use: `D` is the default (cheap when L0 passes, escalates only on
 evidence). `B` means no breadth. `A` means a single attempt plus verification.
@@ -182,7 +188,8 @@ After `finish`, the winning checkpoint is on branch `orch/RUN/LANE`.
    (the user's staged changes stay staged), re-runs the verifier there, and
    closes the run's idle reusable workers. Exit 1 means a `Conflict: <path>`
    (resolve it by hand) or a failing verifier in the checkout. `--no-verify`
-   skips the re-run. It never commits; commit only if the user asked.
+   skips the re-run. `--paths P ...` / `--exclude P ...` apply only part of the
+   diff. It never commits; commit only if the user asked.
 3. `claive-orch cleanup RUN --branches` removes the worktrees and lane
    branches (an unintegrated winner is kept unless `--force`).
    `claive-orch prune --repo REPO` lists stale `orch/*` branches from old runs;

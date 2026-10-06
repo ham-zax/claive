@@ -118,8 +118,11 @@ Meta [prompt caching](https://dev.meta.ai/docs/prompt-caching) automatically reu
 ```bash
 claive-orch init --repo /abs/repo --task-file /abs/task.md --verify 'python3 -m pytest -q' --arm D
 claive-orch next RUN          # NEXT / Why / How
-claive-orch report RUN        # outcome, score trajectory, critics, tokens
+claive-orch report RUN        # outcome, score trajectory, critics, tokens (auto-collected)
 claive-orch integrate RUN     # apply the winner unstaged, re-verify in the checkout
+claive-orch integrate RUN --paths src --exclude src/gen   # apply part of the diff
+claive-orch rescore RUN --reason 'fixed held-out check'  # re-verify lanes without using a round
+claive-orch reject RUN a --defect 2 --reason 'relaxes a gate'  # drop a wrong critic suggestion
 claive-orch cleanup RUN --branches   # remove worktrees and lane branches
 claive-orch prune --repo /abs/repo   # list stale orch/* branches (--apply deletes)
 claive-orch compare --experiment NAME

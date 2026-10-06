@@ -7,6 +7,9 @@ import sys
 import time
 
 mode = os.environ.get("FIXTURE_MODE", "success")
+if len(sys.argv) > 1 and os.environ.get("FIXTURE_PROMPT_OUT"):
+    with open(sys.argv[1]) as source, open(os.environ["FIXTURE_PROMPT_OUT"], "a") as copy:
+        copy.write(source.read() + "\n----\n")
 
 
 def emit(kind, **payload):
@@ -33,5 +36,6 @@ if mode == "terminal-failure":
     emit("terminal", status="failed", reason="fixture terminal failure", text="")
     sys.exit(0)
 if mode != "missing":
-    emit("terminal", status="completed", text="fixture result")
+    emit("terminal", status="completed", text=(open(os.environ["FIXTURE_TEXT_FILE"]).read()
+                                                if os.environ.get("FIXTURE_TEXT_FILE") else "fixture result"))
 sys.exit(7 if mode == "exit-failure" else 0)

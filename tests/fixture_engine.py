@@ -27,7 +27,7 @@ class FixtureEngine(WorkerEngine):
             raise ValueError("fixture binary must be an absolute executable path")
 
     def build_command(self, request):
-        return [request.binary]
+        return [request.binary, request.prompt_file]
 
     def normalize_event(self, event):
         kind = event.get("kind")

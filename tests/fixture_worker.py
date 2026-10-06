@@ -14,6 +14,10 @@ prompt_text = open(sys.argv[1]).read() if len(sys.argv) > 1 else ""
 directive = re.search(r"FIXTURE_MODE=([a-z-]+)", prompt_text)
 if directive:
     mode = directive.group(1)
+# Per-model overrides let fallback tests fail one model and pass the next: FIXTURE_MODEL_MODES='{"m1": "slow"}'.
+model = sys.argv[sys.argv.index("--model") + 1] if "--model" in sys.argv else None
+if model and os.environ.get("FIXTURE_MODEL_MODES"):
+    mode = json.loads(os.environ["FIXTURE_MODEL_MODES"]).get(model, mode)
 if os.environ.get("FIXTURE_PROMPT_OUT"):
     with open(os.environ["FIXTURE_PROMPT_OUT"], "a") as copy:
         copy.write(prompt_text + "\n----\n")

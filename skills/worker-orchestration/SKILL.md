@@ -125,6 +125,10 @@ claive-orch init --repo /abs/repo --task-file /abs/task.md \
   --verify 'python3 -m pytest -q tests/test_x.py' --arm D --rounds 2
 #    -> "Run <RUN>". It runs the verifier at base. If the verifier already
 #       passes, the run is invalid: fix the check.
+#    Options: --post-pass-critic (arms B/D) adds one critic pass after the
+#    tests pass, looking for behaviour changes beyond the task.
+#    --setup 'ln -s "$CLAIVE_ORCH_REPO/node_modules" node_modules' runs in the
+#    base check and in every new lane worktree (keep its files gitignored).
 
 claive-orch next RUN          # always ask; it prints NEXT / Why / How
 ```
@@ -140,7 +144,7 @@ Then loop on `claive-orch next RUN` and do what it names:
 | `correct a` | `P=$(claive-orch prompt RUN correct a)`; `claive followup W --prompt-file "$P"` (**same session**: it keeps its context); `claive wait W`; `claive-orch verify RUN a` |
 | `add_lane b` | lane a stalled. `claive-orch lane RUN b --engine pi --model <preferred family ≠ a and ≠ the last critic> --strategy "<a materially different approach>"`, then the same implement, verify, critique and correct cycle in lane b, with a critic of yet another family where possible. Lane b **never** sees lane a's diff |
 | `review` | `P=$(claive-orch prompt RUN review)`; start a read-only Pi reviewer; `claive-orch review RUN --worker-id R` |
-| `finish` | `claive-orch finish RUN`, `claive-orch usage RUN`, `claive-orch report RUN`, then integrate (below), close workers, `claive-orch cleanup RUN` |
+| `finish` | `claive-orch finish RUN`, `claive-orch usage RUN`, `claive-orch report RUN`, then integrate (below) |
 
 Lane paths are printed by `claive-orch lane` and in `next`'s `How:` line.
 Every step is guarded: if `claive-orch` refuses a command, read its message and
@@ -174,13 +178,15 @@ After `finish`, the winning checkpoint is on branch `orch/RUN/LANE`.
 1. Read `git -C REPO diff BASE COMMIT` (both printed by `finish` and `report`).
    Check that it is in scope, has no test deletions or tampering, and no
    unrelated churn. The verifier passing is necessary, not sufficient.
-2. Apply it without committing:
-   `git -C REPO diff BASE COMMIT | git -C REPO apply --3way`.
-   Commit only if the user asked.
-3. Re-run the verifier in the user's checkout.
-4. `claive close W` for every reusable worker, then
-   `claive-orch cleanup RUN` (removes worktrees and keeps the branches). Delete the
-   branches only when the user agrees: `git -C REPO branch -D orch/RUN/a ...`.
+2. `claive-orch integrate RUN`: applies the diff to the checkout **unstaged**
+   (the user's staged changes stay staged), re-runs the verifier there, and
+   closes the run's idle reusable workers. Exit 1 means a `Conflict: <path>`
+   (resolve it by hand) or a failing verifier in the checkout. `--no-verify`
+   skips the re-run. It never commits; commit only if the user asked.
+3. `claive-orch cleanup RUN --branches` removes the worktrees and lane
+   branches (an unintegrated winner is kept unless `--force`).
+   `claive-orch prune --repo REPO` lists stale `orch/*` branches from old runs;
+   add `--apply` to delete them.
 
 Report to the user: outcome, winner lane and model, score trajectory, rounds,
 reverts, critic families, tokens (`claive-orch report RUN`), and anything you

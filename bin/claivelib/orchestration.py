@@ -74,8 +74,8 @@ SCORE_PATTERNS = [
     ("tap", re.compile(r"^# pass (\d+)\s*$.*?^# fail (\d+)\s*$", re.M | re.S)),
     # unittest: "Ran 5 tests" + optional "FAILED (failures=1, errors=1)"
     ("unittest", re.compile(r"^Ran (\d+) tests?", re.M)),
-    # pytest summary: "=== 1 failed, 4 passed, 1 error in 0.1s ==="
-    ("pytest", re.compile(r"=+ (.*?(?:passed|failed|error|errors).*?) in [\d.]+s")),
+    # pytest summary: "=== 1 failed, 4 passed, 1 error in 0.1s ===" (no rules with -q)
+    ("pytest", re.compile(r"^(?:=+ )?(\d+ \w+(?:, \d+ \w+)*) in [\d.]+s", re.M)),
 ]
 
 
@@ -182,7 +182,7 @@ def validate_critique(raw):
 def fold(events):
     """Rebuild run state from the append-only event history."""
     state = {"config": None, "base": None, "lanes": {}, "lane_order": [], "review": None,
-             "finished": None, "usage": {}, "warnings": [], "started_at": None}
+             "finished": None, "integrated": None, "usage": {}, "warnings": [], "started_at": None}
     for event in events:
         kind, data = event["type"], event.get("data", {})
         lane = state["lanes"].get(data.get("lane"))
@@ -218,6 +218,8 @@ def fold(events):
             state["warnings"].append(data["message"])
         elif kind == "run.finished":
             state["finished"] = data
+        elif kind == "run.integrated":
+            state["integrated"] = data
     return state
 
 
@@ -301,6 +303,16 @@ def decide(state, now=None):
         limit = rounds if name == "a" else min(rounds, BREADTH_ROUNDS)
         status, why = lane_status(config, lane, limit)
         if status == "passed":
+            if config.get("post_pass_critic"):
+                post = [c for c in lane["critiques"] if c.get("post_pass")]
+                if not post:
+                    return action("critique", f"lane {name}: {why}; post-pass review for regressions beyond the task",
+                                  lane=name, round=lane_rounds(lane) + 1, post_pass=True)
+                last = post[-1]
+                if (not last.get("no_concrete_defect") and lane_rounds(lane) < last["round"]
+                        and lane_rounds(lane) < limit):
+                    return action("correct", f"lane {name}: post-pass critique named defects; correct them",
+                                  lane=name, round=last["round"], post_pass=True)
             return finish(state, None, f"lane {name}: {why}")
         if status == "running":
             next_round = lane_rounds(lane) + 1
@@ -463,6 +475,55 @@ def run_verifier(config, workspace, output_file):
             "seconds": round(time.time() - started, 1), "output": str(output_file)}
 
 
+def run_setup(repo, worktree, command, timeout):
+    """Run the lane setup command in a worktree; raise ValueError with the output tail on failure."""
+    env = dict(os.environ, CLAIVE_ORCH_REPO=str(repo), CLAIVE_ORCH_LANE=str(worktree))
+    try:
+        process = subprocess.run(["bash", "-c", command], cwd=str(worktree), capture_output=True,
+                                 text=True, timeout=timeout, stdin=subprocess.DEVNULL, env=env)
+    except subprocess.TimeoutExpired as error:
+        output = ""
+        if isinstance(error.stdout, str):
+            output += error.stdout
+        if isinstance(error.stderr, str):
+            output += error.stderr
+        raise ValueError(f"setup command timed out in {worktree}: {output[-2000:]}")
+    output = (process.stdout or "") + (process.stderr or "")
+    if process.returncode:
+        raise ValueError(f"setup command failed in {worktree}: {output[-2000:]}")
+    return output
+
+
+def close_idle_reusable_workers(state):
+    """Close idle reusable workers registered in this run; failures are warnings."""
+    seen = []
+    for name in state["lane_order"]:
+        for worker in state["lanes"][name]["workers"]:
+            worker_id = worker.get("worker_id")
+            if worker_id and worker_id not in seen:
+                seen.append(worker_id)
+    claive_bin = Path(__file__).resolve().parent.parent / "claive"
+    for worker_id in seen:
+        try:
+            _, record = worker_record(worker_id)
+        except (ValueError, OSError) as error:
+            print(f"warning: could not read worker {worker_id}: {error}")
+            continue
+        if not record.get("reusable") or record.get("status") != "idle":
+            continue
+        try:
+            process = subprocess.run([str(claive_bin), "close", worker_id], capture_output=True,
+                                     text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError) as error:
+            print(f"warning: could not close worker {worker_id}: {error}")
+            continue
+        if process.returncode:
+            detail = (process.stderr or process.stdout or "").strip()[:300]
+            print(f"warning: could not close worker {worker_id}: {detail}")
+        else:
+            print(f"Closed worker {worker_id}")
+
+
 def worker_record(worker_id):
     path = workers.job_path(worker_id)
     return path, workers.load(path)
@@ -567,6 +628,21 @@ def build_prompt(state, kind, lane_name=None):
         history = "\n".join(f"- round {c['round']}: " + "; ".join(d["description"][:200] for d in c["defects"])
                             for c in previous if c["defects"]) or "(none)"
         diff = bounded(lane_diff(state, lane), DIFF_LIMIT) or "(no changes)"
+        if config.get("post_pass_critic"):
+            limit = config["rounds"] if lane_name == "a" else min(config["rounds"], BREADTH_ROUNDS)
+            status, _ = lane_status(config, lane, limit)
+            if status == "passed" and not any(c.get("post_pass") for c in lane["critiques"]):
+                return (f"# Post-pass review\n\nYou are a critic. You do not edit files. The verifier passes "
+                        f"({describe(current_result(lane))}), so look for behaviour changes beyond the task: "
+                        f"regressions, changed public behaviour, swallowed errors, wrong counts on error paths, "
+                        f"untested paths.\n\n## Task\n\n{task}\n\n"
+                        f"## Verification\n\n`{command or '(held-out checks only)'}` -> "
+                        f"{describe(current_result(lane))}"
+                        f"{' (plus held-out checks)' if held_out else ''}\n{held_out}\n\n"
+                        f"## Verifier output (bounded)\n\n```text\n{last_output(lane)}\n```\n\n"
+                        f"## Diff against base {lane['base_commit'][:12]}\n\n```diff\n{diff}\n```\n\n"
+                        f"The workspace is {lane['path']}; you may read files there for context.\n\n"
+                        f"{CRITIC_SCHEMA}\n")
         return (f"# Critique a candidate solution\n\nYou are a critic. You do not edit files. "
                 f"Find concrete defects that explain why verification fails.\n\n## Task\n\n{task}\n\n"
                 f"## Verification\n\n`{command or '(held-out checks only)'}` -> {describe(current_result(lane))}"
@@ -620,6 +696,8 @@ def command_init(args):
         raise ValueError(f"unsupported arm {args.arm}; choose one of {', '.join(ARMS)}")
     if not 1 <= args.rounds <= MAX_ROUNDS:
         raise ValueError(f"--rounds must be between 1 and {MAX_ROUNDS}")
+    if args.post_pass_critic and args.arm not in {"B", "D"}:
+        raise ValueError("--post-pass-critic is allowed only with arms B and D")
     if args.acceptance_dir:
         acceptance = Path(args.acceptance_dir)
         if not acceptance.is_absolute() or not acceptance.is_dir():
@@ -638,7 +716,8 @@ def command_init(args):
               "verify": args.verify, "worker_verify": args.worker_verify, "verify_timeout": args.verify_timeout,
               "score_regex": args.score_regex, "acceptance_dir": args.acceptance_dir,
               "experiment": args.experiment, "repeat": args.repeat, "max_minutes": args.max_minutes,
-              "label": args.label or task.stem}
+              "label": args.label or task.stem, "post_pass_critic": bool(args.post_pass_critic),
+              "setup": args.setup}
     append(path, "run.started", config=config)
     print(f"Run {run_id} | arm {args.arm} | base {base[:12]} | {path}")
     if args.skip_base_check:
@@ -647,6 +726,8 @@ def command_init(args):
         base_dir = path / "base"
         git(repo, "worktree", "add", "--detach", str(base_dir), base)
         try:
+            if config.get("setup"):
+                run_setup(repo, base_dir, config["setup"], config["verify_timeout"])
             result = run_verifier(config, base_dir, path / "verify" / "base.txt")
         finally:
             git(repo, "worktree", "remove", "--force", str(base_dir), check=False)
@@ -688,6 +769,13 @@ def command_lane(args):
     branch = f"orch/{config['run_id']}/{name}"
     workspace = path / "lanes" / name
     git(config["repo"], "worktree", "add", "-b", branch, str(workspace), config["base"])
+    if config.get("setup"):
+        try:
+            run_setup(config["repo"], workspace, config["setup"], config["verify_timeout"])
+        except ValueError:
+            git(config["repo"], "worktree", "remove", "--force", str(workspace), check=False)
+            git(config["repo"], "branch", "-D", branch, check=False)
+            raise
     append(path, "lane.added", lane=name, engine=args.engine, model=args.model, family=family,
            strategy=args.strategy, branch=branch, path=str(workspace), base_commit=config["base"])
     print(f"Lane {name} | {args.engine} {args.model or '(engine default)'} | family {family} | {workspace}")
@@ -815,7 +903,7 @@ def command_critique(args):
         critique = {"no_concrete_defect": True, "approach_sound": True, "defects": [],
                     "error": f"unparseable critique: {error}"}
     critique.update(lane=args.lane, round=expected["round"], worker_id=args.worker_id,
-                    model=model, family=family)
+                    model=model, family=family, post_pass=bool(expected.get("post_pass")))
     append(path, "critique.completed", **critique)
     summary = "no concrete defect" if critique["no_concrete_defect"] else f"{len(critique['defects'])} defect(s)"
     print(f"Critique for lane {args.lane} round {expected['round']}: {summary}"
@@ -858,8 +946,9 @@ GUIDE = {
                 "--prompt-file \"$P\"; claive wait {implementer}; claive-orch verify {run} {lane}"),
     "review": ("P=$(claive-orch prompt {run} review); launch a read-only reviewer; claive wait RID; "
                "claive-orch review {run} --worker-id RID"),
-    "finish": ("claive-orch finish {run}; inspect `git -C {repo} diff {base} {commit}`; integrate only "
-               "if appropriate; claive-orch usage {run}; close workers; claive-orch cleanup {run}"),
+    "finish": ("claive-orch finish {run}; inspect `git -C {repo} diff {base} {commit}`; "
+               "claive-orch integrate {run} if appropriate; claive-orch usage {run}; close workers; "
+               "claive-orch cleanup {run} --branches"),
 }
 
 
@@ -959,6 +1048,7 @@ def summarize(run_id):
             "base": state["base"] and state["base"]["score"],
             "outcome": state["finished"]["outcome"] if state["finished"] else "running",
             "winner": state["finished"].get("lane") if state["finished"] else None,
+            "integrated": bool(state.get("integrated")),
             "l0_passed": bool(first and first[0]["passed"]),
             "wall_seconds": round((end or time.time()) - state["started_at"], 1),
             "tokens": None if unknown or not state["usage"] else tokens,
@@ -1062,6 +1152,108 @@ def command_cleanup(args):
             git(state["config"]["repo"], "worktree", "remove", "--force", lane["path"])
             print(f"Removed worktree for lane {name}; branch {lane['branch']} keeps every checkpoint")
     git(state["config"]["repo"], "worktree", "prune", check=False)
+    if args.branches:
+        winner = (state["finished"] or {}).get("lane") if state["finished"] else None
+        integrated = bool(state.get("integrated"))
+        for name in state["lane_order"]:
+            lane = state["lanes"][name]
+            branch = lane["branch"]
+            if name == winner and not integrated and not args.force:
+                print(f"Kept {branch} (winner not integrated; use --force)")
+                continue
+            process = subprocess.run(["git", "-C", str(state["config"]["repo"]), "branch", "-D", branch],
+                                     capture_output=True, text=True)
+            if process.returncode == 0:
+                print(f"Deleted branch {branch}")
+    return 0
+
+
+def command_integrate(args):
+    path, state = load_state(args.run)
+    config = state["config"]
+    if not state["finished"]:
+        raise ValueError(f"run {args.run} is not finished; finish it first")
+    if state.get("integrated"):
+        raise ValueError(f"run {args.run} was already integrated")
+    outcome = state["finished"].get("outcome")
+    commit = state["finished"].get("commit")
+    if not commit:
+        raise ValueError(f"run {args.run} has no winning commit; not verified")
+    if outcome != "verified":
+        raise ValueError(f"run {args.run} outcome is {outcome}, not verified")
+    repo = config["repo"]
+    base = config["base"]
+    patch = git(repo, "diff", "--binary", base, commit, check=False)
+    if patch.strip():
+        patch = patch if patch.endswith("\n") else patch + "\n"
+        first = subprocess.run(["git", "-C", str(repo), "apply"], input=patch,
+                               capture_output=True, text=True)
+        if first.returncode != 0:
+            second = subprocess.run(["git", "-C", str(repo), "apply", "--3way"], input=patch,
+                                    capture_output=True, text=True)
+            if second.returncode == 0:
+                names = [line.strip() for line in
+                         git(repo, "diff", base, commit, "--name-only", check=False).splitlines()
+                         if line.strip()]
+                if names:
+                    subprocess.run(["git", "-C", str(repo), "reset", "-q", "--", *names],
+                                   capture_output=True, text=True)
+            else:
+                output = ((second.stdout or "") + (second.stderr or "")
+                          + (first.stdout or "") + (first.stderr or ""))
+                names = [line.strip() for line in
+                         git(repo, "diff", base, commit, "--name-only", check=False).splitlines()
+                         if line.strip()]
+                conflicting = [name for name in names if name and name in output]
+                if not conflicting:
+                    conflicting = names or ["(unknown)"]
+                for name in conflicting:
+                    print(f"Conflict: {name}")
+                return 1
+    result = None
+    if not args.no_verify:
+        result = run_verifier(config, repo, path / "verify" / "integrate.txt")
+        print(f"Verifier in {repo}: {describe(result)}")
+    append(path, "run.integrated", commit=commit, result=result)
+    close_idle_reusable_workers(state)
+    if result is not None and not result["passed"]:
+        return 1
+    return 0
+
+
+def command_prune(args):
+    repo = args.repo
+    output = git(repo, "branch", "--format=%(refname:short)", check=False)
+    branches = sorted(branch.strip() for branch in output.splitlines()
+                      if branch.strip().startswith("orch/") and len(branch.strip().split("/")) == 3)
+    for branch in branches:
+        _, run_id, lane_name = branch.split("/")
+        try:
+            _, state = load_state(run_id)
+        except ValueError:
+            print(f"Kept {branch} (unknown run)")
+            continue
+        if not state["finished"]:
+            print(f"Kept {branch} (run not finished)")
+            continue
+        lane = state["lanes"].get(lane_name)
+        if lane is not None and Path(lane["path"]).exists():
+            print(f"Kept {branch} (worktree exists; run cleanup)")
+            continue
+        winner = (state["finished"] or {}).get("lane")
+        if lane_name == winner and not state.get("integrated"):
+            print(f"Kept {branch} (winner not integrated)")
+            continue
+        if not args.apply:
+            print(f"Would delete {branch}")
+        else:
+            process = subprocess.run(["git", "-C", str(repo), "branch", "-D", branch],
+                                     capture_output=True, text=True)
+            if process.returncode == 0:
+                print(f"Deleted branch {branch}")
+            else:
+                print(f"warning: could not delete {branch}: "
+                      f"{((process.stderr or process.stdout) or '').strip()[:300]}")
     return 0
 
 
@@ -1087,6 +1279,10 @@ def parser():
     init.add_argument("--label")
     init.add_argument("--skip-base-check", action="store_true")
     init.add_argument("--allow-passing-base", action="store_true")
+    init.add_argument("--post-pass-critic", action="store_true",
+                      help="after a pass, run one post-pass critic review (arms B and D only)")
+    init.add_argument("--setup", help="shell command run with bash -c in each new worktree "
+                      "(CLAIVE_ORCH_REPO/CLAIVE_ORCH_LANE in env; keep its files gitignored)")
     lane = commands.add_parser("lane", help="add a candidate lane (git worktree at the base revision)")
     lane.add_argument("run")
     lane.add_argument("name")
@@ -1137,9 +1333,19 @@ def parser():
     compare = commands.add_parser("compare", help="per-arm results for an experiment")
     compare.add_argument("--experiment", required=True)
     compare.add_argument("--json", action="store_true")
-    cleanup = commands.add_parser("cleanup", help="remove lane worktrees; branches keep checkpoints")
+    cleanup = commands.add_parser("cleanup", help="remove lane worktrees; add --branches to delete lane branches")
     cleanup.add_argument("run")
     cleanup.add_argument("--force", action="store_true")
+    cleanup.add_argument("--branches", action="store_true",
+                         help="also delete the run's lane branches (winner kept unless integrated or --force)")
+    integrate = commands.add_parser("integrate",
+                                    help="apply the winning commit to the repo checkout without staging")
+    integrate.add_argument("run")
+    integrate.add_argument("--no-verify", action="store_true",
+                           help="skip running the verifier in the repo checkout")
+    prune = commands.add_parser("prune", help="list or delete stale orch/<run>/<lane> branches")
+    prune.add_argument("--repo", required=True, help="repository whose local orch branches are inspected")
+    prune.add_argument("--apply", action="store_true", help="delete deletable branches (default is a dry run)")
     commands.add_parser("arms", help="list experiment arms")
     return result
 
@@ -1150,7 +1356,8 @@ def main():
                 "prompt": command_prompt, "verify": command_verify, "critique": command_critique,
                 "review": command_review, "next": command_next, "finish": command_finish,
                 "usage": command_usage, "report": command_report, "list": command_list,
-                "compare": command_compare, "cleanup": command_cleanup}
+                "compare": command_compare, "cleanup": command_cleanup, "integrate": command_integrate,
+                "prune": command_prune}
     if args.action == "arms":
         for name, text in ARMS.items():
             print(f"{name:<3} {text}")

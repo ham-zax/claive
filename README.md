@@ -119,6 +119,9 @@ Meta [prompt caching](https://dev.meta.ai/docs/prompt-caching) automatically reu
 claive-orch init --repo /abs/repo --task-file /abs/task.md --verify 'python3 -m pytest -q' --arm D
 claive-orch next RUN          # NEXT / Why / How
 claive-orch report RUN        # outcome, score trajectory, critics, tokens
+claive-orch integrate RUN     # apply the winner unstaged, re-verify in the checkout
+claive-orch cleanup RUN --branches   # remove worktrees and lane branches
+claive-orch prune --repo /abs/repo   # list stale orch/* branches (--apply deletes)
 claive-orch compare --experiment NAME
 claive-orch arms
 ```

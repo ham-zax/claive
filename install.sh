@@ -27,10 +27,11 @@ done
 
 sources=("$source_dir/bin/claive" "$source_dir/bin/claive-worker"
          "$source_dir/bin/claive-codex" "$source_dir/bin/claive-orch"
-         "$source_dir/skills/subagent-routing/SKILL.md")
+         "$source_dir/bin/claive-memcap" "$source_dir/skills/subagent-routing/SKILL.md")
 targets=("$bin_dir/claive" "$bin_dir/claive-worker"
-         "$bin_dir/claive-codex" "$bin_dir/claive-orch" "$skill_dir/SKILL.md")
-modes=(755 755 755 755 644)
+         "$bin_dir/claive-codex" "$bin_dir/claive-orch"
+         "$bin_dir/claive-memcap" "$skill_dir/SKILL.md")
+modes=(755 755 755 755 755 644)
 # Host-neutral skills go to Codex and Claude Code, and with --pi to a Pi parent agent.
 # Pi workers read the same directory; claive's recursion guard stops them launching workers.
 skill_roots=("$codex_skills" "$claude_skills")

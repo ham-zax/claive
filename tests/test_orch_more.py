@@ -132,6 +132,13 @@ class OrchMore(unittest.TestCase):
         self.assertEqual(sorted(p.rstrip("/") for p in added["local_paths"]), ["build", "linked.txt"])
         self.assertTrue((lane_a / "linked.txt").is_symlink())
 
+    def test_verifier_byproducts_stay_out_of_checkpoints(self):
+        # unittest imports calc.py and test_calc.py, leaving __pycache__ behind in the lane.
+        run = self.init("D")
+        lane_a = self.solve(run)
+        self.assertTrue(list(lane_a.glob("__pycache__/*.pyc")))
+        self.assertFalse([f for f in self.committed(run) if "__pycache__" in f or f.endswith(".pyc")])
+
     def test_revert_keeps_setup_files(self):
         setup = 'ln -s "$CLAIVE_ORCH_REPO/notes.txt" linked.txt && mkdir -p build && echo x > build/out'
         run = self.hidden_init("--setup", setup)

@@ -1,0 +1,8 @@
+#!/usr/bin/python3
+"""Run a command under a resident-memory cap (claivelib.memcap)."""
+import sys
+from claivelib.memcap import entrypoint
+
+
+if __name__ == "__main__":
+    sys.exit(entrypoint())

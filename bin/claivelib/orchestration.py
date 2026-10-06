@@ -22,6 +22,7 @@ import time
 import uuid
 
 from claivelib import cli as workers
+from claivelib import memcap
 from claivelib.engines import DEFAULT_ENGINE, get_engine
 
 ARMS = {
@@ -488,16 +489,25 @@ def list_untracked(worktree):
     return entries
 
 
+BYPRODUCT_DIRS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+
+
+def is_byproduct(path):
+    """True for verifier byproducts (bytecode, test and lint caches); see BYPRODUCT_EXCLUDES."""
+    parts = Path(path).parts
+    return bool(BYPRODUCT_DIRS.intersection(parts)) or path.endswith((".pyc", ".pyo"))
+
+
 def porcelain_is_local(line, local_paths):
-    """True when a porcelain status line refers only to local paths."""
+    """True when a porcelain status line refers only to local paths or verifier byproducts."""
     if len(line) < 4:
         return False
     cleaned_locals = [p.rstrip("/") for p in local_paths if p.rstrip("/")]
-    if not cleaned_locals:
-        return False
 
     def is_local(path):
         candidate = path.strip().strip('"').rstrip("/")
+        if is_byproduct(candidate):
+            return True
         for local in cleaned_locals:
             if candidate == local or candidate.startswith(local + "/"):
                 return True
@@ -607,13 +617,18 @@ def run_verifier(config, workspace, output_file):
         if config.get("acceptance_dir"):
             created = copy_acceptance(config["acceptance_dir"], workspace)
             clear_stale_pycache(created)
-        process = subprocess.run(["bash", "-c", config["verify"]], cwd=workspace, capture_output=True,
-                                 text=True, timeout=config["verify_timeout"], stdin=subprocess.DEVNULL, env=env)
-        output, code, status = process.stdout + process.stderr, process.returncode, None
-    except subprocess.TimeoutExpired as error:
-        output = (error.stdout or "") if isinstance(error.stdout, str) else ""
-        code, status = None, "error"
-        output += f"\n[claive-orch: verifier timed out after {config['verify_timeout']}s]"
+        limit = memcap.parse_size(config["verify_memory"]) if config.get("verify_memory") else None
+        # Runs in its own session so a timeout or memory overrun kills the verifier's children too.
+        process = memcap.run_capped(["bash", "-c", config["verify"]], limit, config["verify_timeout"],
+                                    cwd=workspace, env=env)
+        output, code, status = process["stdout"] + process["stderr"], process["code"], None
+        if process["timed_out"]:
+            status = "error"
+            output += f"\n[claive-orch: verifier timed out after {config['verify_timeout']}s]"
+        elif process["exceeded"]:
+            status = "error"
+            output += (f"\n[claive-orch: verifier exceeded memory limit {config['verify_memory']} "
+                       f"(peak sampled {memcap.format_size(process['peak'])}) and was killed]")
     except ValueError as error:
         output, code, status = str(error), None, "error"
     finally:
@@ -693,7 +708,8 @@ def verifier_timed_out(result):
     if result.get("exit_code") is not None:
         return False
     try:
-        return "timed out" in Path(result["output"]).read_text()
+        text = Path(result["output"]).read_text()
+        return "timed out" in text or "exceeded memory limit" in text
     except OSError:
         return result.get("status") == "error"
 
@@ -820,14 +836,21 @@ CRITIC_SCHEMA = """Answer with a short explanation, then exactly one fenced ```j
   Do not invent defects, style nits, or speculative risks."""
 
 
+# Verifier byproducts that are never part of a candidate, even when the repo does not ignore them.
+BYPRODUCT_EXCLUDES = [":(exclude,glob)**/__pycache__/**", ":(exclude,glob)**/*.py[co]",
+                      ":(exclude,glob)**/.pytest_cache/**", ":(exclude,glob)**/.mypy_cache/**",
+                      ":(exclude,glob)**/.ruff_cache/**"]
+
+
+def stage_pathspecs(locals_):
+    """Pathspecs for staging a lane: everything except local setup/cache paths and verifier byproducts."""
+    return ["--", ".", *[f":(exclude,top){p}" for p in locals_], *BYPRODUCT_EXCLUDES]
+
+
 def lane_diff(state, lane):
     workspace = lane["path"]
     locals_ = lane_local_paths(lane, state.get("config"))
-    if locals_:
-        git(workspace, "add", "-A", "--intent-to-add", "--", ".",
-            *[f":(exclude,top){p}" for p in locals_], check=False)
-    else:
-        git(workspace, "add", "-A", "--intent-to-add", check=False)
+    git(workspace, "add", "-A", "--intent-to-add", *stage_pathspecs(locals_), check=False)
     return git(workspace, "diff", lane["base_commit"], check=False)
 
 
@@ -856,6 +879,8 @@ def describe(result):
 def worker_checks(config):
     """Return (command workers may run, note about held-out checks). Hidden check names never leak."""
     command = config.get("worker_verify") or (None if config.get("acceptance_dir") else config["verify"])
+    if command and config.get("verify_memory"):
+        command = f"claive-memcap {config['verify_memory']} -- bash -c {shlex.quote(command)}"
     note = ("Held-out checks you cannot see also run in the orchestrator; their files are not in the "
             "workspace, so do not look for them. Their failures appear in the verifier output you are given."
             if config.get("acceptance_dir") else "")
@@ -969,6 +994,9 @@ def command_init(args):
     cache_paths = [p for group in raw_cache_paths for p in (group if isinstance(group, list) else [group])]
     if bool(cache_key) != bool(cache_paths):
         raise ValueError("--cache-key and --cache-path go together (both or neither)")
+    verify_memory = getattr(args, "verify_memory", None)
+    if verify_memory:
+        memcap.parse_size(verify_memory)
     for entry in cache_paths:
         cleaned = str(entry).strip()
         if not cleaned or Path(cleaned).is_absolute() or ".." in Path(cleaned).parts:
@@ -986,7 +1014,8 @@ def command_init(args):
               "score_regex": args.score_regex, "acceptance_dir": args.acceptance_dir,
               "experiment": args.experiment, "repeat": args.repeat, "max_minutes": args.max_minutes,
               "label": args.label or task.stem, "post_pass_critic": bool(args.post_pass_critic),
-              "setup": args.setup, "cache_key": cache_key, "cache_paths": cache_paths}
+              "setup": args.setup, "cache_key": cache_key, "cache_paths": cache_paths,
+              "verify_memory": verify_memory}
     append(path, "run.started", config=config)
     print(f"Run {run_id} | arm {args.arm} | base {base[:12]} | {path}")
     if args.skip_base_check:
@@ -1144,12 +1173,9 @@ def command_verify(args):
         print(f"Lane {args.lane} round {round_number}: {describe(result)} is worse than {describe(best)}; "
               f"reverted to {lane['best_commit'][:12]}")
     else:
-        # Local setup/cache outputs are never committed; a worker change inside a local
-        # path is therefore also left uncommitted (documented limitation).
-        if locals_:
-            git(lane["path"], "add", "-A", "--", ".", *[f":(exclude,top){p}" for p in locals_])
-        else:
-            git(lane["path"], "add", "-A")
+        # Local setup/cache outputs and verifier byproducts are never committed; a worker
+        # change inside a local path is therefore also left uncommitted (documented limitation).
+        git(lane["path"], "add", "-A", *stage_pathspecs(locals_))
         git(lane["path"], "commit", "-q", "--no-verify", "--allow-empty", "-m",
             f"claive-orch {config['run_id']} lane {args.lane} round {round_number}: {describe(result)}",
             env=GIT_IDENTITY)
@@ -1674,6 +1700,10 @@ def parser():
     init.add_argument("--rounds", type=int, default=2, help="refinement rounds D (default 2, max 3)")
     init.add_argument("--base", help="base revision (default HEAD)")
     init.add_argument("--verify-timeout", type=int, default=1800)
+    init.add_argument("--verify-memory", metavar="SIZE",
+                      help="resident memory cap for the verifier and its children, e.g. 2G; over it the "
+                      "verifier is killed and the round scores as an error. Workers are told to run their "
+                      "checks under claive-memcap SIZE")
     init.add_argument("--score-regex", help="regex with named groups passed and failed or total")
     init.add_argument("--acceptance-dir", help="held-out checks stored outside the repo, copied in at verify")
     init.add_argument("--worker-verify", help="visible check command shown to workers (default: --verify, "

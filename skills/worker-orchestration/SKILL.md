@@ -129,10 +129,14 @@ claive-orch init --repo /abs/repo --task-file /abs/task.md \
 #    tests pass, looking for behaviour changes beyond the task.
 #    --setup 'ln -s "$CLAIVE_ORCH_REPO/node_modules" node_modules' runs in the
 #    base check and in every new lane worktree. Files it creates are lane-local:
-#    never committed into checkpoints and kept on revert.
+#    never committed into checkpoints and kept on revert (nor are __pycache__,
+#    *.pyc and pytest/mypy/ruff caches).
 #    --cache-key 'sha256sum package-lock.json' --cache-path dist reuses build
 #    outputs across verifies with the same key (the verifier should skip its
 #    build when the cached outputs exist). $CLAIVE_ORCH_CACHE is exported too.
+#    --verify-memory 2G caps the verifier and its children (RSS, sampled; over
+#    it the round is an error). Workers are told to run their checks under
+#    `claive-memcap 2G -- CMD`, which works inside sandboxes without systemd-run.
 
 claive-orch next RUN          # always ask; it prints NEXT / Why / How
 ```

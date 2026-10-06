@@ -125,6 +125,7 @@ claive-orch rescore RUN --reason 'fixed held-out check'  # re-verify lanes witho
 claive-orch reject RUN a --defect 2 --reason 'relaxes a gate'  # drop a wrong critic suggestion
 claive-orch cleanup RUN --branches   # remove worktrees and lane branches
 claive-orch prune --repo /abs/repo   # list stale orch/* branches (--apply deletes)
+claive-memcap 2G -- npm test        # memory cap without systemd-run (init --verify-memory 2G uses it)
 claive-orch compare --experiment NAME
 claive-orch arms
 ```

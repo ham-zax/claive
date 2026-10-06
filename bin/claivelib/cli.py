@@ -332,6 +332,9 @@ def render(records, color=False, height=None):
     return "\n".join(lines)
 
 
+TASK_FAILURE_REASONS = 5
+
+
 def event_update(state, event):
     kind = event.get("type", "activity")
     state["last_event"] = event.get("native_kind", kind)
@@ -346,6 +349,12 @@ def event_update(state, event):
     elif kind == "task_warning":
         state["task_failures"] += 1
         state["phase"] = "task failure reported"
+        detail = " ".join(str(event.get("reason") or "").split())
+        if event.get("tool"):
+            detail = f"{event['tool']}: {detail}" if detail else str(event["tool"])
+        if detail:
+            recent = state.get("task_failure_reasons", [])[-(TASK_FAILURE_REASONS - 1):]
+            state["task_failure_reasons"] = recent + [detail[:300]]
     elif kind in {"terminal_completed", "terminal_failed"}:
         state["terminal"] = event.get("terminal")
         state["terminal_reason"] = event.get("reason")
@@ -704,6 +713,8 @@ def report(state):
         print(clean(state["error"]))
     if state.get("task_failures"):
         print(f"Task failures reported: {state['task_failures']} (inspect logs before accepting work)")
+        for detail in state.get("task_failure_reasons", []):
+            print(f"  - {clean(detail)}")
     if state.get("quota_exhausted"):
         print(f"Worker engine quota exhausted ({state.get('engine', DEFAULT_ENGINE)}). Reset: {state.get('quota_reset_at', 'not reported')}.")
         print("Pre-approved fallback: Pi muse-spark-1.3-contributor-free (opencode2api) for the affected lane; "

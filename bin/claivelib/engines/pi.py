@@ -174,7 +174,11 @@ class PiEngine(WorkerEngine):
         elif kind == "tool_execution_start":
             return [{"type": "tool_started", "native_kind": kind, "tool": event.get("toolName", "tool")}]
         elif kind == "tool_execution_end" and event.get("isError"):
-            return [{"type": "task_warning", "native_kind": kind}]
+            result = event.get("result") if isinstance(event.get("result"), dict) else {}
+            reason = " ".join(part.get("text", "") for part in result.get("content", [])
+                              if isinstance(part, dict) and part.get("type") == "text")
+            return [{"type": "task_warning", "native_kind": kind,
+                     "tool": event.get("toolName", "tool"), "reason": reason}]
         elif kind == "agent_settled":
             message = self._last_assistant or {}
             stop = message.get("stopReason")

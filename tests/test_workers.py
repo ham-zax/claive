@@ -310,6 +310,11 @@ class WorkerChecks(unittest.TestCase):
             module.event_update(generic, event)
         self.assertEqual(generic["task_failures"], 1)
         self.assertNotIn("quota_exhausted", generic)
+        self.assertEqual(generic["task_failure_reasons"], ["API error 429: too many requests"])
+        for number in range(7):
+            module.event_update(generic, {"type": "task_warning", "tool": "read", "reason": f"ENOENT\n{number}"})
+        self.assertEqual(generic["task_failures"], 8)
+        self.assertEqual(generic["task_failure_reasons"], [f"read: ENOENT {n}" for n in range(2, 7)])
 
     def test_followup_reuses_created_worktree(self):
         worktree = self.path / "isolated tree"
@@ -495,6 +500,8 @@ class WorkerChecks(unittest.TestCase):
         self.assertEqual(warning_result.returncode, 0)
         self.assertEqual(warning["status"], "completed")
         self.assertEqual(warning["task_failures"], 1)
+        self.assertIn("Task failures reported: 1", warning_result.stdout)
+        self.assertIn("  - fixture task warning", warning_result.stdout)
 
         for mode in ("terminal-failure", "exit-failure", "malformed", "missing"):
             failed_result, failed = self.fixture_launch(mode=mode)

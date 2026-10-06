@@ -121,6 +121,9 @@ class PiChecks(unittest.TestCase):
                 "role": "assistant", "stopReason": stop, "content": []}})
             self.assertEqual(engine.normalize_event({"type": "agent_settled"})[0]["terminal"], "failed")
         self.assertEqual(engine.normalize_event({"type": "tool_execution_end", "isError": True})[0]["type"], "task_warning")
+        warning = engine.normalize_event({"type": "tool_execution_end", "toolName": "read", "isError": True, "result": {
+            "content": [{"type": "text", "text": "ENOENT: no such file"}]}})[0]
+        self.assertEqual((warning["tool"], warning["reason"]), ("read", "ENOENT: no such file"))
 
     def test_prompt_tool_policy_and_non_uuid_session_id(self):
         result, state = self.launch("--read-only", "--session-id", "pi-session.unit_7", "--reasoning-effort", "low")

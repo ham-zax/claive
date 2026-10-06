@@ -74,8 +74,8 @@ SCORE_PATTERNS = [
     ("tap", re.compile(r"^# pass (\d+)\s*$.*?^# fail (\d+)\s*$", re.M | re.S)),
     # unittest: "Ran 5 tests" + optional "FAILED (failures=1, errors=1)"
     ("unittest", re.compile(r"^Ran (\d+) tests?", re.M)),
-    # pytest summary: "=== 1 failed, 4 passed, 1 error in 0.1s ===" (no rules with -q)
-    ("pytest", re.compile(r"^(?:=+ )?(\d+ \w+(?:, \d+ \w+)*) in [\d.]+s", re.M)),
+    # pytest summary: "=== 1 failed, 4 passed, 1 error, 3 subtests passed in 0.1s ===" (no rules with -q)
+    ("pytest", re.compile(r"^(?:=+ )?(\d+ \w+(?:, \d+ \w+(?: \w+)?)*) in [\d.]+s", re.M)),
 ]
 
 

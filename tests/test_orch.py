@@ -48,6 +48,8 @@ class PureChecks(unittest.TestCase):
         self.assertEqual(orch.parse_score("Ran 4 tests in 0.0s\n\nOK\n"), (4, 4))
         self.assertEqual(orch.parse_score("===== 2 failed, 7 passed, 1 error in 0.52s ====="), (7, 10))
         self.assertEqual(orch.parse_score("===== 3 passed in 0.01s ====="), (3, 3))
+        self.assertEqual(orch.parse_score("8 failed, 39 passed, 2 deselected, 18 subtests passed in 25.39s"),
+                         (39, 47))
         self.assertEqual(orch.parse_score("FAILED t.py::x\n16 failed, 13 passed in 29.73s\n"), (13, 29))
         self.assertEqual(orch.parse_score("....\n4 passed, 1 warning in 0.2s\n"), (4, 4))
         self.assertEqual(orch.parse_score("Tests:       1 failed, 4 passed, 5 total"), (4, 5))

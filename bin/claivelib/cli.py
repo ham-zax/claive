@@ -52,6 +52,32 @@ def check_model_policy(model):
         raise ValueError(f"model {model} is disallowed by claive policy")
 
 
+def check_nested():
+    if os.environ.get("CLAIVE_WORKER_ID") and os.environ.get("CLAIVE_ALLOW_NESTED") != "1":
+        raise ValueError("claive workers may not launch workers (CLAIVE_WORKER_ID is set)")
+
+
+def _report_status(state):
+    if state.get("report_state") == "ok":
+        return (state.get("report") or {}).get("status")
+    return None
+
+
+def _write_turn_event(state):
+    try:
+        from claivelib import inbox as inbox_mod
+        status = state.get("status")
+        if status == "idle":
+            status = state.get("last_turn_status", "failed")
+        event = inbox_mod.turn_event(state["id"], state.get("label", ""), state.get("turn", 1),
+                                     status, outcome_code(state), state.get("failure_kind"),
+                                     state.get("needs_parent"), _report_status(state),
+                                     state.get("batch"), state.get("mission"))
+        inbox_mod.append(event)
+    except Exception:
+        pass
+
+
 def parse_report(text):
     blocks = re.findall(r"```claive-report(.*?)```", text or "", re.S)
     if not blocks:
@@ -361,7 +387,8 @@ def supervise(job_id, control=None):
         with (path / "events.jsonl").open(log_mode) as events, (path / "stderr.log").open(log_mode) as errors:
             child = subprocess.Popen(state["command"], stdout=subprocess.PIPE, stderr=errors,
                                      stdin=subprocess.DEVNULL, start_new_session=True,
-                                     cwd=state["workspace"])
+                                     cwd=state["workspace"],
+                                     env=dict(os.environ, CLAIVE_WORKER_ID=job_id))
             state["worker_pid"] = child.pid
             state["worker_identity"] = identity(child.pid)
             state["phase"] = "waiting for first event"
@@ -462,6 +489,7 @@ def supervise(job_id, control=None):
     state["ended_at"] = time.time()
     state["phase"] = state["status"]
     save(path / "state.json", state)
+    _write_turn_event(state)
     return outcome_code(state)
 
 
@@ -501,6 +529,7 @@ def reusable_worker(job_id):
                     state.update(last_turn_status="failed", error="queued follow-up prompt disappeared",
                                  failure_kind="rejected")
                     save(path / "state.json", state)
+                    _write_turn_event(state)
                     pending[0].unlink()
                     print(f"Worker {job_id}: rejected missing prompt {clean(request['prompt_file'])}", flush=True)
                     continue
@@ -515,6 +544,7 @@ def reusable_worker(job_id):
                                      last_turn_status="failed", error="actual worktree is unknown",
                                      failure_kind="rejected")
                         save(path / "state.json", state)
+                        _write_turn_event(state)
                         pending[0].unlink()
                         print(f"Worker {job_id}: follow-up rejected; actual worktree is unknown", flush=True)
                         continue
@@ -540,6 +570,7 @@ def reusable_worker(job_id):
                                  phase="follow-up rejected; ready for another assignment",
                                  failure_kind="rejected")
                     save(path / "state.json", state)
+                    _write_turn_event(state)
                     pending[0].unlink()
                     print(f"Worker {job_id}: follow-up rejected: {clean(error)}", flush=True)
                     continue
@@ -613,6 +644,10 @@ def create_job(args):
         session_dir=launch.get("session_dir"),
     )
     engine.validate_turn(initial_turn)
+    mission_id = getattr(args, "mission", None) or os.environ.get("CLAIVE_MISSION") or None
+    if mission_id:
+        from claivelib import mission as mission_mod
+        mission_mod.require_open(mission_id)
     job_id = uuid.uuid4().hex[:12]
     path = root() / job_id
     path.mkdir(mode=0o700)
@@ -650,7 +685,12 @@ def create_job(args):
         state["source_prompt_file"] = source_prompt
     if args.worktree_existing:
         state["actual_workspace"] = str(Path(args.worktree_existing))
+    if mission_id:
+        state["mission"] = mission_id
     save(path / "state.json", state)
+    if mission_id:
+        from claivelib import mission as mission_mod
+        mission_mod.link_auto(mission_id, "worker", job_id)
     return path, state
 
 
@@ -917,9 +957,12 @@ def parser():
         launch.add_argument("--output-schema")
         launch.add_argument("--no-session-log", action="store_true")
         launch.add_argument("--provider")
+        launch.add_argument("--mission", help="link the new worker to a mission")
+        if action == "open":
+            launch.add_argument("--detach", action="store_true", help="run the reusable loop in the background")
     listing = commands.add_parser("list", help="list active workers and recent results")
     listing.add_argument("--json", action="store_true")
-    for action in ("show", "logs", "wait", "cancel", "close", "usage"):
+    for action in ("show", "logs", "cancel", "close", "usage"):
         command = commands.add_parser(action)
         command.add_argument("id")
         if action in {"show", "usage"}:
@@ -927,6 +970,57 @@ def parser():
         if action == "logs":
             command.add_argument("--stderr", action="store_true")
             command.add_argument("--lines", type=int, default=20)
+    waiting = commands.add_parser("wait")
+    waiting.add_argument("id", nargs="+")
+    waiting.add_argument("--any", action="store_true")
+    waiting.add_argument("--timeout", type=float)
+    inbox_cmd = commands.add_parser("inbox", help="show turn and batch events since the consumer cursor")
+    inbox_cmd.add_argument("--consumer", default="default")
+    inbox_cmd.add_argument("--peek", action="store_true")
+    inbox_cmd.add_argument("--json", action="store_true")
+    batch_cmd = commands.add_parser("batch", help="run multi-worker plans")
+    batch_sub = batch_cmd.add_subparsers(dest="batch_action", required=True)
+    batch_validate = batch_sub.add_parser("validate")
+    batch_validate.add_argument("plan")
+    batch_start = batch_sub.add_parser("start")
+    batch_start.add_argument("plan")
+    batch_start.add_argument("--json", action="store_true")
+    batch_status = batch_sub.add_parser("status")
+    batch_status.add_argument("id")
+    batch_status.add_argument("--json", action="store_true")
+    batch_wait = batch_sub.add_parser("wait")
+    batch_wait.add_argument("id")
+    batch_wait.add_argument("--timeout", type=float)
+    batch_cancel = batch_sub.add_parser("cancel")
+    batch_cancel.add_argument("id")
+    batch_retry = batch_sub.add_parser("retry")
+    batch_retry.add_argument("id")
+    batch_list = batch_sub.add_parser("list")
+    batch_list.add_argument("--json", action="store_true")
+    mission_cmd = commands.add_parser("mission", help="track goals across workers and batches")
+    mission_sub = mission_cmd.add_subparsers(dest="mission_action", required=True)
+    mission_new = mission_sub.add_parser("new")
+    mission_new.add_argument("--title", required=True)
+    mission_goal = mission_new.add_mutually_exclusive_group(required=True)
+    mission_goal.add_argument("--goal")
+    mission_goal.add_argument("--goal-file")
+    mission_note = mission_sub.add_parser("note")
+    mission_note.add_argument("id")
+    mission_note.add_argument("text")
+    mission_link = mission_sub.add_parser("link")
+    mission_link.add_argument("id")
+    mission_target = mission_link.add_mutually_exclusive_group(required=True)
+    mission_target.add_argument("--worker")
+    mission_target.add_argument("--batch")
+    mission_target.add_argument("--run")
+    mission_show = mission_sub.add_parser("show")
+    mission_show.add_argument("id")
+    mission_show.add_argument("--json", action="store_true")
+    mission_list = mission_sub.add_parser("list")
+    mission_list.add_argument("--all", dest="all_missions", action="store_true")
+    mission_list.add_argument("--json", action="store_true")
+    mission_close = mission_sub.add_parser("close")
+    mission_close.add_argument("id")
     followup = commands.add_parser("followup", help="submit related work to an existing reusable worker")
     followup.add_argument("id")
     followup.add_argument("--prompt-file", required=True)
@@ -960,10 +1054,23 @@ def main(launcher=None):
         set_launcher_path(launcher)
     if len(sys.argv) == 3 and sys.argv[1] == "_supervise":
         return supervise(sys.argv[2])
+    if len(sys.argv) == 3 and sys.argv[1] == "_reusable":
+        return reusable_worker(sys.argv[2])
+    if len(sys.argv) == 3 and sys.argv[1] == "_batch":
+        from claivelib import batch as batch_mod
+        return batch_mod.runner(sys.argv[2])
     args = parser().parse_args()
     if args.action in {"run", "start", "open"}:
+        check_nested()
         path, state = create_job(args)
         print(f"Worker {state['id']} | {clean(state['label'])} | {path}", flush=True)
+        if args.action == "open" and getattr(args, "detach", False):
+            with (path / "supervisor.log").open("w") as log:
+                subprocess.Popen([sys.executable, launcher_path(), "_reusable", state["id"]],
+                                 stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+            print(f"Wait: claive wait {state['id']}\nFollow-up: claive followup {state['id']} --prompt-file ...\n"
+                  f"Answer: claive answer {state['id']} --message ...\nClose: claive close {state['id']}")
+            return 0
         if args.action in {"run", "open"}:
             code = reusable_worker(state["id"]) if args.action == "open" else supervise(state["id"])
             report(load(path))
@@ -1028,12 +1135,22 @@ def main(launcher=None):
             with log.open(errors="replace") as stream:
                 print("".join(deque(stream, maxlen=args.lines)), end="")
     elif args.action == "wait":
-        path = job_path(args.id)
+        ids = args.id
+        if len(ids) > 1 and not args.any:
+            raise ValueError("use --any to wait for several workers")
+        if args.timeout is not None and args.timeout <= 0:
+            raise ValueError("--timeout must be > 0")
+        paths = [job_path(job_id) for job_id in ids]
+        start = time.monotonic()
         while True:
-            state = load(path)
-            if state["status"] not in ACTIVE or (state["status"] == "idle" and not list((path / "requests").glob("*.json"))):
-                report(state)
-                return outcome_code(state)
+            for job_id, path in zip(ids, paths):
+                state = load(path)
+                if state["status"] not in ACTIVE or (state["status"] == "idle" and not list((path / "requests").glob("*.json"))):
+                    report(state)
+                    return outcome_code(state)
+            if args.timeout is not None and time.monotonic() - start >= args.timeout:
+                print(f"Timed out after {'%g' % args.timeout}s; still running: {' '.join(ids)}")
+                return 124
             time.sleep(0.25)
     elif args.action == "followup":
         path = job_path(args.id)
@@ -1139,6 +1256,40 @@ def main(launcher=None):
         print(f"Answer queued for {args.id}")
     elif args.action == "tmux":
         return tmux_view(args.codex_args)
+    elif args.action == "inbox":
+        from claivelib import inbox as inbox_mod
+        events = inbox_mod.read_new(args.consumer, peek=args.peek)
+        print(json.dumps(events, indent=2) if args.json else inbox_mod.format_text(events))
+    elif args.action == "batch":
+        from claivelib import batch as batch_mod
+        if args.batch_action == "validate":
+            return batch_mod.cmd_validate(args.plan)
+        if args.batch_action == "start":
+            return batch_mod.cmd_start(args.plan, json_output=args.json)
+        if args.batch_action == "status":
+            return batch_mod.cmd_status(args.id, json_output=args.json)
+        if args.batch_action == "wait":
+            return batch_mod.cmd_wait(args.id, timeout=args.timeout)
+        if args.batch_action == "cancel":
+            return batch_mod.cmd_cancel(args.id)
+        if args.batch_action == "retry":
+            return batch_mod.cmd_retry(args.id)
+        if args.batch_action == "list":
+            return batch_mod.cmd_list(json_output=args.json)
+    elif args.action == "mission":
+        from claivelib import mission as mission_mod
+        if args.mission_action == "new":
+            return mission_mod.cmd_new(args.title, goal=args.goal, goal_file=args.goal_file)
+        if args.mission_action == "note":
+            return mission_mod.cmd_note(args.id, args.text)
+        if args.mission_action == "link":
+            return mission_mod.cmd_link(args.id, worker=args.worker, batch=args.batch, run=args.run)
+        if args.mission_action == "show":
+            return mission_mod.cmd_show(args.id, json_output=args.json)
+        if args.mission_action == "list":
+            return mission_mod.cmd_list(all_missions=args.all_missions, json_output=args.json)
+        if args.mission_action == "close":
+            return mission_mod.cmd_close(args.id)
     return 0
 
 

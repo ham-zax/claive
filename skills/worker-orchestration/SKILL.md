@@ -66,26 +66,40 @@ another family and mention it in your report.
 
 ## Host mechanics
 
-All paths must be absolute. The worker ID is the 12-hex value on the first output
-line: `Worker <id> | label | path`.
+The same protocol works in every host (Claude Code, Codex, a Pi agent, a plain
+shell); only how you wait differs. Full protocol:
+`/home/hamza/repo/claive/docs/harness-integration.md`.
 
-**Claude Code.**
-- Long-lived implementer: run `claive open ...` with Bash
-  `run_in_background: true`, then read the first line of that background output
-  for the worker ID. If it is not there yet, run
-  `claive list --json | jq -r '.[] | select(.label=="LABEL") | .id'`.
-- Single-turn critics and reviewers: `claive start ...` returns at once
-  and prints the ID.
-- Waiting: `claive wait ID`, either with `run_in_background: true` (you
-  are notified when it exits) or with `timeout: 600000`. Exit 0 = completed,
-  130 = cancelled, anything else = failed.
-- Never use `&`, `nohup`, or `sleep` polling loops.
+All paths must be absolute. The ID is the 12-hex value on the first output
+line: `Worker <id> | label | path`. Exit codes everywhere: 0 completed, 1 failed,
+3 needs a parent decision, 124 `--timeout` expired (still running), 130 cancelled.
 
-**Codex.** Launch `claive open ...` (or `claive-worker ...`,
-which is the same thing) through `exec_command` with a short `yield_time_ms`,
-and keep the shell session ID. Collect output with `write_stdin`. Critics may
-use `claive start`. Full Codex mechanics, caching, and the quota policy
-are in the `subagent-routing` skill.
+- **Launch without blocking:** `claive start ...` (one turn),
+  `claive open --detach ...` (reusable implementer; returns at once),
+  `claive batch start PLAN.json` (parallel lanes of stages). Never use `&`,
+  `nohup`, or `sleep` polling loops.
+- **Wait:** `claive wait ID [ID ...] --any --timeout S` returns the first worker
+  to settle (with its report and code); on 124 do other work and wait again.
+- **After a context reset or between turns:** `claive inbox --consumer <host>`
+  lists every finished turn since your last read (`ASK` lines carry the
+  question). Use one consumer name per parent.
+- **Long tasks:** `claive mission new --title T --goal-file F`, then
+  `export CLAIVE_MISSION=<id>` (or `--mission`) so launches link themselves;
+  `mission note` decisions; `claive mission show ID` prints `Next:`.
+- Workers cannot launch workers (`CLAIVE_WORKER_ID` guard).
+
+Host specifics:
+- **Claude Code:** plain Bash for launches. Wait either in the foreground
+  (`wait ... --any --timeout 540`, Bash `timeout: 600000`) or with
+  `run_in_background: true` and no `--timeout` to be notified. Inbox consumer
+  `claude`.
+- **Codex:** plain `exec_command`; prefer `open --detach` plus
+  `wait --any --timeout` under the tool's time limit over holding shell
+  sessions. Consumer `codex`. Codex caching and quota notes are in the
+  `subagent-routing` skill.
+- **Pi agent or shell:** the same commands through bash. Consumer
+  `pi-<name>` or `shell`. Optional push: `CLAIVE_NOTIFY_CMD`, which gets the event JSON
+  on stdin.
 
 Common commands: `claive show ID --json`, `logs ID [--stderr]`,
 `usage ID --json`, `followup ID --prompt-file F`, `close ID`, `cancel ID`.
@@ -120,7 +134,7 @@ Then loop on `claive-orch next RUN` and do what it names:
 | `next` says | Do |
 |---|---|
 | `add_lane a` | `claive-orch lane RUN a --engine muse --model muse-spark-1.3-contributor` |
-| `implement a` | `P=$(claive-orch prompt RUN implement a)`; launch `claive open --workspace <lane path> --prompt-file "$P" --label RUN-a --reasoning-effort xhigh --max-model-steps 100` (`max` for very complicated tasks; for a Pi lane use `--engine pi --provider opencode2api --model <lane model> --reasoning-effort max` and no step cap) (background, see host mechanics); `claive-orch worker RUN a --role implementer --worker-id W`; `claive wait W` |
+| `implement a` | `P=$(claive-orch prompt RUN implement a)`; launch `claive open --detach --workspace <lane path> --prompt-file "$P" --label RUN-a --reasoning-effort xhigh --max-model-steps 100` (`max` for very complicated tasks; for a Pi lane use `--engine pi --provider opencode2api --model <lane model> --reasoning-effort max` and no step cap); `claive-orch worker RUN a --role implementer --worker-id W`; `claive wait W` |
 | `verify a` | after the implementer's turn ends: `claive-orch verify RUN a`. It runs the tests, then checkpoints or **reverts a regression automatically** |
 | `critique a` | `P=$(claive-orch prompt RUN critique a)`; `claive start --engine pi --provider opencode2api --model <next preferred critic> --reasoning-effort max --read-only --workspace <lane path> --prompt-file "$P" --label RUN-a-critic`; `claive-orch worker RUN a --role critic --worker-id C`; `claive wait C`; `claive-orch critique RUN a --worker-id C` (the lane argument is required) |
 | `correct a` | `P=$(claive-orch prompt RUN correct a)`; `claive followup W --prompt-file "$P"` (**same session**: it keeps its context); `claive wait W`; `claive-orch verify RUN a` |

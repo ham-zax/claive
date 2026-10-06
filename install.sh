@@ -11,14 +11,17 @@ skill_dir=$codex_skills/subagent-routing
 backup_base=${XDG_STATE_HOME:-$HOME/.local/state}/claive-install/backups
 package_source=$source_dir/bin/claivelib
 package_target=$bin_dir/claivelib
+pi_skills=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills
 dry_run=false
-case ${1:-} in
-  --dry-run) dry_run=true ;;
-  '') ;;
-  *) echo 'Usage: install.sh [--dry-run]' >&2; exit 2 ;;
-esac
-(( $# <= 1 )) || { echo 'Usage: install.sh [--dry-run]' >&2; exit 2; }
-for path in "$bin_dir" "$codex_skills" "$claude_skills" "$backup_base"; do
+with_pi=false
+for arg in "$@"; do
+  case $arg in
+    --dry-run) dry_run=true ;;
+    --pi) with_pi=true ;;
+    *) echo 'Usage: install.sh [--dry-run] [--pi]' >&2; exit 2 ;;
+  esac
+done
+for path in "$bin_dir" "$codex_skills" "$claude_skills" "$pi_skills" "$backup_base"; do
   [[ $path == /* ]] || { echo "Installation paths must be absolute: $path" >&2; exit 2; }
 done
 
@@ -28,9 +31,12 @@ sources=("$source_dir/bin/claive" "$source_dir/bin/claive-worker"
 targets=("$bin_dir/claive" "$bin_dir/claive-worker"
          "$bin_dir/claive-codex" "$bin_dir/claive-orch" "$skill_dir/SKILL.md")
 modes=(755 755 755 755 644)
-# Host-neutral skills go to both Codex and Claude Code.
+# Host-neutral skills go to Codex and Claude Code, and with --pi to a Pi parent agent.
+# Pi workers read the same directory; claive's recursion guard stops them launching workers.
+skill_roots=("$codex_skills" "$claude_skills")
+! "$with_pi" || skill_roots+=("$pi_skills")
 for skill in worker-orchestration ttc-experiment; do
-  for skills_root in "$codex_skills" "$claude_skills"; do
+  for skills_root in "${skill_roots[@]}"; do
     sources+=("$source_dir/skills/$skill/SKILL.md")
     targets+=("$skills_root/$skill/SKILL.md")
     modes+=(644)

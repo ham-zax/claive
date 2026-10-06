@@ -82,6 +82,19 @@ claive answer JOB_ID --message "Use design B."
 
 `doctor` is a read-only health check (exit 0 when all required checks pass); it never launches a model. `--role scout|worker|reviewer|oracle` selects engine, model, effort, read-only, and step-cap defaults (explicit flags win) and always enables the report contract; `--report` enables the contract without a role. The worker ends its answer with a `claive-report` JSON block (`done|blocked|needs_decision`); `run`/`wait` exit 3 when it asks for a decision, the dashboard shows `ASK`, and `status-line` counts `N need you`. `answer` queues a parent decision to a reusable worker waiting for one. Failed turns record `failure_kind` (`quota|protocol|worker|launch|supervisor|rejected|interrupted`), shown by `show`/`wait`/`run` and in `--json` output.
 
+### Async workers, inbox, batches, and missions (any harness)
+
+```bash
+claive open --detach --role worker --workspace /abs/repo --prompt-file /abs/task.md
+claive wait ID1 ID2 --any --timeout 300      # first to settle; 124 = still running
+claive inbox --consumer codex                 # finished turns since this consumer's last read
+claive batch start /abs/plan.json && claive batch wait BATCH_ID
+claive mission new --title "Parser" --goal-file /abs/goal.md
+claive mission show MISSION_ID                # links, live status, and a Next: line
+```
+
+These work the same from Claude Code, Codex, a Pi agent, or a shell: plain commands, `--json` output, exit codes `0` ok, `1` failed, `3` needs parent, `124` timed out, `130` cancelled, and all state under `$CLAIVE_DIR`. `CLAIVE_NOTIFY_CMD` optionally runs a command per event (event JSON on stdin). Workers get `CLAIVE_WORKER_ID` and cannot launch workers. Protocol and host notes: [docs/harness-integration.md](docs/harness-integration.md); spec: [docs/superpowers/specs/2026-10-06-async-workers.md](docs/superpowers/specs/2026-10-06-async-workers.md).
+
 The default Muse engine supplies `--workspace`, `--trust-workspace`, `--disable-approval`, and `--json`, and keeps Muse's sandbox enabled. `--read-only` disables both non-shell writes and shell execution. `--worktree` maps to Muse's `-w create`; `--worktree-base` selects its base ref. Muse 1.4.2 creates a real linked worktree under `.muse/worktrees` on branch `muse/session-<session UUID>`, then removes that worktree and branch when the underlying `muse exec` exits. Therefore `--worktree` is per-turn isolation, not a persistent reusable lane. Use `--worktree-existing /absolute/worktree` only for an externally retained worktree that remains present across turns. File ownership must remain disjoint. Run heavy builds and test suites one at a time.
 
 Web tools are disabled by default; `--web` enables them. `--model` accepts only `muse-spark-1.3-contributor`. Other options include `--output-schema` and `--session-id`. `--no-session-log` is available only for deliberate single-turn runs, and is rejected for reusable workers. Run `claive-worker --help` for the full list. `--provider echo` is for transport checks and does not contact a live model; Muse does not accept reasoning effort with that provider, so the launcher omits model and effort options in that case.
@@ -154,6 +167,7 @@ On an explicit Muse subscription-quota exhaustion, the manager records the failu
 | `skills/worker-orchestration/SKILL.md` | Host-neutral (Claude Code or Codex) Muse + Pi verified orchestration |
 | `skills/ttc-experiment/SKILL.md` | Running the refine-vs-resample experiment |
 | `skills/claude-subagent-routing/SKILL.md` | Claude Code's delegation policy, installed as `~/.claude/skills/subagent-routing` |
+| `docs/harness-integration.md` | Host-neutral protocol for Claude Code, Codex, Pi agents, and shells |
 | `docs/experiment/` | Paper notes, design, plan, protocol, environment, implementation mapping |
 | `reference/global-AGENTS.md` | Snapshot of the configured global instructions |
 | `reference/agy-relay.sh` | Historical relay; not an active model route |
@@ -161,6 +175,7 @@ On an explicit Muse subscription-quota exhaustion, the manager records the failu
 | `reference/prompt-caching.md` | Meta documentation links and observed CLI behavior |
 | `tests/test_workers.py` | Isolated behavioral checks |
 | `tests/test_orch.py` | Arbiter ladder, guards, and reporting checks |
+| `tests/test_features.py`, `tests/test_async.py` | Worker contract and async (inbox, batch, mission) checks |
 
 Requirements: Linux with Python 3. The default production engine requires Muse at `~/.local/bin/muse`; `MUSE_WORKER_BINARY` can select another absolute Muse executable. The combined terminal view also requires tmux and Codex on PATH. No third-party Python packages are required by the tools or their checks.
 
@@ -169,6 +184,7 @@ Edit this repository, then refresh the installed copies:
 ```bash
 ./install.sh --dry-run
 ./install.sh
+./install.sh --pi   # also install host-neutral skills for a Pi parent agent
 ```
 
 Changed destination files are backed up under `~/.local/state/claive-install/backups`. Identical files are skipped. Symlink and incompatible destination types are rejected. The installer copies the four tools, the `claivelib` package, the routing skill (Codex only), and the `worker-orchestration` and `ttc-experiment` skills into both `${CODEX_HOME:-~/.codex}/skills/` and `${CLAUDE_HOME:-~/.claude}/skills/`. Claude Code's `subagent-routing` is replaced by `skills/claude-subagent-routing` (Muse and Pi through this tooling; Sonnet 5.5 only on request), with the previous copy backed up. The installer it does not overwrite global instructions or install the reference relays. Custom absolute destinations can be supplied through `CLAIVE_BIN_DIR`, `CODEX_HOME`, `CLAUDE_HOME`, and `XDG_STATE_HOME`.

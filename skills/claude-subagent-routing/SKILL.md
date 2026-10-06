@@ -35,6 +35,16 @@ Not allowed: `agy` / `agy-relay`, `opencode` / `opencode-relay`, standalone Muse
 (outside `claive`), the `codex` review agent, and any other model or
 agent, unless the user names it for the task.
 
+## Async workers
+
+Launch with `claive start`, `claive open --detach` or `claive batch start`
+(plain Bash; they return at once). Wait with `claive wait ID... --any --timeout 540`
+(exit 124 means still running), or without `--timeout` under
+`run_in_background: true` to get a completion notification. After compaction,
+run `claive inbox --consumer claude` and `claive mission show ID`. Use a
+mission (`CLAIVE_MISSION`) for multi-turn efforts. The protocol is identical for
+Codex and Pi parents: `/home/hamza/repo/claive/docs/harness-integration.md`.
+
 ## Rules
 
 - Escalation threshold, stated in every worker prompt. A worker decides only

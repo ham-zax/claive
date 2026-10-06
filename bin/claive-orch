@@ -1,0 +1,8 @@
+#!/usr/bin/python3
+"""Launch the claive-orch arbiter from the installed claivelib package."""
+import sys
+from claivelib.orchestration import entrypoint
+
+
+if __name__ == "__main__":
+    sys.exit(entrypoint())

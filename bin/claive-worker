@@ -2,4 +2,4 @@
 # Keep a coding subagent worker available for follow-ups with visible progress.
 set -euo pipefail
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-exec "$script_dir/codex-workers" open "$@"
+exec "$script_dir/claive" open "$@"

@@ -33,7 +33,7 @@ amendment that gives the reason.
 
 - `difficulty` is used only in analysis and is never shown to the workers or the parent.
 - **Validation:** before a task enters the corpus, its verifier must fail at
-  `base` and pass at `reference`. `codex-orch init` refuses a base that already
+  `base` and pass at `reference`. `claive-orch init` refuses a base that already
   passes. Check the reference by hand with `git worktree add` at `reference`
   and run the verifier there.
 - Held-out checks (`acceptance_dir`) live outside the repository and are copied
@@ -41,7 +41,7 @@ amendment that gives the reason.
 
 ## Arms
 
-| Arm | `codex-orch` arm | Notes |
+| Arm | `claive-orch` arm | Notes |
 |---|---|---|
 | A | `A` | Muse implementer, one turn, verify once |
 | R | `R` | Two Muse lanes with the same configuration, verifier picks |
@@ -67,14 +67,14 @@ Fixed per batch (record them in the batch notes):
 ## Repeats and isolation
 
 - k ≥ 3 repeats per (task, arm). Pass `--repeat 1..k`.
-- Every run starts from a fresh lane worktree at `base` (`codex-orch lane`).
+- Every run starts from a fresh lane worktree at `base` (`claive-orch lane`).
 - Use a new worker session per run. Never reuse a worker across runs.
 - Run at most one run's verifier at a time (the machine has about 7 GB RAM).
   Interleave arms across tasks so that gateway drift does not line up with one arm.
 
 ## Compute matching
 
-- **Unit:** total tokens (input + output) from `codex-orch usage`, with
+- **Unit:** total tokens (input + output) from `claive-orch usage`, with
   wall-clock as the secondary unit. There is no dollar cost.
 - R and R' are capped structurally at 2 candidates. After B has been run on the
   task set, compute B's median tokens per task. H1 is only claimed where R's
@@ -84,7 +84,7 @@ Fixed per batch (record them in the batch notes):
 
 ## Measures
 
-Recorded in each run's `events.jsonl` and `codex-orch report --json`:
+Recorded in each run's `events.jsonl` and `claive-orch report --json`:
 
 - arm, outcome (`verified`, `stalled`, `unresolved`, `budget`, `aborted`, `failed`)
 - verifier score trajectory per lane, rounds, and reverted regressions
@@ -92,7 +92,7 @@ Recorded in each run's `events.jsonl` and `codex-orch report --json`:
 - tokens per worker and wall-clock
 - warnings, including same-family critic overrides
 
-Aggregated with `codex-orch compare --experiment NAME`:
+Aggregated with `claive-orch compare --experiment NAME`:
 
 - verified rate per arm with a 95% Wilson interval
 - recovered-after-L0-failure (the analogue of the paper's per-depth recovery)
@@ -119,7 +119,7 @@ A corpus this small supports exploratory conclusions only. Say so in every write
 ## Batch notes template
 
 ```text
-batch: <name> date: <YYYY-MM-DD> experiment: <codex-orch --experiment>
+batch: <name> date: <YYYY-MM-DD> experiment: <claive-orch --experiment>
 versions: muse <v> pi <v> parent <claude|codex v>
 implementer: <engine/model/effort/steps>  critic: <pi model>  breadth: <engine/model + strategy>
 rounds D: <n>  repeats k: <n>  corpus: <manifest path @ commit>

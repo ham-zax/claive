@@ -19,7 +19,7 @@ numbers against the PDF before citing them elsewhere.
 
 | Finding | Number | Consequence here |
 |---|---|---|
-| Resampling saturates | AIME-24 unique semantic clusters ≈1.2 at N=2 and ≈2.5 at N=32 | At most 2 candidates. The second must differ deliberately (engine, model family, or strategy). `codex-orch lane` rejects a second lane that differs only by sampling. |
+| Resampling saturates | AIME-24 unique semantic clusters ≈1.2 at N=2 and ≈2.5 at N=32 | At most 2 candidates. The second must differ deliberately (engine, model family, or strategy). `claive-orch lane` rejects a second lane that differs only by sampling. |
 | Refinement recovers wrong rollouts | Accuracy rises across refinement rounds | Depth is the first escalation: the L1 critique → correct → verify loop. |
 | Explicit critique matters | Without the critique stage, Qwen2.5-1.5B drops on AIME25 from 6.67% to 0.0% and on MATH500 from 58.0% to 55.6% | The critic is a separate step with structured output (concrete defects with evidence). Arm B0 measures its value for coding. |
 | Single-rollout correction is noisy | Models miss their own errors or make answers worse; voting suppresses the noise | With N ≤ 2 there is no vote, so verifier plus checkpoint revert suppresses the noise instead. The critic comes from a different model family than the implementer. |

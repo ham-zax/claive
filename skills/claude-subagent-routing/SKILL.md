@@ -1,6 +1,6 @@
 ---
 name: subagent-routing
-description: Claude Code rules for delegating work. Workers are Muse and Pi, driven through the worker-orchestration skill (codex-workers / codex-orch). Sonnet 5.5 only when the user asks for it. Hamza grants standing, unrestricted permission for Muse and Pi workers; load before delegating.
+description: Claude Code rules for delegating work. Workers are Muse and Pi, driven through the worker-orchestration skill (claive / claive-orch). Sonnet 5.5 only when the user asks for it. Hamza grants standing, unrestricted permission for Muse and Pi workers; load before delegating.
 ---
 
 # Subagent routing (Claude Code)
@@ -21,10 +21,10 @@ never proof.
      `mimo-v2.6-flash-free`, `big-pickle`, `space-bunny-free`; rarely
      `longcat-2.5-preview-free`. Never `nemotron-*` or `ling-3.1-flash-free`, and
      never a muse-spark model against Muse.
-   - A task with an executable check goes through the `codex-orch` ladder
+   - A task with an executable check goes through the `claive-orch` ladder
      (default arm D). Independent chores without a check go to plain
-     `codex-workers` workers.
-   - Launch only through `codex-workers` / `codex-orch`. Never call `muse` or
+     `claive` workers.
+   - Launch only through `claive` / `claive-orch`. Never call `muse` or
      `pi` directly.
 2. **`sonnet-5-5` agent**: allowed, **not preferred**. Use it only when the user
    asks for Sonnet for this task. Then use effort `high`, never `xhigh`. Never use
@@ -32,7 +32,7 @@ never proof.
    unavailable, ask; do not substitute.
 
 Not allowed: `agy` / `agy-relay`, `opencode` / `opencode-relay`, standalone Muse
-(outside `codex-workers`), the `codex` review agent, and any other model or
+(outside `claive`), the `codex` review agent, and any other model or
 agent, unless the user names it for the task.
 
 ## Rules
@@ -51,5 +51,5 @@ agent, unless the user names it for the task.
   Pi `muse-spark-1.3-contributor-free` at `max`, and tell the user (with the
   reset time). Any other fallback needs the user's approval; never substitute
   Sonnet. Return to Muse after the reset.
-- Retire workers when their task chain ends (`codex-workers close`). Start fresh
+- Retire workers when their task chain ends (`claive close`). Start fresh
   ones with a compact handoff rather than growing one worker's context forever.

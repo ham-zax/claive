@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Track reusable coding workers and display their progress beside Codex. No dependencies."""
+"""Track reusable coding workers and display their progress beside any parent agent. No dependencies."""
 
 import argparse
 import datetime
@@ -17,9 +17,9 @@ import tempfile
 import time
 import uuid
 
-from codex_workers.engine import TurnRequest
-from codex_workers.engines import DEFAULT_ENGINE, get_engine
-from codex_workers.state import SCHEMA_VERSION, launch_config, session_id as worker_session_id
+from claivelib.engine import TurnRequest
+from claivelib.engines import DEFAULT_ENGINE, get_engine
+from claivelib.state import SCHEMA_VERSION, launch_config, session_id as worker_session_id
 
 
 ACTIVE = {"starting", "running", "cancelling", "idle"}
@@ -33,7 +33,7 @@ def set_launcher_path(path):
 
 def launcher_path():
     if not SCRIPT:
-        raise ValueError("codex-workers launcher path is not configured")
+        raise ValueError("claive launcher path is not configured")
     return SCRIPT
 
 
@@ -59,9 +59,9 @@ def turn_request(state, prompt_file=None, reasoning_effort=None, max_model_steps
 
 def root():
     base = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
-    path = Path(os.environ.get("CODEX_WORKERS_DIR", str(base / "codex-workers")))
+    path = Path(os.environ.get("CLAIVE_DIR", str(base / "claive")))
     if not path.is_absolute():
-        raise ValueError("CODEX_WORKERS_DIR must be absolute")
+        raise ValueError("CLAIVE_DIR must be absolute")
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     return path
 
@@ -181,7 +181,7 @@ def compact_view(records, color=False, width=None, height=5):
     hidden = max(0, len(records) - capacity)
     if height > 1:
         hint = f"+{hidden} more | " if hidden else ""
-        lines.append(fit(hint + "codex-workers: show ID | logs ID | cancel ID | list"))
+        lines.append(fit(hint + "claive: show ID | logs ID | cancel ID | list"))
     return "\n".join(lines)
 
 
@@ -213,9 +213,9 @@ def render(records, color=False, height=None):
             idle = duration(time.time() - state.get("last_activity", state["started_at"]))
             lines.append(f"  {clean(state.get('phase', 'starting'))} | last event {idle} ago"[:width])
     if not records:
-        lines.append("No tracked workers yet. Jobs launched through codex-workers appear here.")
-    lines.extend([f"{hidden} more: codex-workers list" if hidden else "Active + 20 recent results; done = CLI completed, verify the work.",
-                  "codex-workers: show ID | logs ID | cancel ID | wait ID"])
+        lines.append("No tracked workers yet. Jobs launched through claive appear here.")
+    lines.extend([f"{hidden} more: claive list" if hidden else "Active + 20 recent results; done = CLI completed, verify the work.",
+                  "claive: show ID | logs ID | cancel ID | wait ID"])
     return "\n".join(lines)
 
 
@@ -528,12 +528,12 @@ def report(state):
 def tmux_view(arguments):
     if not shutil.which("tmux") or not shutil.which("codex"):
         raise ValueError("tmux and codex must be installed")
-    session = "codex-workers-" + uuid.uuid4().hex[:8]
+    session = "claive-" + uuid.uuid4().hex[:8]
     codex_args = arguments[1:] if arguments[:1] == ["--"] else arguments
-    codex_command = "exec " + shlex.join(["env", f"CODEX_WORKERS_DIR={root()}",
+    codex_command = "exec " + shlex.join(["env", f"CLAIVE_DIR={root()}",
                                          shutil.which("codex"), *codex_args])
     dashboard_command = "exec " + shlex.join([launcher_path(), "watch", "--compact"])
-    environment = {"CODEX_WORKERS_DIR": str(root())}
+    environment = {"CLAIVE_DIR": str(root())}
     try:
         created = subprocess.run(["tmux", "new-session", "-d", "-P", "-F", "#{pane_id}",
                                   "-s", session, "-c", os.getcwd(), codex_command],
@@ -545,7 +545,7 @@ def tmux_view(arguments):
         subprocess.run(["tmux", "set-option", "-t", session, "status-left", "Codex "], check=True)
         subprocess.run(["tmux", "set-option", "-t", session, "status-right-length", "90"], check=True)
         subprocess.run(["tmux", "set-option", "-t", session, "status-interval", "1"], check=True)
-        status_command = shlex.join(["env", f"CODEX_WORKERS_DIR={root()}", launcher_path(), "status-line"])
+        status_command = shlex.join(["env", f"CLAIVE_DIR={root()}", launcher_path(), "status-line"])
         subprocess.run(["tmux", "set-option", "-t", session, "status-right",
                         "#[fg=cyan]#(" + status_command + ")#[default]"], check=True)
         dashboard = subprocess.run(["tmux", "split-window", "-v", "-l", "5", "-P", "-F",
@@ -634,7 +634,7 @@ def main(launcher=None):
         with (path / "supervisor.log").open("w") as log:
             subprocess.Popen([sys.executable, launcher_path(), "_supervise", state["id"]],
                              stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
-        print(f"Inspect: codex-workers show {state['id']}\nCancel:  codex-workers cancel {state['id']}")
+        print(f"Inspect: claive show {state['id']}\nCancel:  claive cancel {state['id']}")
         return 0
     if args.action == "list":
         records = jobs()
@@ -771,7 +771,7 @@ def main(launcher=None):
         if not pid or identity(pid) != state.get("supervisor_identity"):
             raise ValueError("no matching live supervisor; no signal sent")
         os.kill(pid, signal.SIGTERM)
-        print(f"Cancellation requested for {args.id}. Check with codex-workers wait {args.id}.")
+        print(f"Cancellation requested for {args.id}. Check with claive wait {args.id}.")
     elif args.action == "tmux":
         return tmux_view(args.codex_args)
     return 0
@@ -784,7 +784,7 @@ def entrypoint(launcher):
     except KeyboardInterrupt:
         return 130
     except (ValueError, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-        print(f"codex-workers: {error}", file=sys.stderr)
+        print(f"claive: {error}", file=sys.stderr)
         return 1
 
 

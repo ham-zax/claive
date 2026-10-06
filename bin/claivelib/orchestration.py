@@ -1,7 +1,7 @@
-"""Deterministic arbiter for verifier-gated refinement runs (codex-orch). No dependencies.
+"""Deterministic arbiter for verifier-gated refinement runs (claive-orch). No dependencies.
 
 Models propose; this code decides. A frontier parent (Claude Code or Codex) launches
-workers through codex-workers and reports their results here. This module owns the run
+workers through claive and reports their results here. This module owns the run
 history, verification, checkpoints, budgets, and the single legal next action.
 See docs/experiment/06-skill-driven-implementation.md.
 """
@@ -20,8 +20,8 @@ import sys
 import time
 import uuid
 
-from codex_workers import cli as workers
-from codex_workers.engines import DEFAULT_ENGINE, get_engine
+from claivelib import cli as workers
+from claivelib.engines import DEFAULT_ENGINE, get_engine
 
 ARMS = {
     "A": "single worker, verify once",
@@ -39,8 +39,8 @@ BREADTH_ROUNDS = 2
 STALL_AFTER = 2
 DIFF_LIMIT = 60000
 OUTPUT_LIMIT = 8000
-GIT_IDENTITY = {"GIT_AUTHOR_NAME": "codex-orch", "GIT_AUTHOR_EMAIL": "codex-orch@localhost",
-                "GIT_COMMITTER_NAME": "codex-orch", "GIT_COMMITTER_EMAIL": "codex-orch@localhost"}
+GIT_IDENTITY = {"GIT_AUTHOR_NAME": "claive-orch", "GIT_AUTHOR_EMAIL": "claive-orch@localhost",
+                "GIT_COMMITTER_NAME": "claive-orch", "GIT_COMMITTER_EMAIL": "claive-orch@localhost"}
 VERSION_TOKENS = {"free", "preview", "flash", "lightning", "ultra", "contributor", "pro", "mini"}
 
 
@@ -446,7 +446,7 @@ def run_verifier(config, workspace, output_file):
     except subprocess.TimeoutExpired as error:
         output = (error.stdout or "") if isinstance(error.stdout, str) else ""
         code, status = None, "error"
-        output += f"\n[codex-orch: verifier timed out after {config['verify_timeout']}s]"
+        output += f"\n[claive-orch: verifier timed out after {config['verify_timeout']}s]"
     except ValueError as error:
         output, code, status = str(error), None, "error"
     finally:
@@ -656,7 +656,7 @@ def command_init(args):
             append(path, "run.finished", outcome="invalid", reason="verifier already passes at base")
             raise ValueError("verifier already passes at the base revision; the task cannot discriminate "
                              "(use --allow-passing-base to override)")
-    print(f"Next: codex-orch next {run_id}")
+    print(f"Next: claive-orch next {run_id}")
     return 0
 
 
@@ -727,7 +727,7 @@ def command_prompt(args):
         if not args.force:
             raise ValueError(f"the arbiter does not expect a {args.kind} prompt for lane {args.lane or '-'} now "
                              f"(next action: {expected['action']} {expected.get('lane') or ''}); "
-                             "run codex-orch next")
+                             "run claive-orch next")
         append(path, "warning", message=f"forced {args.kind} prompt for lane {args.lane} "
                                          f"while next was {expected['action']}")
     text = build_prompt(state, args.kind, args.lane)
@@ -773,7 +773,7 @@ def command_verify(args):
     else:
         git(lane["path"], "add", "-A")
         git(lane["path"], "commit", "-q", "--no-verify", "--allow-empty", "-m",
-            f"codex-orch {config['run_id']} lane {args.lane} round {round_number}: {describe(result)}",
+            f"claive-orch {config['run_id']} lane {args.lane} round {round_number}: {describe(result)}",
             env=GIT_IDENTITY)
         commit = git(lane["path"], "rev-parse", "HEAD")
         improved = best is None or verification_key(result) > verification_key(best)
@@ -804,7 +804,7 @@ def command_critique(args):
         model = record.get("model") or (record.get("launch") or {}).get("model")
         family = model_family(model, record.get("engine"))
         if not any(w["worker_id"] == args.worker_id and w["role"] == "critic" for w in lane["workers"]):
-            raise ValueError(f"register the critic first: codex-orch worker {args.run} {args.lane} "
+            raise ValueError(f"register the critic first: claive-orch worker {args.run} {args.lane} "
                              f"--role critic --worker-id {args.worker_id}")
         text = worker_answer(args.worker_id)
     else:
@@ -845,21 +845,21 @@ def command_review(args):
 
 
 GUIDE = {
-    "add_lane": "codex-orch lane {run} {lane} --engine <muse|pi> --model <id> [--strategy TEXT]",
-    "implement": ("P=$(codex-orch prompt {run} implement {lane}); launch an implementer with "
-                  "--workspace {path} --prompt-file \"$P\"; codex-orch worker {run} {lane} --role implementer "
-                  "--worker-id ID; codex-workers wait ID; codex-orch verify {run} {lane}"),
-    "verify": "codex-workers wait <implementer>; codex-orch verify {run} {lane}",
-    "critique": ("P=$(codex-orch prompt {run} critique {lane}); launch a read-only critic of a different model "
-                 "family with --workspace {path} --read-only --prompt-file \"$P\"; codex-orch worker {run} {lane} "
-                 "--role critic --worker-id CID; codex-workers wait CID; codex-orch critique {run} {lane} "
-                 "--worker-id CID; codex-workers close CID"),
-    "correct": ("P=$(codex-orch prompt {run} correct {lane}); codex-workers followup {implementer} "
-                "--prompt-file \"$P\"; codex-workers wait {implementer}; codex-orch verify {run} {lane}"),
-    "review": ("P=$(codex-orch prompt {run} review); launch a read-only reviewer; codex-workers wait RID; "
-               "codex-orch review {run} --worker-id RID"),
-    "finish": ("codex-orch finish {run}; inspect `git -C {repo} diff {base} {commit}`; integrate only "
-               "if appropriate; codex-orch usage {run}; close workers; codex-orch cleanup {run}"),
+    "add_lane": "claive-orch lane {run} {lane} --engine <muse|pi> --model <id> [--strategy TEXT]",
+    "implement": ("P=$(claive-orch prompt {run} implement {lane}); launch an implementer with "
+                  "--workspace {path} --prompt-file \"$P\"; claive-orch worker {run} {lane} --role implementer "
+                  "--worker-id ID; claive wait ID; claive-orch verify {run} {lane}"),
+    "verify": "claive wait <implementer>; claive-orch verify {run} {lane}",
+    "critique": ("P=$(claive-orch prompt {run} critique {lane}); launch a read-only critic of a different model "
+                 "family with --workspace {path} --read-only --prompt-file \"$P\"; claive-orch worker {run} {lane} "
+                 "--role critic --worker-id CID; claive wait CID; claive-orch critique {run} {lane} "
+                 "--worker-id CID; claive close CID"),
+    "correct": ("P=$(claive-orch prompt {run} correct {lane}); claive followup {implementer} "
+                "--prompt-file \"$P\"; claive wait {implementer}; claive-orch verify {run} {lane}"),
+    "review": ("P=$(claive-orch prompt {run} review); launch a read-only reviewer; claive wait RID; "
+               "claive-orch review {run} --worker-id RID"),
+    "finish": ("claive-orch finish {run}; inspect `git -C {repo} diff {base} {commit}`; integrate only "
+               "if appropriate; claive-orch usage {run}; close workers; claive-orch cleanup {run}"),
 }
 
 
@@ -924,7 +924,7 @@ def command_usage(args):
                                                   "model": worker.get("model"), "error": str(error)[:300]}
     append(path, "usage.collected", workers=collected)
     print(json.dumps(collected, indent=2) if args.json else
-          f"Collected usage for {len(collected)} worker(s); see codex-orch report {args.run}")
+          f"Collected usage for {len(collected)} worker(s); see claive-orch report {args.run}")
     return 0
 
 
@@ -1066,7 +1066,7 @@ def command_cleanup(args):
 
 
 def parser():
-    result = argparse.ArgumentParser(prog="codex-orch", description=__doc__.splitlines()[0])
+    result = argparse.ArgumentParser(prog="claive-orch", description=__doc__.splitlines()[0])
     commands = result.add_subparsers(dest="action", required=True)
     init = commands.add_parser("init", help="start a run for one task under one arm")
     init.add_argument("--repo", required=True)
@@ -1093,7 +1093,7 @@ def parser():
     lane.add_argument("--engine", default=DEFAULT_ENGINE)
     lane.add_argument("--model")
     lane.add_argument("--strategy", help="deliberate strategy instruction for this candidate")
-    worker = commands.add_parser("worker", help="register a codex-workers worker with a lane")
+    worker = commands.add_parser("worker", help="register a claive worker with a lane")
     worker.add_argument("run")
     worker.add_argument("lane")
     worker.add_argument("--role", required=True, choices=["implementer", "critic", "reviewer"])
@@ -1162,5 +1162,5 @@ def entrypoint():
     try:
         return main()
     except ValueError as error:
-        print(f"codex-orch: {error}", file=sys.stderr)
+        print(f"claive-orch: {error}", file=sys.stderr)
         return 2

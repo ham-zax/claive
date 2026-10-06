@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 
-from codex_workers.engine import WorkerEngine
+from claivelib.engine import WorkerEngine
 
 
 class FixtureEngine(WorkerEngine):

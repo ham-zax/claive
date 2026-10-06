@@ -10,9 +10,9 @@ import unittest
 import uuid
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-ORCH = str(REPO_ROOT / "bin/codex-orch")
+ORCH = str(REPO_ROOT / "bin/claive-orch")
 sys.path.insert(0, str(REPO_ROOT / "bin"))
-from codex_workers import orchestration as orch
+from claivelib import orchestration as orch
 
 GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@localhost",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@localhost"}
@@ -143,7 +143,7 @@ class RunChecks(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name)
         self.registry = self.base / "registry"
-        self.env = dict(os.environ, CODEX_WORKERS_DIR=str(self.registry), **GIT_ENV)
+        self.env = dict(os.environ, CLAIVE_DIR=str(self.registry), **GIT_ENV)
         self.repo = self.base / "repo"
         self.repo.mkdir()
         (self.repo / "calc.py").write_text(BROKEN)

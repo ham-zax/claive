@@ -23,6 +23,6 @@ The direct Open Web Search fetch retained usage/billing caveats that Khiip's ext
 - Two logged `muse exec --session-id UUID` calls preserve one durable session and both turns, even though each exec process exits. Live follow-up recalled a marker from the first turn without receiving it again.
 - The reusable launcher keeps its supervisor in a managed Codex terminal, sequentially launching those calls. It is idle between turns and closes explicitly. This retains conversation history, not an open model connection.
 - Live contributor model check: `high` first turn, `xhigh` follow-up, same session; 15,729 / 31,475 input tokens cached on turn one and 14,577 / 31,800 on turn two. Positive counts prove that Muse exec can receive cache hits across process restarts and this effort change. They do not guarantee future hit rates.
-- `muse export --session UUID --out FILE --redacted` exposes `model_completed.usage` in session events. `codex-workers usage` sums those once, avoiding repeated goal-attribution records.
+- `muse export --session UUID --out FILE --redacted` exposes `model_completed.usage` in session events. `claive usage` sums those once, avoiding repeated goal-attribution records.
 - `--session-id` requires retained logging. `--no-session-log` is incompatible with reusable workers; deliberately unlogged single turns omit a session ID.
 - No discount percentage, billing amount, contributor quota impact, or guaranteed retention duration was established by this check.

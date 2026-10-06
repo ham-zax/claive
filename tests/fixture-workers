@@ -5,8 +5,8 @@ from pathlib import Path
 repo = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo / "bin"))
 
-from codex_workers.engines import register_engine
-from codex_workers.cli import entrypoint
+from claivelib.engines import register_engine
+from claivelib.cli import entrypoint
 from fixture_engine import FixtureEngine
 
 register_engine("fixture", FixtureEngine())

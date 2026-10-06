@@ -12,12 +12,12 @@ import uuid
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CLI = str(REPO_ROOT / "bin/codex-workers")
+CLI = str(REPO_ROOT / "bin/claive")
 FIXTURE_CLI = str(REPO_ROOT / "tests/fixture-workers")
 FIXTURE_WORKER = str(REPO_ROOT / "tests/fixture_worker.py")
 sys.path.insert(0, str(REPO_ROOT / "bin"))
-from codex_workers import cli as module
-from codex_workers.state import launch_config, normalized
+from claivelib import cli as module
+from claivelib.state import launch_config, normalized
 module.set_launcher_path(CLI)
 MUSE_MODEL = "muse-spark-1.3-contributor"
 
@@ -59,7 +59,7 @@ class WorkerChecks(unittest.TestCase):
         self.fake.chmod(0o700)
         self.prompt = self.path / "task;$(touch INJECTED).md"
         self.prompt.write_text("A narrow fixture task.")
-        self.env = dict(os.environ, CODEX_WORKERS_DIR=str(self.registry),
+        self.env = dict(os.environ, CLAIVE_DIR=str(self.registry),
                         MUSE_WORKER_BINARY=str(self.fake), TERM="xterm-256color")
         self.open_processes = []
 
@@ -629,60 +629,72 @@ class WorkerChecks(unittest.TestCase):
         claude_routing = claude_home / "skills/subagent-routing/SKILL.md"
         claude_routing.parent.mkdir(parents=True)
         claude_routing.write_text("Claude's own routing skill.\n")
-        env = dict(self.env, MUSE_SUBAGENTS_BIN_DIR=str(bin_dir), CODEX_HOME=str(codex_home),
+        env = dict(self.env, CLAIVE_BIN_DIR=str(bin_dir), CODEX_HOME=str(codex_home),
                    CLAUDE_HOME=str(claude_home), XDG_STATE_HOME=str(state_home))
         install = str(REPO_ROOT / "install.sh")
         dry = subprocess.run([install, "--dry-run"], env=env, capture_output=True, text=True)
         self.assertEqual(dry.returncode, 0, dry.stderr)
         self.assertFalse(bin_dir.exists())
         bin_dir.mkdir()
-        previous = bin_dir / "codex-subagent-worker"
+        previous = bin_dir / "claive-worker"
         previous.write_text("previous launcher\n")
         legacy = bin_dir / "muse-worker"
         legacy.write_text('#!/usr/bin/env bash\n# Keep a Muse worker available for follow-ups with visible progress.\n'
                           'set -euo pipefail\nscript_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)\n'
                           'exec "$script_dir/codex-workers" open "$@"\n')
+        old_orch = bin_dir / "codex-orch"
+        old_orch.write_text("#!/usr/bin/env python3\nfrom codex_workers.orch import main\n")
+        unrelated = bin_dir / "codex-workers"
+        unrelated.write_text("someone else's tool\n")
+        old_package = bin_dir / "codex_workers"
+        old_package.mkdir()
+        (old_package / "cli.py").write_text("")
+        (old_package / "engine.py").write_text("")
         done = subprocess.run([install], env=env, capture_output=True, text=True)
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual((bin_dir / "codex-workers").read_bytes(), Path(CLI).read_bytes())
-        self.assertEqual((bin_dir / "codex-workers").stat().st_mode & 0o777, 0o755)
-        self.assertEqual((bin_dir / "codex_workers/cli.py").read_bytes(),
-                         (REPO_ROOT / "bin/codex_workers/cli.py").read_bytes())
+        self.assertEqual((bin_dir / "claive").read_bytes(), Path(CLI).read_bytes())
+        self.assertEqual((bin_dir / "claive").stat().st_mode & 0o777, 0o755)
+        self.assertEqual((bin_dir / "claivelib/cli.py").read_bytes(),
+                         (REPO_ROOT / "bin/claivelib/cli.py").read_bytes())
         outside = self.path / "outside"
         outside.mkdir()
-        installed = subprocess.run([str(bin_dir / "codex-workers"), "status-line"], env=env,
+        installed = subprocess.run([str(bin_dir / "claive"), "status-line"], env=env,
                                    cwd=outside, capture_output=True, text=True, timeout=12)
         self.assertEqual(installed.returncode, 0, installed.stderr)
         self.assertIn("Workers:", installed.stdout)
-        backups = list((state_home / "muse-subagents/backups").glob("*/codex-subagent-worker"))
+        backups = list((state_home / "claive-install/backups").glob("*/claive-worker"))
         self.assertEqual(len(backups), 1)
         self.assertEqual(backups[0].read_text(), "previous launcher\n")
         self.assertFalse(legacy.exists())
-        self.assertEqual(len(list((state_home / "muse-subagents/backups").glob("*/muse-worker"))), 1)
-        launcher = subprocess.run([str(bin_dir / "codex-subagent-worker"), "--help"], env=env,
+        self.assertEqual(len(list((state_home / "claive-install/backups").glob("*/muse-worker"))), 1)
+        self.assertFalse(old_orch.exists())
+        self.assertFalse(old_package.exists())
+        self.assertEqual(unrelated.read_text(), "someone else's tool\n")
+        self.assertEqual(len(list((state_home / "claive-install/backups").glob("*/codex-orch"))), 1)
+        launcher = subprocess.run([str(bin_dir / "claive-worker"), "--help"], env=env,
                                   cwd=outside, capture_output=True, text=True, timeout=12)
         self.assertEqual(launcher.returncode, 0, launcher.stderr)
         self.assertIn("--engine", launcher.stdout)
         self.assertEqual(global_file.read_text(), "Existing personal instructions.\n")
         self.assertEqual(claude_routing.read_bytes(),
                          (REPO_ROOT / "skills/claude-subagent-routing/SKILL.md").read_bytes())
-        saved = list((state_home / "muse-subagents/backups").glob("*/*subagent-routing.SKILL.md"))
+        saved = list((state_home / "claive-install/backups").glob("*/*subagent-routing.SKILL.md"))
         self.assertEqual([path.read_text() for path in saved], ["Claude's own routing skill.\n"])
         for home in (codex_home, claude_home):
             for skill in ("worker-orchestration", "ttc-experiment"):
                 self.assertEqual((home / "skills" / skill / "SKILL.md").read_bytes(),
                                  (REPO_ROOT / "skills" / skill / "SKILL.md").read_bytes())
-        arms = subprocess.run([str(bin_dir / "codex-orch"), "arms"], env=env, cwd=outside,
+        arms = subprocess.run([str(bin_dir / "claive-orch"), "arms"], env=env, cwd=outside,
                               capture_output=True, text=True, timeout=12)
         self.assertEqual(arms.returncode, 0, arms.stderr)
         self.assertIn("D", arms.stdout)
         again = subprocess.run([install], env=env, capture_output=True, text=True)
         self.assertEqual(again.returncode, 0, again.stderr)
-        self.assertEqual(len(list((state_home / "muse-subagents/backups").iterdir())), 1)
+        self.assertEqual(len(list((state_home / "claive-install/backups").iterdir())), 1)
 
         # Historical inspection does not require the default Muse adapter to import.
-        (bin_dir / "codex_workers/engines/muse.py").unlink()
-        no_muse = subprocess.run([str(bin_dir / "codex-workers"), "status-line"], env=env,
+        (bin_dir / "claivelib/engines/muse.py").unlink()
+        no_muse = subprocess.run([str(bin_dir / "claive"), "status-line"], env=env,
                                  cwd=outside, capture_output=True, text=True, timeout=12)
         self.assertEqual(no_muse.returncode, 0, no_muse.stderr)
         self.assertIn("Workers:", no_muse.stdout)
@@ -692,13 +704,13 @@ class WorkerChecks(unittest.TestCase):
         bin_dir.mkdir()
         protected = self.path / "protected"
         protected.write_text("keep me")
-        (bin_dir / "codex-workers").symlink_to(protected)
-        env = dict(self.env, MUSE_SUBAGENTS_BIN_DIR=str(bin_dir), CODEX_HOME=str(self.path / "codex-home"),
+        (bin_dir / "claive").symlink_to(protected)
+        env = dict(self.env, CLAIVE_BIN_DIR=str(bin_dir), CODEX_HOME=str(self.path / "codex-home"),
                    CLAUDE_HOME=str(self.path / "claude-home"), XDG_STATE_HOME=str(self.path / "state-home"))
         result = subprocess.run([str(REPO_ROOT / "install.sh")], env=env, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(protected.read_text(), "keep me")
-        self.assertFalse((bin_dir / "codex-subagent-worker").exists())
+        self.assertFalse((bin_dir / "claive-worker").exists())
 
     def test_tmux_session_with_nondefault_pane_indices(self):
         import shutil
@@ -724,7 +736,7 @@ class WorkerChecks(unittest.TestCase):
                     self.assertEqual(module.tmux_view(["--", "--no-alt-screen"]), 0)
                 sessions = subprocess.check_output(["tmux", "list-sessions", "-F", "#{session_name}"],
                                                    text=True).splitlines()
-                target = next(value for value in sessions if value.startswith("codex-workers-"))
+                target = next(value for value in sessions if value.startswith("claive-"))
                 panes = subprocess.check_output(["tmux", "list-panes", "-t", target,
                                                   "-F", "#{pane_id}"], text=True).splitlines()
                 self.assertEqual(len(panes), 2)
@@ -735,7 +747,7 @@ class WorkerChecks(unittest.TestCase):
                 self.assertEqual(height, "5")
                 right = subprocess.check_output(["tmux", "show-option", "-t", target,
                                                   "-v", "status-right"], text=True)
-                self.assertIn("codex-workers status-line", right)
+                self.assertIn("claive status-line", right)
                 self.assertIn(str(self.registry), right)
                 time.sleep(0.3)
                 captured = subprocess.check_output(["tmux", "capture-pane", "-p", "-t", panes[1]], text=True)

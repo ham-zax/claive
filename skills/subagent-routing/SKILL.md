@@ -1,15 +1,15 @@
 ---
 name: subagent-routing
-description: Delegate bounded coding, investigation, or review tasks from Codex to Muse or Pi workers through codex-subagent-worker. Use when delegation is warranted or the user requests subagents; supports reusable sessions and provider usage checks.
+description: Delegate bounded coding, investigation, or review tasks from Codex to Muse or Pi workers through claive-worker. Use when delegation is warranted or the user requests subagents; supports reusable sessions and provider usage checks.
 ---
 
 # Subagent routing
 
 Muse Code is the default engine; Pi is available explicitly with `--engine pi` through `opencode2api`. Follow the global AGENTS.md delegation criteria; complete small or tightly coupled tasks directly when delegation would add overhead. The parent owns synthesis, integration, and final verification.
 
-The maintained source is `/home/hamza/repo/codex-muse-workers`. Edit its `bin/` scripts or `skills/subagent-routing/SKILL.md`, then run `install.sh` to refresh the installed copies. Its `reference/global-AGENTS.md` is a snapshot, not a file to install over current global instructions.
+The maintained source is `/home/hamza/repo/claive`. Edit its `bin/` scripts or `skills/subagent-routing/SKILL.md`, then run `install.sh` to refresh the installed copies. Its `reference/global-AGENTS.md` is a snapshot, not a file to install over current global instructions.
 
-For a task with an executable check, prefer the verifier-gated ladder in the `worker-orchestration` skill (`codex-orch`: Muse implements, a cross-family Pi critic reviews, and the arbiter accepts or reverts each round). This skill still governs the Codex launch mechanics. For the refine-vs-resample experiment itself, use `ttc-experiment`.
+For a task with an executable check, prefer the verifier-gated ladder in the `worker-orchestration` skill (`claive-orch`: Muse implements, a cross-family Pi critic reviews, and the arbiter accepts or reverts each round). This skill still governs the Codex launch mechanics. For the refine-vs-resample experiment itself, use `ttc-experiment`.
 
 ## Model and reasoning
 
@@ -37,10 +37,10 @@ Request a concise report: outcome, files changed, checks with results, supportin
 
 ## Launch and observe workers
 
-Default to `/home/hamza/.local/bin/codex-subagent-worker` inside Codex's managed shell tool. The launcher opens a reusable worker and remains alive between related turns, so a yielded shell call is a managed background terminal and appears in the native running-terminal indicator and `/ps`. The installed manager is `/home/hamza/.local/bin/codex-workers`; its generic supervisor owns state, follow-ups, cancellation, and logs, while each engine adapter builds its commands and interprets its events and usage. Private logs are retained under `${XDG_STATE_HOME:-$HOME/.local/state}/codex-workers`. `CODEX_WORKERS_DIR` can select another absolute registry directory. The custom dashboard and tmux pane are optional additional views.
+Default to `/home/hamza/.local/bin/claive-worker` inside Codex's managed shell tool. The launcher opens a reusable worker and remains alive between related turns, so a yielded shell call is a managed background terminal and appears in the native running-terminal indicator and `/ps`. The installed manager is `/home/hamza/.local/bin/claive`; its generic supervisor owns state, follow-ups, cancellation, and logs, while each engine adapter builds its commands and interprets its events and usage. Private logs are retained under `${XDG_STATE_HOME:-$HOME/.local/state}/claive`. `CLAIVE_DIR` can select another absolute registry directory. The custom dashboard and tmux pane are optional additional views.
 
 ```bash
-exec /home/hamza/.local/bin/codex-subagent-worker \
+exec /home/hamza/.local/bin/claive-worker \
   --workspace "$task_workspace" \
   --prompt-file "$task_prompt" \
   --label "Implement assigned feature" \
@@ -52,29 +52,29 @@ For a single Muse turn that needs isolation, add `--worktree` (the Muse engine t
 
 Use `exec_command` with a short initial `yield_time_ms` (for example 1000). A returned `session_id` means the shell command is still running: retain it and use `write_stdin` to collect output and final exit status. Independent workers can each have their own managed session; shell yielding lets the parent continue working without detaching the worker. After a turn, the reusable worker remains idle and available in the managed terminal until closed. An idle supervisor makes no model requests.
 
-For Pi, use the same launcher with `--engine pi --provider opencode2api` and omit `--max-model-steps`. Omit `--model` to inherit the last selected Pi model from its global settings; the initial model is `muse-spark-1.3-contributor-free`. An explicit `--model ID` becomes the shared selection after launch-option validation, even if the subsequent model request fails. Existing workers and their follow-ups retain their launch model. This preference is separate from Muse's pinned model and never switches engines automatically. Pi supports only `opencode2api` here. Use `--workspace` for an externally retained worktree; Pi rejects worktree-management, `--web`, and `--output-schema`. Pi read-only tools are `read,grep,find,ls`, with extensions disabled; Pi has no Muse OS sandbox. See `/home/hamza/repo/codex-muse-workers/docs/pi-engine.md` for the verified runtime contract.
+For Pi, use the same launcher with `--engine pi --provider opencode2api` and omit `--max-model-steps`. Omit `--model` to inherit the last selected Pi model from its global settings; the initial model is `muse-spark-1.3-contributor-free`. An explicit `--model ID` becomes the shared selection after launch-option validation, even if the subsequent model request fails. Existing workers and their follow-ups retain their launch model. This preference is separate from Muse's pinned model and never switches engines automatically. Pi supports only `opencode2api` here. Use `--workspace` for an externally retained worktree; Pi rejects worktree-management, `--web`, and `--output-schema`. Pi read-only tools are `read,grep,find,ls`, with extensions disabled; Pi has no Muse OS sandbox. See `/home/hamza/repo/claive/docs/pi-engine.md` for the verified runtime contract.
 
-The shell session ID and the 12-character worker ID printed by `codex-subagent-worker` identify different objects; the retained worker `session_id` (a Muse session UUID for this engine) is a third identifier. Report both when a session is yielded. Keep ownership through the related task chain and final closure. Do not append `&`, use `nohup`/`disown`, or replace the default with `codex-workers start`: those detach the worker from Codex's managed terminal. `start` is available for deliberately detached jobs and returns immediately; such jobs remain visible in the registry dashboard but not in Codex's terminal indicator.
+The shell session ID and the 12-character worker ID printed by `claive-worker` identify different objects; the retained worker `session_id` (a Muse session UUID for this engine) is a third identifier. Report both when a session is yielded. Keep ownership through the related task chain and final closure. Do not append `&`, use `nohup`/`disown`, or replace the default with `claive start`: those detach the worker from Codex's managed terminal. `start` is available for deliberately detached jobs and returns immediately; such jobs remain visible in the registry dashboard but not in Codex's terminal indicator.
 
-For cancellation use `codex-workers cancel WORKER_ID`, then collect the managed session's final output. Forcibly killing a terminal can bypass supervisor cleanup; if interrupted, inspect the registry and stop any surviving worker. Use:
+For cancellation use `claive cancel WORKER_ID`, then collect the managed session's final output. Forcibly killing a terminal can bypass supervisor cleanup; if interrupted, inspect the registry and stop any surviving worker. Use:
 
 ```text
-codex-workers watch                 # live view; Ctrl-C closes only the view
-codex-workers list                 # active jobs and recent results
-codex-workers show ID --json       # status, progress, exit code, log paths
-codex-workers logs ID              # recent JSONL events
-codex-workers logs ID --stderr     # diagnostic output
-codex-workers wait ID              # wait for assigned turns; idle means ready, not closed
-codex-workers followup ID --prompt-file /absolute/next.md --reasoning-effort xhigh
-codex-workers effort ID --reasoning-effort max # future default; current call unchanged
-codex-workers usage ID             # retained session provider token/cache counters
-codex-workers close ID             # drain queued turns, close supervisor, retain history
-codex-workers cancel ID            # stop the worker process group
-codex-workers status-line          # one-line counts for a shell/status bar
-codex-with-workers [codex options] # Codex + live pane + tmux status bar
+claive watch                 # live view; Ctrl-C closes only the view
+claive list                 # active jobs and recent results
+claive show ID --json       # status, progress, exit code, log paths
+claive logs ID              # recent JSONL events
+claive logs ID --stderr     # diagnostic output
+claive wait ID              # wait for assigned turns; idle means ready, not closed
+claive followup ID --prompt-file /absolute/next.md --reasoning-effort xhigh
+claive effort ID --reasoning-effort max # future default; current call unchanged
+claive usage ID             # retained session provider token/cache counters
+claive close ID             # drain queued turns, close supervisor, retain history
+claive cancel ID            # stop the worker process group
+claive status-line          # one-line counts for a shell/status bar
+claive-codex [codex options] # Codex + live pane + tmux status bar
 ```
 
-Report the task, worker ID, and managed shell session ID at launch and report its outcome at completion. Codex's terminal view tracks the managed command and its output; it does not read the registry's detailed engine lifecycle. The optional custom monitor shows jobs launched through `codex-workers`; raw Muse, agy, native agents, and OpenCode invocations are not automatically discovered. A completed CLI run does not establish that the assigned work passed verification. Task failures remain visible as warnings even when the run completes. Unexpected supervisor exits are shown as interrupted, not successful. Closing the monitor does not cancel workers; end jobs explicitly when their purpose ends.
+Report the task, worker ID, and managed shell session ID at launch and report its outcome at completion. Codex's terminal view tracks the managed command and its output; it does not read the registry's detailed engine lifecycle. The optional custom monitor shows jobs launched through `claive`; raw Muse, agy, native agents, and OpenCode invocations are not automatically discovered. A completed CLI run does not establish that the assigned work passed verification. Task failures remain visible as warnings even when the run completes. Unexpected supervisor exits are shown as interrupted, not successful. Closing the monitor does not cancel workers; end jobs explicitly when their purpose ends.
 
 The manager keeps Codex's existing internal status-line configuration intact. Its tmux view adds an outer status bar and live pane in a separate session; it does not change other tmux sessions. No always-running monitor daemon is installed.
 
@@ -129,7 +129,7 @@ Each underlying `muse exec` child exits after its turn; the supervisor stays ali
 
 Meta [prompt caching](https://dev.meta.ai/docs/prompt-caching) automatically reuses matching token prefixes on the server. Terminal exit does not itself clear that cache; eviction and inactivity can still cause misses. Keeping an idle process open cannot keep a server entry warm. Preserve stable leading instructions, tools, and history; put changing task details last, as in the [cookbook](https://dev.meta.ai/docs/cookbook/prompt-caching). Changing rules, model, reasoning, or compaction may change the rendered prefix; preserve the session when adjusting effort and measure the result rather than promising a hit.
 
-Use `codex-workers usage ID` (or `--json`) for provider-reported usage from Muse's retained session export. It counts each `model_completed` once, excluding repeated attribution records; no exposed usage means unknown, not zero. `cached_tokens > 0` proves reuse, and its ratio to reported input measures the observed hit rate. Totals include all recorded model calls in the retained session, including internal calls. These are accounting counters, not current context occupancy or an invoice; see [token usage](https://dev.meta.ai/docs/token-counting#usage). Do not add cached tokens again to input totals.
+Use `claive usage ID` (or `--json`) for provider-reported usage from Muse's retained session export. It counts each `model_completed` once, excluding repeated attribution records; no exposed usage means unknown, not zero. `cached_tokens > 0` proves reuse, and its ratio to reported input measures the observed hit rate. Totals include all recorded model calls in the retained session, including internal calls. These are accounting counters, not current context occupancy or an invoice; see [token usage](https://dev.meta.ai/docs/token-counting#usage). Do not add cached tokens again to input totals.
 
 The API optionally exposes `prompt_cache_key` and Responses retention hints; this installed Muse exec CLI exposes neither. Do not invent CLI flags, set a new per-session cache key, change endpoints, or bypass Muse authentication to enable them. Automatic caching needs no extra flag. The current cache price and contributor quota effects are not established by a session UUID or these counters.
 

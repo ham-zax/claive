@@ -4,7 +4,7 @@ The Pi adapter targets the locally verified Pi 1.0.0 JSON protocol. Muse remains
 the default engine; selecting Pi never changes or falls back to another engine.
 
 ```sh
-codex-subagent-worker --engine pi \
+claive-worker --engine pi \
   --workspace /absolute/repository \
   --prompt-file /absolute/task.md \
   --provider opencode2api --model mimo-v2.6-flash-free --reasoning-effort max
@@ -84,7 +84,7 @@ global Pi configuration changes were required.
 On 2026-10-04 Pi's `opencode2api` provider moved from the local gateway to the
 ARM deployment (`https://89-168-87-96.sslip.io/v1` in `~/.pi/agent/models.json`).
 The adapter needed no change because it passes only the provider name. On
-2026-10-06 a read-only `codex-workers run --engine pi` turn completed through that
+2026-10-06 a read-only `claive run --engine pi` turn completed through that
 server with `space-bunny-free`; no local gateway was listening.
 
 `tests/fixtures/pi/*.jsonl` contains sanitized versions of those captured event
@@ -96,5 +96,5 @@ process-group cancellation through the worker manager.
 
 ```sh
 python3 -m unittest discover -s tests -p 'test_*.py' -v
-shellcheck install.sh bin/codex-subagent-worker bin/codex-with-workers
+shellcheck install.sh bin/claive-worker bin/claive-codex
 ```

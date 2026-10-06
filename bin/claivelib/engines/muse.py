@@ -7,8 +7,8 @@ import subprocess
 import tempfile
 import uuid
 
-from codex_workers.engine import WorkerEngine
-from codex_workers.state import launch_config, session_id
+from claivelib.engine import WorkerEngine
+from claivelib.state import launch_config, session_id
 
 MUSE_MODEL = "muse-spark-1.3-contributor"
 

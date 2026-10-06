@@ -14,7 +14,7 @@ copy them into the batch's notes.
 | Pi (`pi`) | 1.0.3 |
 | Codex CLI (`codex`) | 0.160.0 (parent) |
 | Claude Code (`claude`) | 2.1.291 (parent) |
-| Python | 3.14.4 (`codex-orch` and `codex-workers` use only the standard library) |
+| Python | 3.14.4 (`claive-orch` and `claive` use only the standard library) |
 | Git | 2.53.0 |
 | Node.js | v24.19.0 (not needed by this implementation) |
 
@@ -23,7 +23,7 @@ models through the `opencode2api` provider instead.
 
 ## Integration surface
 
-The original design's adapter layer is the existing `codex-workers` manager. It
+The original design's adapter layer is the existing `claive` manager. It
 already normalises engine event streams into one job record, so it has a single
 contract for every engine:
 
@@ -32,9 +32,9 @@ contract for every engine:
 - `followup ID --prompt-file F` continues the **same session**. This is the
   session continuation that L1 correction needs.
 - `close`, `cancel`, `logs`, `show --json`, `usage --json`.
-- State lives under `${CODEX_WORKERS_DIR:-$XDG_STATE_HOME/codex-workers}/<id>/`.
+- State lives under `${CLAIVE_DIR:-$XDG_STATE_HOME/claive}/<id>/`.
 
-Engines are plugged in under `bin/codex_workers/engines/`: `muse` (default) and
+Engines are plugged in under `bin/claivelib/engines/`: `muse` (default) and
 `pi`. Their full contracts are in the repository `README.md` and `docs/pi-engine.md`.
 
 ## Engines
@@ -47,7 +47,7 @@ Engines are plugged in under `bin/codex_workers/engines/`: `muse` (default) and
 - Supports `--output-schema` (structured final answer) and `--web`.
 - Has a sandbox, and network access goes through its proxy only.
 - `--worktree` creates a temporary worktree that is removed when the turn exits.
-  `--worktree-existing ABS` runs in an existing worktree. `codex-orch` creates
+  `--worktree-existing ABS` runs in an existing worktree. `claive-orch` creates
   lane worktrees itself, so a lane worker uses `--workspace <lane path>`.
 - Observed behaviour: follows instructions closely and is a reliable implementer.
   As a critic of its own family it adds little, so the critic is never muse-spark.
@@ -58,7 +58,7 @@ Engines are plugged in under `bin/codex_workers/engines/`: `muse` (default) and
 
 Model IDs configured on 2026-10-06 (from `~/.pi/agent/models.json`, IDs only):
 
-| Model ID | Family (as `codex-orch` computes it) |
+| Model ID | Family (as `claive-orch` computes it) |
 |---|---|
 | `big-pickle` | big-pickle |
 | `ling-3.1-flash-free` | ling |
@@ -82,10 +82,10 @@ Constraints that shape the skills:
 - No `--max-model-steps`, `--output-schema`, `--web`, or worktree flags. Use
   `--workspace <lane path>` for isolation.
 - `--read-only` gives the tools `read,grep,find,ls` and **no bash**. A Pi critic
-  cannot run `git diff` or the tests, so `codex-orch prompt ... critique` pastes
+  cannot run `git diff` or the tests, so `claive-orch prompt ... critique` pastes
   the diff and the verifier output into the prompt.
 - There is no structured-output flag. Critics are asked for one fenced JSON block,
-  and `codex-orch critique` tolerates malformed output: it records an error and
+  and `claive-orch critique` tolerates malformed output: it records an error and
   treats the answer as "no concrete defect".
 - No OS sandbox. Tool selection and working directory are not an isolation boundary.
 - The provider is a remote gateway. Free models can rate-limit or disappear. Record
@@ -93,12 +93,12 @@ Constraints that shape the skills:
 
 ## Usage reporting
 
-`codex-workers usage ID --json` returns `model_calls`,
+`claive usage ID --json` returns `model_calls`,
 `totals{input_tokens, cached_tokens, output_tokens}` and `cache_hit_ratio`, from
 persisted session records, for both engines. Missing counters stay unknown and
 are never reported as zero. There is no dollar cost. **The compute unit for
 matching is therefore total tokens (input + output), with wall-clock as a
-secondary unit** (see `05-experiment-protocol.md`). `codex-orch usage RUN`
+secondary unit** (see `05-experiment-protocol.md`). `claive-orch usage RUN`
 snapshots every worker registered with a run.
 
 ## Nested subagents
@@ -106,7 +106,7 @@ snapshots every worker registered with a run.
 - Pi workers get only the built-in tools (`bash,edit,write` plus read tools) with
   extensions disabled, so they have no subagent tool.
 - Muse: whether nested delegation can occur is not verified. Worker prompts from
-  `codex-orch` forbid delegation, and the run report records only the workers
+  `claive-orch` forbid delegation, and the run report records only the workers
   registered with the run.
 
 ## Jev

@@ -1,19 +1,19 @@
 ---
 name: ttc-experiment
-description: Run the controlled "refine vs resample" test-time-compute experiment (arXiv 2608.05643 applied to coding agents) with the codex-orch arbiter and Muse/Pi workers. Covers corpus validation, arms A/R/R'/B/B0/D, k repeats, fixed per-batch models, token accounting, `codex-orch compare`, pre-registered gates and batch notes. Use only when the user asks to run, continue, or analyse the orchestration experiment or a batch of it; for everyday delegated work use worker-orchestration instead.
+description: Run the controlled "refine vs resample" test-time-compute experiment (arXiv 2608.05643 applied to coding agents) with the claive-orch arbiter and Muse/Pi workers. Covers corpus validation, arms A/R/R'/B/B0/D, k repeats, fixed per-batch models, token accounting, `claive-orch compare`, pre-registered gates and batch notes. Use only when the user asks to run, continue, or analyse the orchestration experiment or a batch of it; for everyday delegated work use worker-orchestration instead.
 ---
 
 # TTC experiment (refine vs resample on coding tasks)
 
 This skill turns you into a **careful experimenter**. The hypotheses, design and
-protocol are in `/home/hamza/repo/codex-muse-workers/docs/experiment/`. Read
+protocol are in `/home/hamza/repo/claive/docs/experiment/`. Read
 these before the first batch of a session:
 
 - `README.md`: index, provenance, what is runnable.
 - `paper-notes.md`: what the paper shows and what it does not show.
 - `01-design.md` §15–16: arms, hypotheses H1–H7, measures.
 - `05-experiment-protocol.md`: corpus, repeats, compute matching, **gates**.
-- `06-skill-driven-implementation.md`: how `codex-orch` maps to the design, and
+- `06-skill-driven-implementation.md`: how `claive-orch` maps to the design, and
   the deviations.
 
 Per-run mechanics (launching workers, the `next` loop, host specifics) are
@@ -22,12 +22,12 @@ identical to the `worker-orchestration` skill. Load it too and follow its
 
 ## Non-negotiables
 
-1. **Follow `codex-orch next` literally.** Do not skip, reorder, improvise, or
+1. **Follow `claive-orch next` literally.** Do not skip, reorder, improvise, or
    add a lane or round. You are the measuring instrument; any judgement you add
    contaminates the arm. If you must deviate (a crash, a gateway outage), record
    it in the batch notes and finish the run with
-   `codex-orch finish RUN --abort --reason "..."`.
-2. **Register every worker** with `codex-orch worker` before waiting on it.
+   `claive-orch finish RUN --abort --reason "..."`.
+2. **Register every worker** with `claive-orch worker` before waiting on it.
    Unregistered workers are invisible to the report: that is the main threat to
    validity (see `06` deviation 1).
 3. **Fixed per batch:** implementer engine, model, effort and step cap; critic
@@ -58,7 +58,7 @@ identical to the `worker-orchestration` skill. Load it too and follow its
 - Record versions: `muse --version`, `pi --version`, your host version,
   `python3 --version`, `git --version`. Compare them with `04-webhmf-environment.md`.
 - Check that Muse quota is available and the chosen Pi models answer. Per model,
-  `echo 'Reply OK' > /abs/scratch/ping.md` and then `codex-workers run --engine pi
+  `echo 'Reply OK' > /abs/scratch/ping.md` and then `claive run --engine pi
   --provider opencode2api --model M --reasoning-effort max --read-only --workspace /abs/scratch
   --prompt-file /abs/scratch/ping.md` is enough.
 
@@ -72,7 +72,7 @@ git -C REPO worktree add --detach /abs/scratch/ref REFERENCE
 git -C REPO worktree remove --force /abs/scratch/ref
 ```
 
-`codex-orch init` itself refuses a base where the verifier already passes, and
+`claive-orch init` itself refuses a base where the verifier already passes, and
 records the base score. If `acceptance_dir` is set, run the reference check with
 those files copied in temporarily, then remove them. Drop tasks that fail
 validation and note why.
@@ -81,15 +81,15 @@ validation and note why.
 
 ```bash
 printf '%s\n' "$TASK_TEXT" > /abs/scratch/TASK_ID.md
-codex-orch init --repo REPO --base BASE --task-file /abs/scratch/TASK_ID.md \
+claive-orch init --repo REPO --base BASE --task-file /abs/scratch/TASK_ID.md \
   --verify "$VERIFY" --arm ARM --rounds 2 \
   --experiment BATCH --task-id TASK_ID --repeat K \
   [--score-regex RE] [--acceptance-dir DIR --worker-verify VISIBLE_CMD]
 # first output line: "Run <RUN> | arm ..."
 ```
 
-Then loop `codex-orch next RUN` exactly as in `worker-orchestration`, using the
-batch's fixed models. Arm-specific lane setup (`codex-orch` enforces these):
+Then loop `claive-orch next RUN` exactly as in `worker-orchestration`, using the
+batch's fixed models. Arm-specific lane setup (`claive-orch` enforces these):
 
 | Arm | Lanes | Critic |
 |---|---|---|
@@ -100,9 +100,9 @@ batch's fixed models. Arm-specific lane setup (`codex-orch` enforces these):
 | B0 | a: Muse | none: the correction prompt carries only verifier output |
 | D | a: Muse; b only when `next` says `add_lane b` | the batch's critic; lane b uses its own critic per the batch notes |
 
-After each run: `codex-orch finish RUN` (if `next` says so), `codex-orch usage RUN`
+After each run: `claive-orch finish RUN` (if `next` says so), `claive-orch usage RUN`
 (snapshots tokens; do it **before** closing workers), close reusable workers,
-`codex-orch report RUN`, `codex-orch cleanup RUN`. Do **not** integrate
+`claive-orch report RUN`, `claive-orch cleanup RUN`. Do **not** integrate
 experiment diffs into the corpus repos.
 
 ## Schedule
@@ -119,8 +119,8 @@ experiment diffs into the corpus repos.
 ## Analysis
 
 ```bash
-codex-orch list --experiment BATCH
-codex-orch compare --experiment BATCH          # markdown; --json for raw
+claive-orch list --experiment BATCH
+claive-orch compare --experiment BATCH          # markdown; --json for raw
 ```
 
 `compare` gives, per arm: runs, verified rate with a 95% Wilson interval,

@@ -29,7 +29,7 @@ This design intentionally excludes Pi implementation. Pi will be a separate foll
 
 ## Current Coupling
 
-The current `bin/codex-workers` owns both generic worker orchestration and Muse transport details. Muse-specific assumptions currently appear in:
+The current `bin/claive` owns both generic worker orchestration and Muse transport details. Muse-specific assumptions currently appear in:
 
 - `MUSE_WORKER_BINARY` and the pinned Muse model.
 - command construction for `muse exec`.
@@ -52,10 +52,10 @@ The refactor must move these assumptions behind explicit compatibility or engine
 Codex / shell
      |
      v
-bin/codex-workers
+bin/claive
      |
      v
-codex_workers.cli
+claivelib.cli
      |
      v
 Worker Core
@@ -84,10 +84,10 @@ The first module split will introduce a sibling package installed alongside the 
 
 ```text
 bin/
-  codex-workers
+  claive
   muse-worker
-  codex-with-workers
-  codex_workers/
+  claive-codex
+  claivelib/
     __init__.py
     cli.py
     core.py
@@ -101,7 +101,7 @@ bin/
       muse.py
 ```
 
-Files may be introduced incrementally, but the first commit that imports `codex_workers` must also update the installer to copy that package.
+Files may be introduced incrementally, but the first commit that imports `claivelib` must also update the installer to copy that package.
 
 The project remains standard-library-only.
 
@@ -128,10 +128,10 @@ The installed layout is:
 
 ```text
 <bin_dir>/
-  codex-workers
+  claive
   muse-worker
-  codex-with-workers
-  codex_workers/
+  claive-codex
+  claivelib/
     ...
 ```
 
@@ -139,7 +139,7 @@ The installed layout is:
 
 - install/update the package directory atomically enough that the executable never intentionally targets missing modules;
 - preserve mode and backup behavior for existing executable files;
-- back up or safely replace an existing installed `codex_workers` directory;
+- back up or safely replace an existing installed `claivelib` directory;
 - reject unsafe symlink/non-file destinations consistently with current behavior;
 - keep dry-run output accurate for both files and the package directory.
 
@@ -215,7 +215,7 @@ Follow-ups therefore rebuild commands instead of replacing values inside the pre
 Legacy state compatibility is a dedicated subsystem outside generic supervision:
 
 ```text
-codex_workers/compat/v1_muse.py
+claivelib/compat/v1_muse.py
 ```
 
 It knows the exact v1 Muse argv/state format and may decode:

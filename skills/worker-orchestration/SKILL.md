@@ -1,20 +1,20 @@
 ---
 name: worker-orchestration
-description: Orchestrate Muse and Pi worker agents from Claude Code or Codex using the codex-orch arbiter. A Muse implementer, a cross-family Pi critic, and verifier-gated refinement with checkpoint revert, escalating to one diverse second candidate only after a stall. Use when the user asks to orchestrate, delegate to workers or subagents, "use Muse/Pi", refine with a critic, or run several workers on different models; also for parallel fan-out of independent subtasks.
+description: Orchestrate Muse and Pi worker agents from Claude Code or Codex using the claive-orch arbiter. A Muse implementer, a cross-family Pi critic, and verifier-gated refinement with checkpoint revert, escalating to one diverse second candidate only after a stall. Use when the user asks to orchestrate, delegate to workers or subagents, "use Muse/Pi", refine with a critic, or run several workers on different models; also for parallel fan-out of independent subtasks.
 ---
 
 # Worker orchestration (Muse + Pi, arbiter-driven)
 
 You are the **parent**: you plan, write task text, launch workers, and integrate.
 You do **not** decide acceptance, reverts, round limits, escalation, or selection.
-The deterministic arbiter `codex-orch` decides those. Ask it `codex-orch next RUN`,
+The deterministic arbiter `claive-orch` decides those. Ask it `claive-orch next RUN`,
 do exactly the one action it names, and report the result back. The tests decide
 correctness; no model opinion overrules them.
 
-Background and evidence: `/home/hamza/repo/codex-muse-workers/docs/experiment/`
+Background and evidence: `/home/hamza/repo/claive/docs/experiment/`
 (the paper *Refining Over Resampling*, arXiv 2608.05643, plus the design and
 `06-skill-driven-implementation.md`). Source and tests:
-`/home/hamza/repo/codex-muse-workers` (`bin/codex-orch`, `bin/codex-workers`).
+`/home/hamza/repo/claive` (`bin/claive-orch`, `bin/claive`).
 
 ## When to use it, and when not
 
@@ -24,7 +24,7 @@ Background and evidence: `/home/hamza/repo/codex-muse-workers/docs/experiment/`
 - **Do it yourself** when the task is small or tightly coupled to what you are
   doing, or when delegation overhead exceeds the work.
 - **No verifier?** Write one first: a small test or check script that fails now.
-  If that is impossible, use a plain `codex-workers` fan-out (below) and review
+  If that is impossible, use a plain `claive` fan-out (below) and review
   the result yourself. Do not pretend a model review is verification.
 - Respect the host's rules on delegation. Hamza's Claude Code setup grants
   standing permission for Muse and Pi workers, so no per-task ask is needed
@@ -45,7 +45,7 @@ Background and evidence: `/home/hamza/repo/codex-muse-workers/docs/experiment/`
 `longcat-2.5-preview-free` only when the three preferred families are already
 used in the run or failing. `muse-spark-1.3-free` and
 `muse-spark-1.3-contributor-free` on Pi count as **the same family as Muse**:
-never use them as critic or lane b against Muse. `codex-orch worker` refuses
+never use them as critic or lane b against Muse. `claive-orch worker` refuses
 same-family critics.
 
 **Reasoning effort.** Pi models are free, so always run them at `max`
@@ -60,7 +60,7 @@ Pi rules: **always pass `--model`** (an explicit model also becomes Pi's global
 default, and omitting it inherits whatever was used last), plus `--engine pi
 --provider opencode2api`. Pi has no `--max-model-steps`, `--output-schema`,
 `--web`, or worktree flags. Pi read-only has **no bash**, so the critic prompt
-`codex-orch` generates already contains the diff and the verifier output. The
+`claive-orch` generates already contains the diff and the verifier output. The
 gateway models are free tiers: on a rate limit or an error, retry once, then pick
 another family and mention it in your report.
 
@@ -70,24 +70,24 @@ All paths must be absolute. The worker ID is the 12-hex value on the first outpu
 line: `Worker <id> | label | path`.
 
 **Claude Code.**
-- Long-lived implementer: run `codex-workers open ...` with Bash
+- Long-lived implementer: run `claive open ...` with Bash
   `run_in_background: true`, then read the first line of that background output
   for the worker ID. If it is not there yet, run
-  `codex-workers list --json | jq -r '.[] | select(.label=="LABEL") | .id'`.
-- Single-turn critics and reviewers: `codex-workers start ...` returns at once
+  `claive list --json | jq -r '.[] | select(.label=="LABEL") | .id'`.
+- Single-turn critics and reviewers: `claive start ...` returns at once
   and prints the ID.
-- Waiting: `codex-workers wait ID`, either with `run_in_background: true` (you
+- Waiting: `claive wait ID`, either with `run_in_background: true` (you
   are notified when it exits) or with `timeout: 600000`. Exit 0 = completed,
   130 = cancelled, anything else = failed.
 - Never use `&`, `nohup`, or `sleep` polling loops.
 
-**Codex.** Launch `codex-workers open ...` (or `codex-subagent-worker ...`,
+**Codex.** Launch `claive open ...` (or `claive-worker ...`,
 which is the same thing) through `exec_command` with a short `yield_time_ms`,
 and keep the shell session ID. Collect output with `write_stdin`. Critics may
-use `codex-workers start`. Full Codex mechanics, caching, and the quota policy
+use `claive start`. Full Codex mechanics, caching, and the quota policy
 are in the `subagent-routing` skill.
 
-Common commands: `codex-workers show ID --json`, `logs ID [--stderr]`,
+Common commands: `claive show ID --json`, `logs ID [--stderr]`,
 `usage ID --json`, `followup ID --prompt-file F`, `close ID`, `cancel ID`.
 
 ## The verified ladder (default: arm D, rounds 2)
@@ -99,29 +99,29 @@ first. Worker writes go only into lane worktrees, never into the user's checkout
 ```bash
 # 0. Task text: goal, constraints, files and symbols, acceptance criteria.
 #    Do not include the solution. Write it to an absolute file.
-codex-orch init --repo /abs/repo --task-file /abs/task.md \
+claive-orch init --repo /abs/repo --task-file /abs/task.md \
   --verify 'python3 -m pytest -q tests/test_x.py' --arm D --rounds 2
 #    -> "Run <RUN>". It runs the verifier at base. If the verifier already
 #       passes, the run is invalid: fix the check.
 
-codex-orch next RUN          # always ask; it prints NEXT / Why / How
+claive-orch next RUN          # always ask; it prints NEXT / Why / How
 ```
 
-Then loop on `codex-orch next RUN` and do what it names:
+Then loop on `claive-orch next RUN` and do what it names:
 
 | `next` says | Do |
 |---|---|
-| `add_lane a` | `codex-orch lane RUN a --engine muse --model muse-spark-1.3-contributor` |
-| `implement a` | `P=$(codex-orch prompt RUN implement a)`; launch `codex-workers open --workspace <lane path> --prompt-file "$P" --label RUN-a --reasoning-effort xhigh --max-model-steps 100` (`max` for very complicated tasks; for a Pi lane use `--engine pi --provider opencode2api --model <lane model> --reasoning-effort max` and no step cap) (background, see host mechanics); `codex-orch worker RUN a --role implementer --worker-id W`; `codex-workers wait W` |
-| `verify a` | after the implementer's turn ends: `codex-orch verify RUN a`. It runs the tests, then checkpoints or **reverts a regression automatically** |
-| `critique a` | `P=$(codex-orch prompt RUN critique a)`; `codex-workers start --engine pi --provider opencode2api --model <next preferred critic> --reasoning-effort max --read-only --workspace <lane path> --prompt-file "$P" --label RUN-a-critic`; `codex-orch worker RUN a --role critic --worker-id C`; `codex-workers wait C`; `codex-orch critique RUN a --worker-id C` (the lane argument is required) |
-| `correct a` | `P=$(codex-orch prompt RUN correct a)`; `codex-workers followup W --prompt-file "$P"` (**same session**: it keeps its context); `codex-workers wait W`; `codex-orch verify RUN a` |
-| `add_lane b` | lane a stalled. `codex-orch lane RUN b --engine pi --model <preferred family ≠ a and ≠ the last critic> --strategy "<a materially different approach>"`, then the same implement, verify, critique and correct cycle in lane b, with a critic of yet another family where possible. Lane b **never** sees lane a's diff |
-| `review` | `P=$(codex-orch prompt RUN review)`; start a read-only Pi reviewer; `codex-orch review RUN --worker-id R` |
-| `finish` | `codex-orch finish RUN`, `codex-orch usage RUN`, `codex-orch report RUN`, then integrate (below), close workers, `codex-orch cleanup RUN` |
+| `add_lane a` | `claive-orch lane RUN a --engine muse --model muse-spark-1.3-contributor` |
+| `implement a` | `P=$(claive-orch prompt RUN implement a)`; launch `claive open --workspace <lane path> --prompt-file "$P" --label RUN-a --reasoning-effort xhigh --max-model-steps 100` (`max` for very complicated tasks; for a Pi lane use `--engine pi --provider opencode2api --model <lane model> --reasoning-effort max` and no step cap) (background, see host mechanics); `claive-orch worker RUN a --role implementer --worker-id W`; `claive wait W` |
+| `verify a` | after the implementer's turn ends: `claive-orch verify RUN a`. It runs the tests, then checkpoints or **reverts a regression automatically** |
+| `critique a` | `P=$(claive-orch prompt RUN critique a)`; `claive start --engine pi --provider opencode2api --model <next preferred critic> --reasoning-effort max --read-only --workspace <lane path> --prompt-file "$P" --label RUN-a-critic`; `claive-orch worker RUN a --role critic --worker-id C`; `claive wait C`; `claive-orch critique RUN a --worker-id C` (the lane argument is required) |
+| `correct a` | `P=$(claive-orch prompt RUN correct a)`; `claive followup W --prompt-file "$P"` (**same session**: it keeps its context); `claive wait W`; `claive-orch verify RUN a` |
+| `add_lane b` | lane a stalled. `claive-orch lane RUN b --engine pi --model <preferred family ≠ a and ≠ the last critic> --strategy "<a materially different approach>"`, then the same implement, verify, critique and correct cycle in lane b, with a critic of yet another family where possible. Lane b **never** sees lane a's diff |
+| `review` | `P=$(claive-orch prompt RUN review)`; start a read-only Pi reviewer; `claive-orch review RUN --worker-id R` |
+| `finish` | `claive-orch finish RUN`, `claive-orch usage RUN`, `claive-orch report RUN`, then integrate (below), close workers, `claive-orch cleanup RUN` |
 
-Lane paths are printed by `codex-orch lane` and in `next`'s `How:` line.
-Every step is guarded: if `codex-orch` refuses a command, read its message and
+Lane paths are printed by `claive-orch lane` and in `next`'s `How:` line.
+Every step is guarded: if `claive-orch` refuses a command, read its message and
 re-run `next`. Do not work around it with `--force`.
 Held-out checks: put them in a directory **outside** the repository, pass
 `--acceptance-dir DIR`, and pass `--worker-verify '<visible-only command>'` so
@@ -156,19 +156,19 @@ After `finish`, the winning checkpoint is on branch `orch/RUN/LANE`.
    `git -C REPO diff BASE COMMIT | git -C REPO apply --3way`.
    Commit only if the user asked.
 3. Re-run the verifier in the user's checkout.
-4. `codex-workers close W` for every reusable worker, then
-   `codex-orch cleanup RUN` (removes worktrees and keeps the branches). Delete the
+4. `claive close W` for every reusable worker, then
+   `claive-orch cleanup RUN` (removes worktrees and keeps the branches). Delete the
    branches only when the user agrees: `git -C REPO branch -D orch/RUN/a ...`.
 
 Report to the user: outcome, winner lane and model, score trajectory, rounds,
-reverts, critic families, tokens (`codex-orch report RUN`), and anything you
+reverts, critic families, tokens (`claive-orch report RUN`), and anything you
 could not verify. Keep it short.
 
 ## Parallel fan-out (independent subtasks)
 
 For several independent tasks with **disjoint file ownership**, create one run
 per task (each run has its own lane worktrees) and drive them concurrently. Or,
-for unverifiable chores, use plain `codex-workers open` workers, each in its own
+for unverifiable chores, use plain `claive open` workers, each in its own
 worktree. Rules:
 
 - One writer per worktree. Read-only workers may share.
@@ -186,15 +186,15 @@ worktree. Rules:
   Muse work and use the **pre-approved fallback**, Pi
   `muse-spark-1.3-contributor-free` at `max`. Tell the user the reset time and
   that the fallback is in use. A run's lane cannot switch engines, so: note the
-  best checkpoint commit (`codex-orch report RUN`), `codex-orch finish RUN
-  --abort --reason "muse quota"`, then `codex-orch init` a new run with
+  best checkpoint commit (`claive-orch report RUN`), `claive-orch finish RUN
+  --abort --reason "muse quota"`, then `claive-orch init` a new run with
   `--base <that commit>` (or the original base if none) and
-  `codex-orch lane NEW a --engine pi --model muse-spark-1.3-contributor-free`.
+  `claive-orch lane NEW a --engine pi --model muse-spark-1.3-contributor-free`.
   Any other fallback model needs the user's approval. Go back to Muse after the
   reset.
 - A worker that fails (non-zero `wait`) is not success. Read
-  `codex-workers logs ID --stderr`, retry once only with a changed hypothesis,
-  otherwise `codex-orch finish RUN --abort --reason "..."` and report.
-- A completed worker's report is not proof. Only `codex-orch verify` and your own
+  `claive logs ID --stderr`, retry once only with a changed hypothesis,
+  otherwise `claive-orch finish RUN --abort --reason "..."` and report.
+- A completed worker's report is not proof. Only `claive-orch verify` and your own
   re-verification count.
 - Never run worker tasks against production systems or real data.

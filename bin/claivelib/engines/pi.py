@@ -6,8 +6,8 @@ import re
 import tempfile
 import time
 
-from codex_workers.engine import WorkerEngine
-from codex_workers.state import launch_config, session_id
+from claivelib.engine import WorkerEngine
+from claivelib.state import launch_config, session_id
 
 
 class PiEngine(WorkerEngine):

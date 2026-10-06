@@ -4,13 +4,13 @@
 set -euo pipefail
 
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-bin_dir=${MUSE_SUBAGENTS_BIN_DIR:-$HOME/.local/bin}
+bin_dir=${CLAIVE_BIN_DIR:-$HOME/.local/bin}
 codex_skills=${CODEX_HOME:-$HOME/.codex}/skills
 claude_skills=${CLAUDE_HOME:-$HOME/.claude}/skills
 skill_dir=$codex_skills/subagent-routing
-backup_base=${XDG_STATE_HOME:-$HOME/.local/state}/muse-subagents/backups
-package_source=$source_dir/bin/codex_workers
-package_target=$bin_dir/codex_workers
+backup_base=${XDG_STATE_HOME:-$HOME/.local/state}/claive-install/backups
+package_source=$source_dir/bin/claivelib
+package_target=$bin_dir/claivelib
 dry_run=false
 case ${1:-} in
   --dry-run) dry_run=true ;;
@@ -22,11 +22,11 @@ for path in "$bin_dir" "$codex_skills" "$claude_skills" "$backup_base"; do
   [[ $path == /* ]] || { echo "Installation paths must be absolute: $path" >&2; exit 2; }
 done
 
-sources=("$source_dir/bin/codex-workers" "$source_dir/bin/codex-subagent-worker"
-         "$source_dir/bin/codex-with-workers" "$source_dir/bin/codex-orch"
+sources=("$source_dir/bin/claive" "$source_dir/bin/claive-worker"
+         "$source_dir/bin/claive-codex" "$source_dir/bin/claive-orch"
          "$source_dir/skills/subagent-routing/SKILL.md")
-targets=("$bin_dir/codex-workers" "$bin_dir/codex-subagent-worker"
-         "$bin_dir/codex-with-workers" "$bin_dir/codex-orch" "$skill_dir/SKILL.md")
+targets=("$bin_dir/claive" "$bin_dir/claive-worker"
+         "$bin_dir/claive-codex" "$bin_dir/claive-orch" "$skill_dir/SKILL.md")
 modes=(755 755 755 755 644)
 # Host-neutral skills go to both Codex and Claude Code.
 for skill in worker-orchestration ttc-experiment; do
@@ -72,10 +72,10 @@ else
   else
     if [[ -d $package_target ]]; then
       ensure_backup_dir
-      cp -a -- "$package_target" "$backup_dir/codex_workers"
+      cp -a -- "$package_target" "$backup_dir/claivelib"
     fi
     mkdir -p -- "$bin_dir"
-    package_stage=$(mktemp -d "$bin_dir/.codex_workers.install.XXXXXX")
+    package_stage=$(mktemp -d "$bin_dir/.claivelib.install.XXXXXX")
     cp -a -- "$package_source/." "$package_stage/"
     find "$package_stage" -type d -name __pycache__ -prune -exec rm -rf -- {} +
     find "$package_stage" -type d -exec chmod 755 -- {} +
@@ -129,6 +129,35 @@ LEGACY
     cp -p -- "$legacy_launcher" "$backup_dir/muse-worker"
     rm -- "$legacy_launcher"
     echo "Retired launcher: $legacy_launcher"
+  fi
+fi
+
+# Retire the pre-rename codex-* commands and codex_workers package installed by this
+# project (identified by their references to it); preserve symlinks and unrelated files.
+for legacy in codex-workers codex-subagent-worker codex-with-workers codex-orch; do
+  legacy_path=$bin_dir/$legacy
+  if [[ ! -f $legacy_path || -L $legacy_path ]] ||
+     ! grep -q 'codex_workers\|codex-workers' -- "$legacy_path"; then
+    continue
+  fi
+  if "$dry_run"; then
+    echo "Would retire: $legacy_path"
+  else
+    ensure_backup_dir
+    cp -p -- "$legacy_path" "$backup_dir/$legacy"
+    rm -- "$legacy_path"
+    echo "Retired: $legacy_path"
+  fi
+done
+legacy_package=$bin_dir/codex_workers
+if [[ -d $legacy_package && ! -L $legacy_package && -f $legacy_package/cli.py && -f $legacy_package/engine.py ]]; then
+  if "$dry_run"; then
+    echo "Would retire package: $legacy_package"
+  else
+    ensure_backup_dir
+    cp -a -- "$legacy_package" "$backup_dir/codex_workers"
+    rm -rf -- "$legacy_package"
+    echo "Retired package: $legacy_package"
   fi
 fi
 [[ -z $backup_dir ]] || echo "Previous files saved in: $backup_dir"

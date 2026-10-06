@@ -10,7 +10,7 @@ def get_engine(name):
     if name not in _ENGINES and name in _MODULES:
         module_name, class_name = _MODULES[name]
         try:
-            module = importlib.import_module(f"codex_workers.engines.{module_name}")
+            module = importlib.import_module(f"claivelib.engines.{module_name}")
             _ENGINES[name] = getattr(module, class_name)()
         except ImportError as error:
             raise ValueError(f"worker engine {name} is unavailable") from error

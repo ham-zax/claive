@@ -16,7 +16,7 @@ with 6 visible unit tests. Arm D, rounds 2, experiment `trial`.
 
 ## Findings and fixes
 
-1. **`codex-orch prompt` had no sequence guard.** The parent (with a mistyped
+1. **`claive-orch prompt` had no sequence guard.** The parent (with a mistyped
    `critique` command) generated a correction prompt before the critique was
    recorded. `verify` correctly refused afterwards, but the correction had
    already been sent without the critique. Fixed: `prompt` now refuses any kind

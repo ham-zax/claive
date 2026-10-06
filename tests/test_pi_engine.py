@@ -11,8 +11,8 @@ import unittest
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "bin"))
-from codex_workers import cli
-from codex_workers.engines.pi import PiEngine
+from claivelib import cli
+from claivelib.engines.pi import PiEngine
 
 
 class PiChecks(unittest.TestCase):
@@ -29,7 +29,7 @@ class PiChecks(unittest.TestCase):
         self.settings = self.agent_dir / "settings.json"
         self.settings.write_text(json.dumps({"defaultProvider": "opencode2api", "theme": "custom",
                                             "defaultThinkingLevel": "max"}))
-        self.env = dict(os.environ, CODEX_WORKERS_DIR=str(self.registry),
+        self.env = dict(os.environ, CLAIVE_DIR=str(self.registry),
                         PI_CODING_AGENT_DIR=str(self.agent_dir),
                         PI_WORKER_BINARY=str(REPO / "tests/fake_pi.py"))
         self.processes = []
@@ -49,7 +49,7 @@ class PiChecks(unittest.TestCase):
         self.temp.cleanup()
 
     def command(self, *args, mode="success"):
-        return subprocess.run([str(REPO / "bin/codex-workers"), *args],
+        return subprocess.run([str(REPO / "bin/claive"), *args],
                               env=dict(self.env, PI_TEST_MODE=mode), text=True,
                               capture_output=True, timeout=15)
 
@@ -74,7 +74,7 @@ class PiChecks(unittest.TestCase):
 
     def open(self):
         process = subprocess.Popen([
-            str(REPO / "bin/codex-workers"), "open", "--engine", "pi",
+            str(REPO / "bin/claive"), "open", "--engine", "pi",
             "--workspace", str(self.workspace), "--prompt-file", str(self.prompt),
         ], env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True)
@@ -151,7 +151,7 @@ class PiChecks(unittest.TestCase):
         self.assertEqual(json.loads(self.settings.read_text())["defaultModel"], "big-pickle")
         self.assertEqual(self.command("close", original["id"]).returncode, 0)
         process.communicate(timeout=5)
-        self.env["CODEX_WORKERS_DIR"] = str(self.root / "other-registry")
+        self.env["CLAIVE_DIR"] = str(self.root / "other-registry")
         self.registry = self.root / "other-registry"
         result, inherited = self.launch()
         self.assertEqual(result.returncode, 0, result.stderr)

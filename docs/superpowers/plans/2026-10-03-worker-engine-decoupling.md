@@ -2,24 +2,24 @@
 
 **Goal:** Separate Muse transport details from the generic Codex worker lifecycle so a future Pi engine can be added without rewriting supervision.
 
-**Architecture:** Keep `codex-workers` as the stable CLI/worker manager. Move reusable orchestration into a standard-library package, represent launch settings structurally, and put Muse command/event/usage logic behind an engine adapter. Preserve v1 job compatibility and current behavior throughout.
+**Architecture:** Keep `claive` as the stable CLI/worker manager. Move reusable orchestration into a standard-library package, represent launch settings structurally, and put Muse command/event/usage logic behind an engine adapter. Preserve v1 job compatibility and current behavior throughout.
 
 **Spec:** `docs/superpowers/specs/2026-10-03-worker-engine-decoupling-design.md`
 
 ## Stage 1 — Install-safe module foundation
 
 **Files**
-- Modify: `bin/codex-workers`
-- Create: `bin/codex_workers/__init__.py`
-- Create: `bin/codex_workers/cli.py`
+- Modify: `bin/claive`
+- Create: `bin/claivelib/__init__.py`
+- Create: `bin/claivelib/cli.py`
 - Modify: `install.sh`
 - Modify: `tests/test_workers.py`
 
 **Changes**
-- Turn `bin/codex-workers` into a thin launcher.
-- Move the current implementation into `bin/codex_workers/cli.py` without behavioral changes.
+- Turn `bin/claive` into a thin launcher.
+- Move the current implementation into `bin/claivelib/cli.py` without behavioral changes.
 - Pass the launcher path explicitly into the implementation so detached supervision re-executes the launcher rather than `cli.py`.
-- Install the `codex_workers` package in the same commit.
+- Install the `claivelib` package in the same commit.
 - Extend installer backup/symlink protections to the package directory.
 - Add an installed-copy test that invokes the installed launcher from outside the repo/install tree.
 
@@ -33,10 +33,10 @@
 ## Stage 2 — Structured v2 state and v1 compatibility
 
 **Files**
-- Create: `bin/codex_workers/state.py`
-- Create: `bin/codex_workers/compat/__init__.py`
-- Create: `bin/codex_workers/compat/v1_muse.py`
-- Modify: `bin/codex_workers/cli.py`
+- Create: `bin/claivelib/state.py`
+- Create: `bin/claivelib/compat/__init__.py`
+- Create: `bin/claivelib/compat/v1_muse.py`
+- Modify: `bin/claivelib/cli.py`
 - Modify: `tests/test_workers.py`
 
 **Changes**
@@ -54,10 +54,10 @@
 ## Stage 3 — Engine contract and fresh Muse commands
 
 **Files**
-- Create: `bin/codex_workers/engine.py`
-- Create: `bin/codex_workers/engines/__init__.py`
-- Create: `bin/codex_workers/engines/muse.py`
-- Modify: `bin/codex_workers/cli.py`
+- Create: `bin/claivelib/engine.py`
+- Create: `bin/claivelib/engines/__init__.py`
+- Create: `bin/claivelib/engines/muse.py`
+- Modify: `bin/claivelib/cli.py`
 - Modify: `tests/test_workers.py`
 
 **Changes**
@@ -76,9 +76,9 @@
 ## Stage 4 — Normalized events and fixture engine
 
 **Files**
-- Modify: `bin/codex_workers/engine.py`
-- Modify: `bin/codex_workers/engines/muse.py`
-- Modify: `bin/codex_workers/cli.py`
+- Modify: `bin/claivelib/engine.py`
+- Modify: `bin/claivelib/engines/muse.py`
+- Modify: `bin/claivelib/cli.py`
 - Add test fixture engine/helper under `tests/`
 
 **Changes**
@@ -110,8 +110,8 @@
 ## Stage 6 — Encapsulate Muse worktree handling
 
 **Files**
-- Modify: `bin/codex_workers/cli.py`
-- Modify: `bin/codex_workers/engines/muse.py`
+- Modify: `bin/claivelib/cli.py`
+- Modify: `bin/claivelib/engines/muse.py`
 - Modify: tests as needed.
 
 **Changes**
@@ -128,8 +128,8 @@
 ## Stage 7 — Engine usage and neutral presentation
 
 **Files**
-- Modify: `bin/codex_workers/engines/muse.py`
-- Modify: `bin/codex_workers/cli.py`
+- Modify: `bin/claivelib/engines/muse.py`
+- Modify: `bin/claivelib/cli.py`
 - Modify: tests.
 
 **Changes**

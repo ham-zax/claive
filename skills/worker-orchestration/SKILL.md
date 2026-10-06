@@ -90,6 +90,14 @@ are in the `subagent-routing` skill.
 Common commands: `claive show ID --json`, `logs ID [--stderr]`,
 `usage ID --json`, `followup ID --prompt-file F`, `close ID`, `cancel ID`.
 
+Health and structured reports: `claive doctor [--json]` is a read-only
+check and never launches a model. `--role scout|worker|reviewer|oracle`
+sets engine, model, effort, read-only, and step-cap defaults and always
+requests a `claive-report` block; `--report` requests it without a role.
+A turn asking for a decision exits 3, shows `ASK`, and records
+`needs_parent`; reply with `claive answer ID --message ...` (reusable
+workers only). Failed turns record `failure_kind`, visible in `show --json`.
+
 ## The verified ladder (default: arm D, rounds 2)
 
 Everything starts from the repository's **committed** `HEAD` (or `--base REV`).

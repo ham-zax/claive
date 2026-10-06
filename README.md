@@ -70,6 +70,18 @@ claive status-line
 
 `cancel` stops the worker process group, escalating to a kill after three seconds if necessary. `wait` returns when assigned turns finish (the reusable worker can remain idle), with zero for a valid completed turn, nonzero on failure, or 130 on cancellation. `close` drains already assigned turns before ending the supervisor; `cancel` stops it immediately. Closing a dashboard stops only the view; workers keep running or waiting until explicitly closed or cancelled.
 
+### Health, roles, reports, and parent questions
+
+```bash
+claive doctor
+claive doctor --json
+claive run --role reviewer --workspace /abs/repo --prompt-file /abs/task.md
+claive run --report --workspace /abs/repo --prompt-file /abs/task.md
+claive answer JOB_ID --message "Use design B."
+```
+
+`doctor` is a read-only health check (exit 0 when all required checks pass); it never launches a model. `--role scout|worker|reviewer|oracle` selects engine, model, effort, read-only, and step-cap defaults (explicit flags win) and always enables the report contract; `--report` enables the contract without a role. The worker ends its answer with a `claive-report` JSON block (`done|blocked|needs_decision`); `run`/`wait` exit 3 when it asks for a decision, the dashboard shows `ASK`, and `status-line` counts `N need you`. `answer` queues a parent decision to a reusable worker waiting for one. Failed turns record `failure_kind` (`quota|protocol|worker|launch|supervisor|rejected|interrupted`), shown by `show`/`wait`/`run` and in `--json` output.
+
 The default Muse engine supplies `--workspace`, `--trust-workspace`, `--disable-approval`, and `--json`, and keeps Muse's sandbox enabled. `--read-only` disables both non-shell writes and shell execution. `--worktree` maps to Muse's `-w create`; `--worktree-base` selects its base ref. Muse 1.4.2 creates a real linked worktree under `.muse/worktrees` on branch `muse/session-<session UUID>`, then removes that worktree and branch when the underlying `muse exec` exits. Therefore `--worktree` is per-turn isolation, not a persistent reusable lane. Use `--worktree-existing /absolute/worktree` only for an externally retained worktree that remains present across turns. File ownership must remain disjoint. Run heavy builds and test suites one at a time.
 
 Web tools are disabled by default; `--web` enables them. `--model` accepts only `muse-spark-1.3-contributor`. Other options include `--output-schema` and `--session-id`. `--no-session-log` is available only for deliberate single-turn runs, and is rejected for reusable workers. Run `claive-worker --help` for the full list. `--provider echo` is for transport checks and does not contact a live model; Muse does not accept reasoning effort with that provider, so the launcher omits model and effort options in that case.

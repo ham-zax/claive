@@ -13,6 +13,10 @@ from claivelib.state import launch_config, session_id
 MUSE_MODEL = "muse-spark-1.3-contributor"
 
 
+def default_binary():
+    return os.environ.get("MUSE_WORKER_BINARY", str(Path.home() / ".local/bin/muse"))
+
+
 class MuseEngine(WorkerEngine):
     name = "muse"
     default_model = MUSE_MODEL
@@ -33,7 +37,7 @@ class MuseEngine(WorkerEngine):
     def resolve_launch(self, **options):
         provider = options.get("provider") or "meta"
         return {
-            "binary": os.environ.get("MUSE_WORKER_BINARY", str(Path.home() / ".local/bin/muse")),
+            "binary": default_binary(),
             "provider": provider,
             "model": None if provider == "echo" else options.get("model") or MUSE_MODEL,
             "read_only": bool(options.get("read_only")),

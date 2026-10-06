@@ -3,6 +3,7 @@
 
 import argparse
 import datetime
+import importlib
 import json
 import os
 from pathlib import Path
@@ -19,11 +20,92 @@ import uuid
 
 from claivelib.engine import TurnRequest
 from claivelib.engines import DEFAULT_ENGINE, get_engine
+from claivelib.roles import ROLES
 from claivelib.state import SCHEMA_VERSION, launch_config, session_id as worker_session_id
 
 
 ACTIVE = {"starting", "running", "cancelling", "idle"}
 SCRIPT = None
+REPORT_CONTRACT = (
+    "End your final answer with exactly one fenced block tagged claive-report "
+    "containing one JSON object:\n"
+    '{"status": "done" | "blocked" | "needs_decision", '
+    '"summary": "<one or two sentences>", '
+    '"changed_files": ["path", ...], '
+    '"commands_run": [{"command": "...", "exit_code": 0}], '
+    '"residual_risks": ["..."], '
+    '"question": "<required when status is blocked or needs_decision>"}\n'
+    "Use needs_decision instead of guessing when a choice would change design, "
+    "public behaviour, data formats, scope, or acceptance criteria."
+)
+PREFERRED_MODELS = ("mimo-v2.6-flash-free", "big-pickle", "space-bunny-free",
+                    "muse-spark-1.3-contributor-free")
+
+
+def disallowed_model(model):
+    name = str(model or "").lower()
+    return "nemotron" in name or name.startswith("ling-3.1-flash")
+
+
+def check_model_policy(model):
+    if model and disallowed_model(model):
+        raise ValueError(f"model {model} is disallowed by claive policy")
+
+
+def parse_report(text):
+    blocks = re.findall(r"```claive-report(.*?)```", text or "", re.S)
+    if not blocks:
+        return "missing", None, None
+    try:
+        raw = json.loads(blocks[-1].strip())
+    except ValueError:
+        return "invalid", None, "report is not valid JSON"
+    if not isinstance(raw, dict):
+        return "invalid", None, "report is not a JSON object"
+    status = raw.get("status")
+    if status not in {"done", "blocked", "needs_decision"}:
+        return "invalid", None, "invalid report status"
+    summary = raw.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        return "invalid", None, "summary must be a non-empty string"
+    for field in ("changed_files", "residual_risks"):
+        if field in raw:
+            value = raw[field]
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                return "invalid", None, f"{field} must be a list of strings"
+    if "commands_run" in raw:
+        commands = raw["commands_run"]
+        if not isinstance(commands, list):
+            return "invalid", None, "commands_run must be a list"
+        for item in commands:
+            if (not isinstance(item, dict) or not isinstance(item.get("command"), str)
+                    or not isinstance(item.get("exit_code"), int)
+                    or isinstance(item.get("exit_code"), bool)):
+                return "invalid", None, "commands_run entries need command and exit_code"
+    question = raw.get("question")
+    if status != "done":
+        if not isinstance(question, str) or not question.strip():
+            return "invalid", None, "question is required unless done"
+    elif question is not None and not isinstance(question, str):
+        return "invalid", None, "question must be a string"
+    report = dict(status=status, summary=summary,
+                  changed_files=list(raw.get("changed_files") or []),
+                  commands_run=list(raw.get("commands_run") or []),
+                  residual_risks=list(raw.get("residual_risks") or []),
+                  question=raw.get("question") if "question" in raw else None)
+    return "ok", report, None
+
+
+def record_report(state, answer):
+    text = answer if isinstance(answer, str) else json.dumps(answer)
+    report_state, parsed, reason = parse_report(text)
+    state["report_state"] = report_state
+    if report_state == "ok":
+        state["report"] = parsed
+        if parsed["status"] in {"needs_decision", "blocked"}:
+            state["needs_parent"] = {"kind": parsed["status"], "question": parsed["question"]}
+    elif report_state == "invalid":
+        state["report_error"] = reason
 
 
 def set_launcher_path(path):
@@ -105,9 +187,11 @@ def load(path, check_alive=True):
         if pid and identity(pid) != state.get("supervisor_identity"):
             state["status"] = "interrupted"
             state["error"] = "worker supervisor exited without a final result"
+            state["failure_kind"] = "interrupted"
         elif not pid and time.time() - state["started_at"] > 5:
             state["status"] = "interrupted"
             state["error"] = "worker supervisor did not start"
+            state["failure_kind"] = "interrupted"
     return state
 
 
@@ -142,8 +226,10 @@ def summary(records):
     done = sum(item["status"] == "completed" for item in records)
     failed = sum(item["status"] in {"failed", "interrupted"} for item in records)
     stopped = sum(item["status"] == "cancelled" for item in records)
+    needy = sum(1 for item in records if item.get("needs_parent"))
     idle_text = f" | {idle} idle" if idle else ""
-    return f"Workers: {running} running{idle_text} | {done} done | {failed} failed | {stopped} stopped"
+    text = f"Workers: {running} running{idle_text} | {done} done | {failed} failed | {stopped} stopped"
+    return f"{text} | {needy} need you" if needy else text
 
 
 def terminal_size():
@@ -170,7 +256,7 @@ def compact_view(records, color=False, width=None, height=5):
     for state in records[:capacity]:
         status = state["status"]
         age = duration(state.get("ended_at", time.time()) - state["started_at"])
-        badge = badges.get(status, status.upper())
+        badge = "ASK" if state.get("needs_parent") else badges.get(status, status.upper())
         warning = f" !{state['task_failures']}" if state.get("task_failures") else ""
         phase = " | " + clean(state.get("phase", "working")) if status in ACTIVE else ""
         line = fit(f"{badge:7} {state['id']} {age:7} {clean(state['label'])}{warning}"
@@ -199,14 +285,15 @@ def render(records, color=False, height=None):
             break
         status = state["status"]
         age = duration(state.get("ended_at", time.time()) - state["started_at"])
-        badge = status.upper().ljust(12)
+        shown = "ASK" if state.get("needs_parent") else status.upper()
+        badge = shown.ljust(12)
         if color:
             badge = f"\033[{palette.get(status, '0')}m{badge}\033[0m"
         label = clean(state["label"])
         if state.get("task_failures"):
             label += f" [!{state['task_failures']} task failures]"
         workspace = clean(Path(state["workspace"]).name)
-        prefix = f"{status.upper():12} {state['id']}  {age:8}  {state.get('steps', 0):5}  "
+        prefix = f"{shown:12} {state['id']}  {age:8}  {state.get('steps', 0):5}  "
         detail = f"{label} / {workspace}"[:max(8, width - len(prefix))]
         lines.append(f"{badge} {state['id']}  {age:8}  {state.get('steps', 0):5}  {detail}")
         if status in ACTIVE:
@@ -249,7 +336,8 @@ def supervise(job_id, control=None):
     path = job_path(job_id)
     state = load(path, check_alive=False)
     for key in ("ended_at", "error", "terminal", "terminal_reason", "quota_exhausted",
-                "quota_reset_at", "fallback_requires_user_approval"):
+                "quota_reset_at", "fallback_requires_user_approval", "report", "report_state",
+                "report_error", "needs_parent", "failure_kind"):
         state.pop(key, None)
     state["malformed_events"] = 0
     (path / "result.txt").unlink(missing_ok=True)
@@ -347,11 +435,23 @@ def supervise(job_id, control=None):
             state["status"] = "failed"
             state["error"] = (f"exit={state['exit_code']}; terminal={state.get('terminal', 'missing')}; "
                               f"malformed events={state['malformed_events']}")
+            if state.get("quota_exhausted"):
+                state["failure_kind"] = "quota"
+            elif state.get("malformed_events") or state.get("terminal") is None:
+                state["failure_kind"] = "protocol"
+            else:
+                state["failure_kind"] = "worker"
         else:
             state["status"] = "completed"
+        if state.get("report_contract"):
+            record_report(state, answer)
     except Exception as error:
         state["status"] = "cancelled" if stopping else "failed"
         state["error"] = str(error)
+        if state["status"] == "failed":
+            state["failure_kind"] = "supervisor" if child is not None else "launch"
+            if state.get("report_contract"):
+                record_report(state, state.get("answer", ""))
         if child is not None:
             try:
                 os.killpg(child.pid, signal.SIGKILL)
@@ -369,7 +469,7 @@ def outcome_code(state):
     if state["status"] == "idle":
         state = dict(state, status=state.get("last_turn_status", "failed"))
     if state["status"] == "completed":
-        return 0
+        return 3 if state.get("needs_parent") else 0
     if state["status"] == "cancelled":
         return 130
     code = state.get("exit_code")
@@ -398,7 +498,8 @@ def reusable_worker(job_id):
                 request = json.loads(pending[0].read_text())
                 if not Path(request["prompt_file"]).is_file():
                     state["phase"] = "follow-up prompt missing; ready for another assignment"
-                    state.update(last_turn_status="failed", error="queued follow-up prompt disappeared")
+                    state.update(last_turn_status="failed", error="queued follow-up prompt disappeared",
+                                 failure_kind="rejected")
                     save(path / "state.json", state)
                     pending[0].unlink()
                     print(f"Worker {job_id}: rejected missing prompt {clean(request['prompt_file'])}", flush=True)
@@ -411,7 +512,8 @@ def reusable_worker(job_id):
                     actual = state.get("actual_workspace", "")
                     if not actual or not Path(actual).is_dir():
                         state.update(phase="cannot identify isolated worktree; follow-up rejected",
-                                     last_turn_status="failed", error="actual worktree is unknown")
+                                     last_turn_status="failed", error="actual worktree is unknown",
+                                     failure_kind="rejected")
                         save(path / "state.json", state)
                         pending[0].unlink()
                         print(f"Worker {job_id}: follow-up rejected; actual worktree is unknown", flush=True)
@@ -419,23 +521,34 @@ def reusable_worker(job_id):
                     isolation = {"mode": "existing", "base": None, "existing_path": actual}
                     state["actual_workspace"] = actual
                 engine = get_engine(state.get("engine", DEFAULT_ENGINE))
+                new_turn = state["turn"] + 1
+                effective = request["prompt_file"]
+                source = None
+                if state.get("report_contract"):
+                    source = request["prompt_file"]
+                    effective = str(path / f"prompt-{new_turn:04}.md")
+                    (path / f"prompt-{new_turn:04}.md").write_text(
+                        Path(source).read_text() + "\n\n" + REPORT_CONTRACT)
                 try:
-                    next_turn = turn_request(state, prompt_file=request["prompt_file"],
+                    next_turn = turn_request(state, prompt_file=effective,
                                              reasoning_effort=effort, max_model_steps=steps,
                                              isolation=isolation)
                     engine.validate_turn(next_turn)
                     command = engine.build_command(next_turn)
                 except ValueError as error:
                     state.update(last_turn_status="failed", error=str(error),
-                                 phase="follow-up rejected; ready for another assignment")
+                                 phase="follow-up rejected; ready for another assignment",
+                                 failure_kind="rejected")
                     save(path / "state.json", state)
                     pending[0].unlink()
                     print(f"Worker {job_id}: follow-up rejected: {clean(error)}", flush=True)
                     continue
-                state.update(prompt_file=request["prompt_file"], reasoning_effort=effort,
+                state.update(prompt_file=effective, reasoning_effort=effort,
                              max_model_steps=steps, command=command,
-                             label=request.get("label") or state["label"], turn=state["turn"] + 1,
+                             label=request.get("label") or state["label"], turn=new_turn,
                              status="running", phase="starting related follow-up")
+                if source:
+                    state["source_prompt_file"] = source
                 save(path / "state.json", state)
                 pending[0].unlink()
                 break
@@ -464,18 +577,32 @@ def create_job(args):
     if args.session_id and args.no_session_log:
         raise ValueError("--session-id requires retained session logging")
 
-    engine = get_engine(args.engine)
+    role = getattr(args, "role", None)
+    role_def = ROLES.get(role) if role else None
+    if role and role_def is None:
+        raise ValueError(f"unknown role: {role}")
+    engine_name = getattr(args, "engine", None) or (role_def["engine"] if role_def else None) or DEFAULT_ENGINE
+    engine = get_engine(engine_name)
     session_id = engine.resolve_session_id(args.session_id, not args.no_session_log)
-    effort = args.reasoning_effort or engine.default_reasoning_effort
-    steps = args.max_model_steps if args.max_model_steps is not None else engine.default_max_model_steps
+    effort = args.reasoning_effort or (role_def["reasoning_effort"] if role_def else None) or engine.default_reasoning_effort
+    if args.max_model_steps is not None:
+        steps = args.max_model_steps
+    elif role_def and role_def.get("max_model_steps") is not None and engine.default_max_model_steps is not None:
+        steps = role_def["max_model_steps"]
+    else:
+        steps = engine.default_max_model_steps
+    read_only = bool(args.read_only or (role_def and role_def.get("read_only")))
+    effective_model = args.model or (role_def["model"] if role_def else None)
+    check_model_policy(effective_model)
     isolation = dict(mode="create" if args.worktree else "existing" if args.worktree_existing else "none",
                      base=args.worktree_base, existing_path=args.worktree_existing)
     launch = engine.resolve_launch(
-        provider=args.provider, model=args.model, read_only=args.read_only, web=args.web,
+        provider=args.provider, model=effective_model, read_only=read_only, web=args.web,
         output_schema=args.output_schema, session_logging=not args.no_session_log,
         isolation=isolation, session_id=session_id, session_root=str(root() / "sessions"),
         workspace=str(workspace),
     )
+    check_model_policy(launch.get("model"))
     engine.validate_launch(launch)
     initial_turn = TurnRequest(
         binary=launch["binary"], workspace=str(workspace), prompt_file=str(prompt),
@@ -486,18 +613,41 @@ def create_job(args):
         session_dir=launch.get("session_dir"),
     )
     engine.validate_turn(initial_turn)
-    command = engine.build_command(initial_turn)
     job_id = uuid.uuid4().hex[:12]
     path = root() / job_id
     path.mkdir(mode=0o700)
     (path / "requests").mkdir(mode=0o700)
     save(path / "policy.json", dict(reasoning_effort=effort, max_model_steps=steps))
-    state = dict(schema_version=SCHEMA_VERSION, engine=args.engine, session_id=session_id,
+    report_contract = bool(getattr(args, "report", False) or role)
+    effective_prompt, source_prompt = str(prompt), None
+    if report_contract:
+        source_prompt = str(prompt)
+        preamble = role_def["preamble"] if role_def else None
+        body = prompt.read_text()
+        composed = f"{preamble}\n\n{body}\n\n{REPORT_CONTRACT}" if preamble else f"{body}\n\n{REPORT_CONTRACT}"
+        (path / "prompt-0001.md").write_text(composed)
+        effective_prompt = str(path / "prompt-0001.md")
+        initial_turn = TurnRequest(
+            binary=launch["binary"], workspace=str(workspace), prompt_file=effective_prompt,
+            session_id=session_id, provider=launch["provider"], model=launch["model"],
+            reasoning_effort=effort, max_model_steps=steps,
+            read_only=launch["read_only"], web=launch["web"], output_schema=launch["output_schema"],
+            session_logging=launch["session_logging"], isolation=launch["isolation"],
+            session_dir=launch.get("session_dir"),
+        )
+    command = engine.build_command(initial_turn)
+    state = dict(schema_version=SCHEMA_VERSION, engine=engine_name, session_id=session_id,
                  id=job_id, label=args.label or prompt.stem, workspace=str(workspace), log_dir=str(path),
-                 prompt_file=str(prompt), command=command, launch=launch, status="starting", phase="starting",
+                 prompt_file=effective_prompt, command=command, launch=launch, status="starting", phase="starting",
                  started_at=time.time(), steps=0, task_failures=0, malformed_events=0,
                  model=launch.get("model"), reasoning_effort=effort, max_model_steps=steps,
                  reusable=args.action == "open", turn=1)
+    if report_contract:
+        state["report_contract"] = True
+    if role:
+        state["role"] = role
+    if source_prompt:
+        state["source_prompt_file"] = source_prompt
     if args.worktree_existing:
         state["actual_workspace"] = str(Path(args.worktree_existing))
     save(path / "state.json", state)
@@ -518,11 +668,189 @@ def report(state):
         print(f"Worker engine quota exhausted ({state.get('engine', DEFAULT_ENGINE)}). Reset: {state.get('quota_reset_at', 'not reported')}.")
         print("Pre-approved fallback: Pi muse-spark-1.3-contributor-free (opencode2api) for the affected lane; "
               "tell the user. Any other fallback needs their approval; this manager never switches automatically.")
+    if state.get("failure_kind"):
+        print(f"Failure kind: {state['failure_kind']}")
+    report_state = state.get("report_state")
+    if report_state == "missing":
+        print("Report missing: no claive-report block in final answer")
+    elif report_state == "invalid":
+        print(f"Report invalid: {clean(state.get('report_error', ''))}")
+    elif report_state == "ok":
+        parsed = state.get("report") or {}
+        print(f"Report: {clean(parsed.get('summary', ''))}")
+        if parsed.get("changed_files"):
+            print(f"Changed files: {clean(', '.join(parsed['changed_files']))}")
+        for item in parsed.get("commands_run") or []:
+            print(f"Ran: {clean(item.get('command', ''))} (exit {item.get('exit_code')})")
+        if parsed.get("residual_risks"):
+            print(f"Risks: {clean('; '.join(parsed['residual_risks']))}")
+        if parsed.get("question"):
+            print(f"Question: {clean(parsed['question'])}")
+    needs = state.get("needs_parent")
+    if needs:
+        print(f"Needs parent ({needs.get('kind')}): {clean(needs.get('question', ''))}")
+        if state.get("reusable"):
+            print(f"Answer: claive answer {state['id']} --message ...")
+        else:
+            print("Answering needs a reusable worker (open --session-id ...); this was a single-turn run.")
     print(f"Logs: {path}")
     result = path / "result.txt"
     if result.exists():
         print(result.read_text())
     sys.stdout.flush()
+
+
+def doctor_checks():
+    checks = []
+
+    def add(name, ok, required, detail):
+        checks.append(dict(name=name, ok=bool(ok), required=bool(required), detail=str(detail)))
+
+    add("python", sys.version_info >= (3, 10), True, sys.version.split()[0])
+    try:
+        base = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
+        directory = Path(os.environ.get("CLAIVE_DIR", str(base / "claive")))
+        if not directory.is_absolute():
+            add("state_dir", False, True, f"{directory} is not absolute")
+        else:
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            fd, temporary = tempfile.mkstemp(prefix=".doctor-", dir=directory)
+            try:
+                with os.fdopen(fd, "w") as stream:
+                    stream.write("ok")
+                Path(temporary).unlink()
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+            add("state_dir", True, True, str(directory))
+    except Exception as error:
+        add("state_dir", False, True, str(error)[:200])
+    results = {}
+    for name in ("muse", "pi"):
+        try:
+            binary = importlib.import_module(f"claivelib.engines.{name}").default_binary()
+        except ImportError:
+            results[name] = False
+            add(name, False, False, "engine module not installed")
+            continue
+        ok = Path(binary).is_file() and os.access(binary, os.X_OK)
+        results[name] = ok
+        add(name, ok, False, binary if ok else f"missing or not executable: {binary}")
+    add("engines", results["muse"] or results["pi"], True,
+        "muse ok" if results["muse"] and not results["pi"] else
+        "pi ok" if results["pi"] and not results["muse"] else
+        "muse, pi available" if results["muse"] else "no engine binary found")
+    try:
+        agent_dir = Path(os.environ.get("PI_CODING_AGENT_DIR", str(Path.home() / ".pi/agent"))).expanduser()
+        models_file = agent_dir / "models.json"
+        if not models_file.is_file():
+            add("opencode2api", False, False, f"missing {models_file}")
+        else:
+            try:
+                data = json.loads(models_file.read_text())
+            except ValueError as error:
+                add("opencode2api", False, False, f"invalid models.json: {error}")
+            else:
+                providers = data.get("providers") if isinstance(data, dict) else None
+                config = providers.get("opencode2api") if isinstance(providers, dict) else None
+                base_url = config.get("baseUrl") if isinstance(config, dict) else None
+                if not base_url:
+                    add("opencode2api", False, False, "provider opencode2api.baseUrl not configured")
+                else:
+                    import urllib.request
+                    headers = {}
+                    api_key = config.get("apiKey") if isinstance(config, dict) else None
+                    if api_key:
+                        headers["Authorization"] = f"Bearer {api_key}"
+                    request = urllib.request.Request(str(base_url).rstrip("/") + "/models", headers=headers)
+                    try:
+                        with urllib.request.urlopen(request, timeout=3) as response:
+                            payload = json.loads(response.read())
+                    except ValueError:
+                        add("opencode2api", False, False, "GET /models did not return JSON")
+                    except Exception as error:
+                        add("opencode2api", False, False, f"GET /models failed: {error}"[:200])
+                    else:
+                        items = []
+                        if isinstance(payload, list):
+                            items = payload
+                        elif isinstance(payload, dict):
+                            items = payload.get("data") if isinstance(payload.get("data"), list) else (
+                                payload.get("models") if isinstance(payload.get("models"), list) else [])
+                        ids = [item if isinstance(item, str)
+                               else item.get("id") if isinstance(item, dict) else None
+                               for item in items]
+                        ids = [item for item in ids if isinstance(item, str)]
+                        missing = [name for name in PREFERRED_MODELS if name not in ids]
+                        detail = f"{len(ids)} models" + (f"; missing: {', '.join(missing)}" if missing else "")
+                        add("opencode2api", True, False, detail)
+    except Exception as error:
+        add("opencode2api", False, False, str(error)[:200])
+    git = shutil.which("git")
+    add("git", bool(git), False, git or "not on PATH")
+    try:
+        registry = root()
+        now = time.time()
+        found = None
+        for child in registry.iterdir():
+            if not child.is_dir() or not re.fullmatch(r"[0-9a-f]{12}", child.name):
+                continue
+            state_file = child / "state.json"
+            if not state_file.is_file():
+                continue
+            try:
+                record = json.loads(state_file.read_text())
+            except (OSError, ValueError):
+                continue
+            if not record.get("quota_exhausted"):
+                continue
+            reset = record.get("quota_reset_at")
+            if not isinstance(reset, str):
+                continue
+            try:
+                moment = datetime.datetime.fromisoformat(reset.replace("Z", "+00:00") if reset.endswith("Z") else reset)
+                if moment.tzinfo is None:
+                    moment = moment.replace(tzinfo=datetime.timezone.utc)
+            except ValueError:
+                continue
+            if moment.timestamp() > now and (found is None or moment.timestamp() > found[2]):
+                found = (record.get("engine", "unknown"), reset, moment.timestamp())
+        if found:
+            add("quota", False, False,
+                f"{found[0]} quota until {found[1]}; pre-approved fallback: Pi muse-spark-1.3-contributor-free")
+        else:
+            add("quota", True, False, "no exhausted quota")
+    except Exception as error:
+        add("quota", True, False, f"registry unreadable: {error}"[:200])
+    try:
+        registry = root()
+        lost = []
+        for child in registry.iterdir():
+            if not child.is_dir() or not re.fullmatch(r"[0-9a-f]{12}", child.name):
+                continue
+            try:
+                record = load(child)
+            except (OSError, ValueError, KeyError):
+                continue
+            if record.get("status") == "interrupted":
+                lost.append(record.get("id", child.name))
+        add("interrupted", not lost, False,
+            "no interrupted workers" if not lost else f"interrupted: {', '.join(sorted(lost))}")
+    except Exception as error:
+        add("interrupted", True, False, f"registry unreadable: {error}"[:200])
+    return checks
+
+
+def doctor(json_output=False):
+    checks = doctor_checks()
+    ok = all(item["ok"] for item in checks if item["required"])
+    if json_output:
+        print(json.dumps({"ok": ok, "checks": checks}, indent=2))
+    else:
+        for item in checks:
+            label = "ok" if item["ok"] else "FAIL" if item["required"] else "warn"
+            print(f"{label} {item['name']} {clean(item['detail'])}")
+    return 0 if ok else 1
 
 
 def tmux_view(arguments):
@@ -573,7 +901,9 @@ def parser():
         launch.add_argument("--workspace", required=True)
         launch.add_argument("--prompt-file", required=True)
         launch.add_argument("--label")
-        launch.add_argument("--engine", default=DEFAULT_ENGINE)
+        launch.add_argument("--engine", default=None)
+        launch.add_argument("--role", choices=sorted(ROLES))
+        launch.add_argument("--report", action="store_true", help="request a structured claive-report block")
         launch.add_argument("--reasoning-effort", help="engine-specific effort; defaults to xhigh (Muse) or max (Pi)")
         launch.add_argument("--max-model-steps", type=int, help="engine step cap, when supported")
         launch.add_argument("--read-only", action="store_true")
@@ -613,6 +943,13 @@ def parser():
     watch.add_argument("--no-color", action="store_true")
     watch.add_argument("--compact", action="store_true", help="at most five lines; one row per worker")
     commands.add_parser("status-line", help="one-line summary for tmux or shell status bars")
+    examined = commands.add_parser("doctor", help="read-only health check; never launches a model")
+    examined.add_argument("--json", action="store_true")
+    answer = commands.add_parser("answer", help="answer a reusable worker waiting for a parent decision")
+    answer.add_argument("id")
+    message = answer.add_mutually_exclusive_group(required=True)
+    message.add_argument("--message")
+    message.add_argument("--message-file")
     tmux = commands.add_parser("tmux", help="open Codex with a live worker pane and status bar")
     tmux.add_argument("codex_args", nargs=argparse.REMAINDER)
     return result
@@ -772,6 +1109,34 @@ def main(launcher=None):
             raise ValueError("no matching live supervisor; no signal sent")
         os.kill(pid, signal.SIGTERM)
         print(f"Cancellation requested for {args.id}. Check with claive wait {args.id}.")
+    elif args.action == "doctor":
+        return doctor(args.json)
+    elif args.action == "answer":
+        path = job_path(args.id)
+        state = load(path)
+        if (not state.get("reusable") or state["status"] not in ACTIVE
+                or (path / "close.request").exists() or not state.get("needs_parent")):
+            raise ValueError("worker is not waiting for a parent decision")
+        if args.message is not None:
+            decision = args.message
+        else:
+            prompt = Path(args.message_file)
+            if not prompt.is_absolute() or not prompt.is_file() or not prompt.stat().st_size:
+                raise ValueError("--message-file must be an existing nonempty absolute file")
+            decision = prompt.read_text()
+        question = state.get("needs_parent", {}).get("question", "")
+        answer_file = path / f"answer-{time.time_ns()}.md"
+        answer_file.write_text(f"Parent question was:\n{question}\n\nParent decision:\n{decision}\n\n"
+                               "Continue the assignment with this decision.\n")
+        policy = json.loads((path / "policy.json").read_text())
+        get_engine(state.get("engine", DEFAULT_ENGINE)).validate_turn(turn_request(
+            state, prompt_file=str(answer_file),
+            reasoning_effort=policy["reasoning_effort"], max_model_steps=policy["max_model_steps"],
+        ))
+        request = f"{time.time_ns():020}-{uuid.uuid4().hex}.json"
+        save(path / "requests" / request, dict(prompt_file=str(answer_file), label=None,
+                                               reasoning_effort=None, max_model_steps=None))
+        print(f"Answer queued for {args.id}")
     elif args.action == "tmux":
         return tmux_view(args.codex_args)
     return 0

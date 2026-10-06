@@ -10,6 +10,10 @@ from claivelib.engine import WorkerEngine
 from claivelib.state import launch_config, session_id
 
 
+def default_binary():
+    return os.environ.get("PI_WORKER_BINARY", str(Path.home() / ".local/bin/pi"))
+
+
 class PiEngine(WorkerEngine):
     name = "pi"
     default_reasoning_effort = "max"  # free models; Pi clamps to each model's highest level
@@ -71,7 +75,7 @@ class PiEngine(WorkerEngine):
         remembered = settings.get("defaultModel") if settings.get("defaultProvider") == "opencode2api" else None
         self._selected_model = options.get("model")
         return {
-            "binary": os.environ.get("PI_WORKER_BINARY", str(Path.home() / ".local/bin/pi")),
+            "binary": default_binary(),
             "provider": options.get("provider") or "opencode2api",
             "model": options.get("model") or remembered or "muse-spark-1.3-contributor-free",
             "read_only": bool(options.get("read_only")),

@@ -9,6 +9,8 @@ Muse Code is the default engine; Pi is available explicitly with `--engine pi` t
 
 The maintained source is `/home/hamza/repo/codex-muse-workers`. Edit its `bin/` scripts or `skills/subagent-routing/SKILL.md`, then run `install.sh` to refresh the installed copies. Its `reference/global-AGENTS.md` is a snapshot, not a file to install over current global instructions.
 
+For a task with an executable check, prefer the verifier-gated ladder in the `worker-orchestration` skill (`codex-orch`: Muse implements, a cross-family Pi critic reviews, and the arbiter accepts or reverts each round). This skill still governs the Codex launch mechanics. For the refine-vs-resample experiment itself, use `ttc-experiment`.
+
 ## Model and reasoning
 
 Use **only `muse-spark-1.3-contributor`** for Muse workers. The launcher pins this model rather than inheriting another default. Do not substitute a different Muse model/provider or route through agy/OpenCode's historical defaults without explicit fallback authorization below. Their relay copies in `reference/` are archival. Native host subagents require an explicit request.

@@ -86,6 +86,45 @@ Meta [prompt caching](https://dev.meta.ai/docs/prompt-caching) automatically reu
 
 `codex-workers usage JOB_ID [--json]` reads token counters from retained Muse exports. It counts model completions once and excludes duplicated attribution records. It reports usage for the entire retained session, including internal calls; positive cached tokens demonstrate a hit. Missing counters mean unknown. These cumulative accounting numbers are not current context size or an invoice; see [token usage](https://dev.meta.ai/docs/token-counting#usage). Session reuse preserves history, while actual cache benefit must be measured.
 
+## Verified orchestration (`codex-orch`)
+
+`codex-orch` is a deterministic arbiter that sits on top of the worker manager. It implements the depth-first escalation ladder from [Refining Over Resampling](docs/experiment/paper-notes.md) (arXiv 2608.05643), adapted to coding agents. Muse implements. A Pi critic from a different model family reviews the diff and the verifier output. The same Muse session then corrects the work. The verifier decides each round: a better or equal score is checkpointed as a commit on `orch/<run>/<lane>`, and a worse score is reverted. Only after a stall does arm D add one deliberately diverse second lane. The parent (Claude Code or Codex) asks `codex-orch next RUN` and performs exactly the one action it names. Models propose; deterministic code disposes.
+
+```bash
+codex-orch init --repo /abs/repo --task-file /abs/task.md --verify 'python3 -m pytest -q' --arm D
+codex-orch next RUN          # NEXT / Why / How
+codex-orch report RUN        # outcome, score trajectory, critics, tokens
+codex-orch compare --experiment NAME
+codex-orch arms
+```
+
+Two skills drive it, and both work with either host:
+
+- `skills/worker-orchestration`: everyday verified delegation and parallel fan-out.
+- `skills/ttc-experiment`: the controlled refine-vs-resample experiment (arms A, R, R', B, B0, D; repeats; gates).
+
+### Quick start from Claude Code or Codex
+
+After `./install.sh`, start a new session and ask, for example:
+
+```text
+Use the worker-orchestration skill. You have my permission to delegate to Muse/Pi workers.
+Repo: /abs/repo. Task: <goal>. Verifier: <command that fails now>. Arm D. Don't commit.
+```
+
+Where everything lives:
+
+| What | Source (this repo) | Installed |
+|---|---|---|
+| Arbiter CLI | `bin/codex-orch`, `bin/codex_workers/orchestration.py` | `~/.local/bin/codex-orch`, `~/.local/bin/codex_workers/` |
+| Worker manager CLI | `bin/codex-workers`, `bin/codex_workers/` | `~/.local/bin/codex-workers` |
+| Skills (both hosts) | `skills/worker-orchestration/`, `skills/ttc-experiment/` | `~/.claude/skills/…` and `~/.codex/skills/…` |
+| Claude delegation policy | `skills/claude-subagent-routing/` | `~/.claude/skills/subagent-routing/` |
+| Codex delegation policy | `skills/subagent-routing/` | `~/.codex/skills/subagent-routing/` |
+| Worker and run state | n/a | `~/.local/state/codex-workers/<worker-id>/`, `…/runs/<run-id>/` |
+
+The paper, design, plan, protocol, environment facts, and implementation mapping are in [`docs/experiment/`](docs/experiment/README.md). Run state lives under `${CODEX_WORKERS_DIR:-~/.local/state/codex-workers}/runs/<id>/`.
+
 ## Five-hour quota
 
 On an explicit Muse subscription-quota exhaustion, the manager records the failure and reported reset time and prints a notice to ask Hamza whether to wait or approve a specific available fallback subagent/model. The orchestrator stops sending work to that exhausted quota and continues independent authorized work while awaiting the choice. A generic 429 alone is not proof of the five-hour limit. Nothing in the manager switches providers or retries automatically. A confirmed fallback applies to the affected assignment and does not change Muse's defaults. OpenCode's historical relay remains unavailable until repaired and verified.
@@ -98,12 +137,18 @@ On an explicit Muse subscription-quota exhaustion, the manager records the failu
 | `bin/codex_workers/` | Generic worker core, compatibility layer, and engine adapters |
 | `bin/codex-subagent-worker` | Reusable worker launcher in a managed terminal |
 | `bin/codex-with-workers` | Codex with the tmux worker view |
+| `bin/codex-orch` | Launcher for the orchestration arbiter (`codex_workers/orchestration.py`) |
 | `skills/subagent-routing/SKILL.md` | Codex delegation and verification guidance |
+| `skills/worker-orchestration/SKILL.md` | Host-neutral (Claude Code or Codex) Muse + Pi verified orchestration |
+| `skills/ttc-experiment/SKILL.md` | Running the refine-vs-resample experiment |
+| `skills/claude-subagent-routing/SKILL.md` | Claude Code's delegation policy, installed as `~/.claude/skills/subagent-routing` |
+| `docs/experiment/` | Paper notes, design, plan, protocol, environment, implementation mapping |
 | `reference/global-AGENTS.md` | Snapshot of the configured global instructions |
 | `reference/agy-relay.sh` | Historical relay; not an active model route |
 | `reference/opencode-relay.sh` | Existing incompatible OpenCode relay, for reference |
 | `reference/prompt-caching.md` | Meta documentation links and observed CLI behavior |
 | `tests/test_workers.py` | Isolated behavioral checks |
+| `tests/test_orch.py` | Arbiter ladder, guards, and reporting checks |
 
 Requirements: Linux with Python 3. The default production engine requires Muse at `~/.local/bin/muse`; `MUSE_WORKER_BINARY` can select another absolute Muse executable. The combined terminal view also requires tmux and Codex on PATH. No third-party Python packages are required by the tools or their checks.
 
@@ -114,7 +159,7 @@ Edit this repository, then refresh the installed copies:
 ./install.sh
 ```
 
-Changed destination files are backed up under `~/.local/state/muse-subagents/backups`. Identical files are skipped. Symlink and incompatible destination types are rejected. The installer copies the three tools, the `codex_workers` package, and the routing skill; it does not overwrite global instructions or install the reference relays. Custom absolute destinations can be supplied through `MUSE_SUBAGENTS_BIN_DIR`, `CODEX_HOME`, and `XDG_STATE_HOME`.
+Changed destination files are backed up under `~/.local/state/muse-subagents/backups`. Identical files are skipped. Symlink and incompatible destination types are rejected. The installer copies the four tools, the `codex_workers` package, the routing skill (Codex only), and the `worker-orchestration` and `ttc-experiment` skills into both `${CODEX_HOME:-~/.codex}/skills/` and `${CLAUDE_HOME:-~/.claude}/skills/`. Claude Code's `subagent-routing` is replaced by `skills/claude-subagent-routing` (Muse and Pi through this tooling; Sonnet 5.5 only on request), with the previous copy backed up. The installer it does not overwrite global instructions or install the reference relays. Custom absolute destinations can be supplied through `MUSE_SUBAGENTS_BIN_DIR`, `CODEX_HOME`, `CLAUDE_HOME`, and `XDG_STATE_HOME`.
 
 Hamza's Muse settings (`~/.config/muse/settings.json`) also select `muse-spark-1.3-contributor` with `high` reasoning. The installer preserves those settings; the launcher pins its own model and effort independently.
 

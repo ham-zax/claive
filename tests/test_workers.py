@@ -625,8 +625,12 @@ class WorkerChecks(unittest.TestCase):
         codex_home.mkdir()
         global_file = codex_home / "AGENTS.md"
         global_file.write_text("Existing personal instructions.\n")
-        env = dict(self.env, MUSE_SUBAGENTS_BIN_DIR=str(bin_dir),
-                   CODEX_HOME=str(codex_home), XDG_STATE_HOME=str(state_home))
+        claude_home = self.path / "claude-home"
+        claude_routing = claude_home / "skills/subagent-routing/SKILL.md"
+        claude_routing.parent.mkdir(parents=True)
+        claude_routing.write_text("Claude's own routing skill.\n")
+        env = dict(self.env, MUSE_SUBAGENTS_BIN_DIR=str(bin_dir), CODEX_HOME=str(codex_home),
+                   CLAUDE_HOME=str(claude_home), XDG_STATE_HOME=str(state_home))
         install = str(REPO_ROOT / "install.sh")
         dry = subprocess.run([install, "--dry-run"], env=env, capture_output=True, text=True)
         self.assertEqual(dry.returncode, 0, dry.stderr)
@@ -660,6 +664,18 @@ class WorkerChecks(unittest.TestCase):
         self.assertEqual(launcher.returncode, 0, launcher.stderr)
         self.assertIn("--engine", launcher.stdout)
         self.assertEqual(global_file.read_text(), "Existing personal instructions.\n")
+        self.assertEqual(claude_routing.read_bytes(),
+                         (REPO_ROOT / "skills/claude-subagent-routing/SKILL.md").read_bytes())
+        saved = list((state_home / "muse-subagents/backups").glob("*/*subagent-routing.SKILL.md"))
+        self.assertEqual([path.read_text() for path in saved], ["Claude's own routing skill.\n"])
+        for home in (codex_home, claude_home):
+            for skill in ("worker-orchestration", "ttc-experiment"):
+                self.assertEqual((home / "skills" / skill / "SKILL.md").read_bytes(),
+                                 (REPO_ROOT / "skills" / skill / "SKILL.md").read_bytes())
+        arms = subprocess.run([str(bin_dir / "codex-orch"), "arms"], env=env, cwd=outside,
+                              capture_output=True, text=True, timeout=12)
+        self.assertEqual(arms.returncode, 0, arms.stderr)
+        self.assertIn("D", arms.stdout)
         again = subprocess.run([install], env=env, capture_output=True, text=True)
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assertEqual(len(list((state_home / "muse-subagents/backups").iterdir())), 1)
@@ -677,8 +693,8 @@ class WorkerChecks(unittest.TestCase):
         protected = self.path / "protected"
         protected.write_text("keep me")
         (bin_dir / "codex-workers").symlink_to(protected)
-        env = dict(self.env, MUSE_SUBAGENTS_BIN_DIR=str(bin_dir),
-                   CODEX_HOME=str(self.path / "codex-home"), XDG_STATE_HOME=str(self.path / "state-home"))
+        env = dict(self.env, MUSE_SUBAGENTS_BIN_DIR=str(bin_dir), CODEX_HOME=str(self.path / "codex-home"),
+                   CLAUDE_HOME=str(self.path / "claude-home"), XDG_STATE_HOME=str(self.path / "state-home"))
         result = subprocess.run([str(REPO_ROOT / "install.sh")], env=env, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(protected.read_text(), "keep me")

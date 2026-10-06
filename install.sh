@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# Install the worker tools, Python package, and skill, backing up changed destinations.
+# Install the worker tools, Python package, and skills, backing up changed destinations.
+# Claude Code gets its own subagent-routing variant (skills/claude-subagent-routing).
 set -euo pipefail
 
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 bin_dir=${MUSE_SUBAGENTS_BIN_DIR:-$HOME/.local/bin}
-skill_dir=${CODEX_HOME:-$HOME/.codex}/skills/subagent-routing
+codex_skills=${CODEX_HOME:-$HOME/.codex}/skills
+claude_skills=${CLAUDE_HOME:-$HOME/.claude}/skills
+skill_dir=$codex_skills/subagent-routing
 backup_base=${XDG_STATE_HOME:-$HOME/.local/state}/muse-subagents/backups
 package_source=$source_dir/bin/codex_workers
 package_target=$bin_dir/codex_workers
@@ -15,15 +18,27 @@ case ${1:-} in
   *) echo 'Usage: install.sh [--dry-run]' >&2; exit 2 ;;
 esac
 (( $# <= 1 )) || { echo 'Usage: install.sh [--dry-run]' >&2; exit 2; }
-for path in "$bin_dir" "$skill_dir" "$backup_base"; do
+for path in "$bin_dir" "$codex_skills" "$claude_skills" "$backup_base"; do
   [[ $path == /* ]] || { echo "Installation paths must be absolute: $path" >&2; exit 2; }
 done
 
 sources=("$source_dir/bin/codex-workers" "$source_dir/bin/codex-subagent-worker"
-         "$source_dir/bin/codex-with-workers" "$source_dir/skills/subagent-routing/SKILL.md")
+         "$source_dir/bin/codex-with-workers" "$source_dir/bin/codex-orch"
+         "$source_dir/skills/subagent-routing/SKILL.md")
 targets=("$bin_dir/codex-workers" "$bin_dir/codex-subagent-worker"
-         "$bin_dir/codex-with-workers" "$skill_dir/SKILL.md")
-modes=(755 755 755 644)
+         "$bin_dir/codex-with-workers" "$bin_dir/codex-orch" "$skill_dir/SKILL.md")
+modes=(755 755 755 755 644)
+# Host-neutral skills go to both Codex and Claude Code.
+for skill in worker-orchestration ttc-experiment; do
+  for skills_root in "$codex_skills" "$claude_skills"; do
+    sources+=("$source_dir/skills/$skill/SKILL.md")
+    targets+=("$skills_root/$skill/SKILL.md")
+    modes+=(644)
+  done
+done
+sources+=("$source_dir/skills/claude-subagent-routing/SKILL.md")
+targets+=("$claude_skills/subagent-routing/SKILL.md")
+modes+=(644)
 
 [[ -d $package_source ]] || { echo "Missing source package: $package_source" >&2; exit 1; }
 if [[ -L $package_target || ( -e $package_target && ! -d $package_target ) ]]; then
@@ -85,7 +100,10 @@ for index in "${!sources[@]}"; do
   fi
   if [[ -f $target ]]; then
     ensure_backup_dir
-    cp -p -- "$target" "$backup_dir/$(basename -- "$target")"
+    backup_name=$(basename -- "$target")
+    [[ $backup_name != SKILL.md ]] ||
+      backup_name=$(basename -- "$(dirname -- "$(dirname -- "$(dirname -- "$target")")")")-$(basename -- "$(dirname -- "$target")").SKILL.md
+    cp -p -- "$target" "$backup_dir/$backup_name"
   fi
   mkdir -p -- "$(dirname -- "$target")"
   install -m "${modes[index]}" -- "$source_file" "$target"

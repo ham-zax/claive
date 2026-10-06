@@ -1,0 +1,14 @@
+[
+  {
+    "id": "calc-mul",
+    "repo": "/home/USER/corpus/calc",
+    "base": "REPLACE_WITH_BASE_COMMIT",
+    "reference": "REPLACE_WITH_REFERENCE_COMMIT",
+    "task": "Fix add() and mul() in calc.py so test_calc.py passes. Do not change the tests.",
+    "verify": "python3 -m unittest -q",
+    "category": "bug-fix",
+    "difficulty": "easy",
+    "acceptance_dir": null,
+    "score_regex": null
+  }
+]

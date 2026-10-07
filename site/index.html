@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>claive: a referee for AI coding agents</title>
+<meta name="description" content="claive lets one AI hand a coding job to cheaper ones, has a different AI critique the result, and keeps each change only if your tests say it got better. Experimental, MIT licensed.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='2' y='1' width='5' height='14' fill='%231d6a42'/%3E%3Crect x='9' y='1' width='5' height='14' fill='%231b1814'/%3E%3C/svg%3E">
+<script>document.documentElement.classList.add("js");if(matchMedia("(prefers-reduced-motion: reduce)").matches)document.documentElement.classList.add("rm")</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400..600;1,6..72,400&display=swap">
+<style>
+:root{--paper:#f3eee3;--wash:#ebe4d3;--ink:#1b1814;--muted:#5b5445;--rule:#cdc4af;--pass:#1d6a42;--bad:#a8391b;
+--serif:"Newsreader",Charter,"Iowan Old Style",Georgia,serif;--mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+box-sizing:border-box;color-scheme:light dark;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root{--paper:#15130f;--wash:#1d1b16;--ink:#eee8da;--muted:#aba392;--rule:#3a362c;--pass:#78d3a0;--bad:#f0987a}}
+*,*::before,*::after{box-sizing:inherit}
+html{scroll-padding-top:env(safe-area-inset-top,0px);-webkit-text-size-adjust:100%}
+@media (prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 1.125rem/1.6 var(--serif);font-optical-sizing:auto}
+::selection{background:var(--ink);color:var(--paper)}
+a{color:inherit;text-underline-offset:.2em;text-decoration-thickness:1px}
+a:hover{text-decoration-thickness:2px}
+:focus-visible{outline:2px solid var(--ink);outline-offset:3px;border-radius:1px}
+.wrap{max-width:68rem;margin-inline:auto;padding-inline:max(16px,env(safe-area-inset-left,0px),env(safe-area-inset-right,0px))}
+p,li,dd{max-width:65ch;text-wrap:pretty}
+h1,h2,h3{font-weight:500;text-wrap:balance;margin:0}
+h1{font-size:clamp(2.6rem,7.4vw,5.2rem);line-height:1.02;letter-spacing:-.025em}
+h2{font-size:clamp(1.7rem,4vw,2.5rem);line-height:1.12;letter-spacing:-.015em;margin-bottom:1rem}
+code,pre,.mono{font-family:var(--mono);font-size:.86em}
+header{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;column-gap:1.5rem;padding-block:.3rem;border-bottom:1px solid var(--rule)}
+header .name{display:inline-flex;align-items:center;min-height:2.75rem;font:500 1.25rem var(--mono);text-decoration:none}
+header nav{display:flex;gap:1.4rem;font-size:.95rem}
+header nav a{display:inline-flex;align-items:center;min-height:2.75rem;white-space:nowrap}
+@media (max-width:36rem){header nav{flex:1 0 100%;justify-content:space-between;gap:0;border-top:1px solid var(--rule)}}
+section{padding-block:clamp(3rem,8vw,5.5rem) 0}
+.hero{display:grid;gap:2.5rem;padding-block:clamp(2.5rem,7vw,5rem) 0}
+@media (min-width:60rem){.hero{grid-template-columns:1.08fr .92fr;align-items:center;gap:3.5rem}}
+.lede{font-size:clamp(1.2rem,2.4vw,1.45rem);line-height:1.45;margin:1.4rem 0}
+.chip{display:inline-flex;align-items:center;gap:.55rem;font:500 .8rem var(--mono);padding:.3rem .7rem;border:1px solid var(--muted);color:var(--muted);margin:0}
+.chip::before{content:"";width:.5rem;height:.5rem;background:var(--bad)}
+.acts{display:flex;flex-wrap:wrap;gap:.8rem;margin-top:1.6rem}
+.btn{display:inline-flex;align-items:center;min-height:2.75rem;padding:.55rem 1.3rem;font:500 .95rem var(--mono);background:var(--ink);color:var(--paper);border:1.5px solid var(--ink);text-decoration:none}
+.btn.alt{background:none;color:var(--ink)}
+.btn:hover{background:var(--pass);border-color:var(--pass);color:var(--paper)}
+.record{margin:0;border-block:2px solid var(--ink);background:var(--wash);padding:.4rem clamp(.8rem,2vw,1.3rem) 1rem}
+.record ol{list-style:none;margin:0;padding:0}
+.record li{display:flex;flex-wrap:wrap;align-items:center;gap:.3rem 1rem;padding-block:.85rem;border-bottom:1px dotted var(--muted);max-width:none}
+.record li:last-child{border-bottom:0}
+.role{flex:0 0 5.2rem;font:500 .74rem var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.what{flex:1 1 13rem;font-size:1rem;line-height:1.4}
+.t{display:inline-flex;gap:3px;flex:none}
+.record figcaption{font-size:.88rem;line-height:1.45;color:var(--muted);margin-top:.5rem}
+.record figcaption .mono{display:block;margin-top:.5rem;font-size:.78rem}
+.rungs{list-style:none;padding:0;margin:1.8rem 0 0;border-top:1px solid var(--ink)}
+.rungs li{display:grid;gap:.3rem 1.5rem;padding-block:1.2rem;border-bottom:1px solid var(--rule);max-width:none}
+@media (min-width:44rem){.rungs li{grid-template-columns:10rem 1fr}}
+.rungs b{font:500 1.15rem var(--serif)}
+.rungs b span{display:block;font:500 .78rem var(--mono);color:var(--muted)}
+.rungs p{margin:0}
+.rungs .bad{color:var(--bad);font-weight:500}
+dl{margin:0}
+.terms{display:grid;gap:0 2.5rem;margin-top:2rem}
+@media (min-width:44rem){.terms{grid-template-columns:1fr 1fr}}
+.terms>div,.arms>div{padding-block:.8rem;border-top:1px solid var(--rule)}
+dt{font-weight:600}
+dd{margin:0;color:var(--muted)}
+.why{list-style:none;padding:0;margin:1.5rem 0 0;display:grid;gap:0 3rem}
+@media (min-width:44rem){.why{grid-template-columns:1fr 1fr}.why li:first-child{grid-column:1/-1}}
+.why li{padding-block:1rem;border-top:1px solid var(--rule);max-width:none}
+.why li:first-child{border-top:2px solid var(--ink);font-size:clamp(1.4rem,3vw,2rem);line-height:1.25;padding-block:1.4rem}
+.why strong{font-weight:600}
+.why li:first-child span{display:block;font-size:1.05rem;color:var(--muted);margin-top:.5rem;max-width:60ch}
+.q{font-size:clamp(1.25rem,2.6vw,1.65rem);line-height:1.35;font-style:italic;margin:0 0 1.5rem;padding:0;max-width:44ch}
+.arms{margin:1.5rem 0}
+.arms dt{display:inline-block;min-width:2.4rem;font:500 .95rem var(--mono)}
+.arms dd{display:inline}
+pre{background:var(--wash);border:1px solid var(--rule);padding:1rem;margin:1rem 0;overflow-x:auto;line-height:1.55;scrollbar-color:var(--muted) var(--wash);max-width:100%}
+.try h3{font-size:1.15rem;margin-top:1.8rem}
+.try p{margin:.5rem 0}
+.apart{color:var(--muted)}
+.gap{margin:0;padding:0;list-style:none}
+.gap li{padding-block:.5rem;border-top:1px solid var(--rule);max-width:none}
+footer{margin-top:clamp(3.5rem,9vw,6rem);padding-block:1.6rem calc(2rem + env(safe-area-inset-bottom,0px));border-top:2px solid var(--ink);display:flex;flex-wrap:wrap;gap:.4rem 1.5rem;justify-content:space-between;font-size:.95rem}
+footer p{margin:0;max-width:none}
+footer a{display:inline-block;padding-block:.4rem}
+/* ===== motion: shared test squares ===== */
+.sq{position:relative;display:block;width:var(--sw,.62rem);height:var(--sh,1.2rem);flex:none}
+.sq b{position:absolute;inset:0;display:block}
+.sq .ok{background:var(--pass);transform-origin:50% 100%}
+.sq .no{box-shadow:inset 0 0 0 var(--sb,1.5px) var(--bad);opacity:0}
+.sq.f .ok{opacity:0}
+.sq.f .no{opacity:1}
+.sq.dash .ok{opacity:0}
+.sq.dash .no{opacity:1;box-shadow:none;border:var(--sb,1.5px) dashed var(--muted)}
+.sq.gh{box-shadow:inset 0 0 0 var(--sb,1.5px) var(--rule)}
+.sq.gh .ok,.sq.gh .no{opacity:0}
+.strip{display:flex;gap:var(--sg,3px)}
+.strip.big{--sw:clamp(1.1rem,3.4vw,2rem);--sh:clamp(2.4rem,7vw,4.4rem);--sb:2px;--sg:clamp(4px,.8vw,8px)}
+.strip.mid{--sw:clamp(.7rem,2vw,1rem);--sh:clamp(1.5rem,4vw,2.1rem);--sb:1.5px;--sg:3px}
+html.js:not(.rm) .record li{opacity:0}
+
+/* ===== motion: the film ===== */
+.filmsec>p{margin-top:0}
+.film{margin:1.6rem 0 0}
+.film .screen,.film .ctrl,.film .cnav{display:none}
+html.js .film .screen{display:block}
+html.js .film .ctrl{display:flex}
+html.js .film .cnav{display:grid}
+.screen{position:relative;overflow:hidden;background:var(--wash);border-block:2px solid var(--ink);--pad:clamp(1rem,3vw,2.25rem)}
+.stage{display:grid;grid-template-rows:auto 1fr auto;aspect-ratio:16/9;min-width:0}
+@media (max-width:47.99rem){.stage{aspect-ratio:3/4}}
+.hud{display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;padding:var(--pad) var(--pad) 0;font:500 .72rem/1.3 var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
+.hud .chap,.hud .badge{display:grid}
+.hud .chap span,.hud .badge span{grid-area:1/1}
+.hud .badge{justify-items:end;text-align:right;max-width:58%}
+.hud .badge span{border:1px solid currentColor;padding:.2rem .5rem;color:var(--ink)}
+.hud .badge .ill{color:var(--bad)}
+.scenes{display:grid;position:relative;min-width:0}
+.sc{grid-area:1/1;display:grid;align-content:center;gap:clamp(1rem,2.4vw,1.8rem);padding:var(--pad);opacity:0;min-width:0}
+.ttl{font:500 clamp(1.25rem,3vw,1.9rem)/1.15 var(--serif);letter-spacing:-.01em}
+.k{font:500 .72rem/1.3 var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
+.capbar{display:grid;padding:.9rem var(--pad) calc(var(--pad)*.85);border-top:1px solid var(--rule)}
+.capbar p{grid-area:1/1;margin:0;max-width:62ch;font-size:clamp(1.05rem,2.3vw,1.5rem);line-height:1.32;opacity:0}
+
+/* scene 1: the problem */
+.s1{grid-template-columns:1fr}
+@media (min-width:48rem){.s1{grid-template-columns:1fr 1fr;align-items:center;column-gap:clamp(2rem,6vw,5rem)}}
+.flow{display:grid;justify-items:start}
+.node{border:1.5px solid var(--ink);background:var(--paper);padding:.7rem 1rem;min-width:min(100%,19rem);display:grid;gap:.15rem}
+.node .v{font-size:clamp(1rem,2vw,1.25rem);line-height:1.3}
+.ar{display:block;position:relative;width:1.5px;height:1.9rem;margin-left:1.4rem}
+.ar .ln{position:absolute;left:0;right:0;top:0;bottom:.35rem;background:var(--ink);transform-origin:50% 0}
+.ar .hd{position:absolute;left:-.28rem;bottom:.05rem;width:.62rem;height:.62rem;border-right:1.5px solid var(--ink);border-bottom:1.5px solid var(--ink);rotate:45deg}
+.unk{display:grid;gap:1rem;justify-items:start}
+.unk .big{margin:0;font:500 clamp(1.5rem,3.6vw,2.4rem)/1.12 var(--serif);letter-spacing:-.01em}
+
+/* scene 2: the cast */
+.cast{list-style:none;margin:0;padding:0;display:grid}
+.cast li{position:relative;display:grid;grid-template-columns:6rem 1fr;gap:.2rem 1.2rem;align-items:baseline;padding-block:clamp(.55rem,1.4vw,.95rem);border-top:1px solid var(--rule);max-width:none}
+.cast .ln{position:absolute;left:0;right:0;top:-1px;height:2px;background:var(--ink);transform-origin:0 50%}
+.cast .r{font:500 .78rem var(--mono);letter-spacing:.06em;text-transform:uppercase}
+.cast .d{font-size:clamp(1rem,2vw,1.3rem);line-height:1.35}
+@media (max-width:30rem){.cast li{grid-template-columns:1fr}}
+
+/* scene 3: a real run */
+.s3{grid-template-columns:1fr}
+@media (min-width:48rem){.s3{grid-template-columns:1.15fr .85fr;column-gap:clamp(2rem,5vw,4rem);align-items:center}}
+.s3 .l{display:grid;gap:1rem;align-content:center;min-width:0}
+.rail{display:grid;grid-template-columns:repeat(5,1fr);gap:.4rem;list-style:none;margin:0;padding:0}
+.rail li{position:relative;max-width:none;font:500 clamp(.62rem,1.7vw,.74rem) var(--mono);letter-spacing:.05em;text-transform:uppercase;padding-bottom:.45rem;border-bottom:3px solid var(--rule)}
+.rail .bar{position:absolute;left:0;right:0;bottom:-3px;height:3px;background:var(--ink);transform-origin:0 50%}
+.steps{display:grid}
+.step{grid-area:1/1;display:grid;gap:.4rem;align-content:start}
+.step p{margin:0;font-size:clamp(1.15rem,2.6vw,1.65rem);line-height:1.28}
+.tape{display:grid;gap:.35rem;border:1px solid var(--ink);background:var(--paper);padding:.7rem .9rem;font:400 clamp(.72rem,1.8vw,.84rem)/1.55 var(--mono)}
+.tape .th{color:var(--muted)}
+.tape .tc{display:grid}
+.tape .te{grid-area:1/1;display:grid;min-width:0;overflow-wrap:anywhere}
+.tape .te b{font-weight:500}
+.tape .te span{color:var(--muted)}
+.score{display:grid;gap:.9rem;justify-items:start;align-content:center}
+.score .strip{--sw:clamp(1.1rem,3.6vw,2.1rem);--sh:clamp(2.6rem,8vw,4.8rem);--sb:2.5px;--sg:clamp(4px,.7vw,7px)}
+.cnt{display:flex;flex-wrap:wrap;align-items:center;gap:.8rem 1.4rem}
+.count{display:grid;font:500 clamp(2.2rem,6vw,4rem)/1 var(--serif);font-variant-numeric:tabular-nums}
+.count span{grid-area:1/1;white-space:nowrap}
+.stamp{display:inline-block;border:3px solid var(--pass);color:var(--pass);font:500 clamp(.9rem,2vw,1.15rem) var(--mono);letter-spacing:.14em;text-transform:uppercase;padding:.25rem .7rem;rotate:-4deg}
+.verdict{display:grid;font:500 .85rem var(--mono)}
+.verdict span{grid-area:1/1}
+.verdict .bad{color:var(--bad)}
+.verdict .good{color:var(--pass)}
+.score .fine,.s5 .fine{margin:0;font:400 .8rem/1.5 var(--mono);color:var(--muted)}
+
+/* scene 4: a fix backfires */
+.bf{display:grid;grid-template-columns:1fr 1fr;gap:1rem clamp(.8rem,3vw,1.6rem);align-items:start}
+.cp{position:relative;display:grid;gap:.55rem;align-content:start;border:1.5px solid var(--ink);background:var(--paper);padding:.8rem;min-width:0}
+.cp .strip{--sw:clamp(.7rem,2.2vw,1rem);--sh:clamp(1.5rem,4vw,2.1rem);--sb:1.5px;--sg:3px}
+.cp .sts{display:grid;font:500 .78rem/1.3 var(--mono)}
+.cp .sts span{grid-area:1/1}
+.cp .bad{color:var(--bad)}
+.head{position:absolute;top:-.6rem;right:.6rem;font:500 .65rem var(--mono);letter-spacing:.08em;background:var(--ink);color:var(--paper);padding:.1rem .4rem}
+.col2{display:grid;gap:1rem;position:relative}
+.col2 .cp{z-index:1}
+.shelf{display:grid;align-content:end;gap:.3rem;min-height:8rem;border:1.5px dashed var(--muted);padding:.8rem}
+.shelf code{font-size:.68rem;overflow-wrap:anywhere;line-height:1.4}
+.s4 .tape{max-width:44rem}
+
+/* scene 5: a fix stalls */
+.lanes{display:grid;gap:1rem}
+.lane{display:flex;flex-wrap:wrap;align-items:center;gap:.8rem 1rem}
+.ll{flex:0 0 4.4rem;font:500 .78rem var(--mono);letter-spacing:.06em;text-transform:uppercase}
+.lane .cp{flex:1 1 9rem;max-width:13rem}
+.tag{display:inline-block;font:500 .82rem var(--mono);letter-spacing:.1em;text-transform:uppercase;padding:.25rem .65rem;border:2px solid currentColor}
+.tag.stalled{color:var(--bad)}
+.tag.win{color:var(--pass)}
+.ring{position:absolute;inset:-5px;border:2.5px solid var(--pass);pointer-events:none}
+
+/* scene 6: the point */
+.s6{justify-items:center;text-align:center}
+.s6 .end{margin:0;font:500 clamp(2rem,6.4vw,4.2rem)/1.04 var(--serif);letter-spacing:-.025em;text-wrap:balance}
+.s6 .fine{margin:0;font:400 .85rem var(--mono);color:var(--muted)}
+
+/* poster, controls, chapters, script */
+.poster{position:absolute;inset:0;z-index:2;display:grid;place-content:center;justify-items:center;gap:1.2rem;border:0;background:var(--wash);color:var(--ink);cursor:pointer;font:inherit;padding:1rem;transition:opacity .6s,visibility .6s}
+.poster.gone{opacity:0;visibility:hidden;pointer-events:none}
+.ptitle{font:500 clamp(1.6rem,5vw,3rem)/1.05 var(--serif);letter-spacing:-.02em;text-wrap:balance;text-align:center}
+.pplay{display:inline-flex;align-items:center;gap:.7rem;min-height:2.75rem;padding:.55rem 1.3rem;background:var(--ink);color:var(--paper);font:500 .95rem var(--mono)}
+.poster:hover .pplay{background:var(--pass)}
+.pplay .tri{width:0;height:0;border-style:solid;border-width:.45rem 0 .45rem .75rem;border-color:transparent transparent transparent currentColor}
+.ctrl{align-items:center;gap:.4rem .9rem;border-bottom:1px solid var(--rule)}
+.pp{width:2.75rem;height:2.75rem;flex:none;background:var(--ink);color:var(--paper);border:0;cursor:pointer;display:grid;place-items:center}
+.pp:hover{background:var(--pass)}
+.pp .ic{width:0;height:0;border-style:solid;border-width:.5rem 0 .5rem .85rem;border-color:transparent transparent transparent currentColor}
+.pp[data-s=playing] .ic{width:.8rem;height:.95rem;border:0;background:linear-gradient(90deg,currentColor 0 36%,transparent 36% 64%,currentColor 64% 100%)}
+.scrub{flex:1;min-width:0;height:2.75rem;margin:0;background:transparent;cursor:pointer;-webkit-appearance:none;appearance:none}
+.scrub::-webkit-slider-runnable-track{height:3px;background:linear-gradient(to right,var(--ink) var(--pg,0%),var(--rule) var(--pg,0%))}
+.scrub::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;margin-top:-5.5px;background:var(--ink);border:0;border-radius:0}
+.scrub::-moz-range-track{height:3px;background:var(--rule)}
+.scrub::-moz-range-progress{height:3px;background:var(--ink)}
+.scrub::-moz-range-thumb{width:14px;height:14px;background:var(--ink);border:0;border-radius:0}
+.tm{flex:none;min-width:8.4ch;text-align:right;font:500 .8rem var(--mono);color:var(--muted);font-variant-numeric:tabular-nums}
+.cnav{grid-template-columns:repeat(3,1fr)}
+@media (min-width:44rem){.cnav{grid-template-columns:repeat(6,1fr)}}
+.cnav button{display:flex;align-items:center;gap:.5rem;min-height:2.75rem;padding:.3rem .5rem;background:none;border:0;border-bottom:1px solid var(--rule);font:500 .78rem var(--mono);color:var(--muted);text-align:left;cursor:pointer}
+.cnav button:hover{color:var(--ink)}
+.cnav button[aria-current=true]{color:var(--ink);box-shadow:inset 0 -3px 0 var(--ink)}
+.rmnote{margin:.6rem 0 0;font:400 .85rem/1.5 var(--mono);color:var(--muted)}
+.script{margin-top:1.2rem}
+.script summary{cursor:pointer;display:inline-flex;align-items:center;min-height:2.75rem;font:500 .9rem var(--mono)}
+.script h3{font-size:1.05rem;margin:1.2rem 0 .3rem}
+.script ol{margin:.2rem 0 .5rem;padding-left:1.3rem}
+.script li{max-width:62ch}
+.script .onscreen{color:var(--muted);font-size:.95rem;margin:.3rem 0 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <a class="name" href="#top">claive</a>
+  <nav aria-label="Primary"><a href="#how">How it works</a><a href="#experiment">The experiment</a><a href="https://github.com/ham-zax/claive">GitHub</a></nav>
+</header>
+<main id="top">
+<div class="hero">
+  <div>
+    <h1>A referee for AI coding agents.</h1>
+    <p class="lede">claive lets one AI hand a coding job to cheaper ones, has a different AI critique the result, and keeps each change only if your tests say it got better.</p>
+    <p class="chip">Experimental. No results yet.</p>
+    <div class="acts"><a class="btn" href="#watch">Watch it work</a><a class="btn alt" href="#how">How it works</a><a class="btn alt" href="#try">Try it</a></div>
+  </div>
+  <figure class="record">
+    <ol>
+      <li><span class="role">Worker</span><span class="what">Writes the code. The task left out one requirement, on purpose.</span><span class="t" role="img" aria-label="6 of 7 tests pass"><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq f"><b class="ok"></b><b class="no"></b></span></span></li>
+      <li><span class="role">Critic</span><span class="what">A different model family reads the failing output and names the exact defect.</span></li>
+      <li><span class="role">Worker</span><span class="what">The same session fixes it.</span></li>
+      <li><span class="role">Tests</span><span class="what"><strong>7 of 7 pass.</strong> The change is kept.</span><span class="t" role="img" aria-label="7 of 7 tests pass"><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span></span></li>
+    </ol>
+    <figcaption>A real run from the repo's shakedown log. One small task, run once. It checks the mechanics; it is not evidence that claive works.<span class="mono">run bd886bb32632 · 245 s · 668k input tokens, 544k cached</span></figcaption>
+  </figure>
+</div>
+
+<section id="watch" class="filmsec">
+  <h2>Watch it work</h2>
+  <p>A short film with captions and no sound. It follows a real run from the repo, then shows what the arbiter does when a fix makes things worse, or stalls. Pause it, or jump to any chapter.</p>
+  <figure class="film" id="film" data-total="96" aria-label="Film: one claive run, start to finish">
+    <div class="screen">
+      <div class="stage" aria-hidden="true">
+        <div class="hud"><div class="chap"></div><div class="badge"><span class="real">Real run · bd886bb32632</span><span class="ill">Illustration · not a recorded run</span></div></div>
+        <div class="scenes">
+
+          <div class="sc s1">
+            <div class="flow">
+              <div class="node"><span class="k">The job</span><span class="v">Write <code>parse_duration</code> and <code>format_duration</code></span></div>
+              <span class="ar"><span class="ln"></span><span class="hd"></span></span>
+              <div class="node"><span class="k">One AI agent</span><span class="v">Gets a single attempt</span></div>
+              <span class="ar"><span class="ln"></span><span class="hd"></span></span>
+              <div class="node"><span class="k">The result</span><span class="v">Code, taken as it comes</span></div>
+            </div>
+            <div class="unk">
+              <div class="strip big" data-strip="ddddddd"></div>
+              <p class="big">Did it work?<br>Nobody checked.</p>
+            </div>
+          </div>
+
+          <div class="sc s2">
+            <h3 class="ttl">Five roles, one job each</h3>
+            <ul class="cast">
+              <li><span class="ln"></span><span class="r">Parent</span><span class="d">The agent you talk to: Claude Code, Codex, or a script. It hands out the jobs.</span></li>
+              <li><span class="ln"></span><span class="r">Worker</span><span class="d">A cheaper agent that does the coding.</span></li>
+              <li><span class="ln"></span><span class="r">Critic</span><span class="d">A second worker from a different model family. It names defects. It cannot edit.</span></li>
+              <li><span class="ln"></span><span class="r">Verifier</span><span class="d">Your test command. Its score is the only thing that counts.</span></li>
+              <li><span class="ln"></span><span class="r">Arbiter</span><span class="d">Plain code, not a model. It names one legal next step at a time.</span></li>
+            </ul>
+          </div>
+
+          <div class="sc s3">
+            <div class="l">
+              <h3 class="ttl">One real run</h3>
+              <ol class="rail"><li><span class="bar"></span>Write</li><li><span class="bar"></span>Test</li><li><span class="bar"></span>Critique</li><li><span class="bar"></span>Fix</li><li><span class="bar"></span>Retest</li></ol>
+              <div class="steps">
+                <div class="step"><span class="k">Worker</span><p>Writes the code. The task left out one requirement on purpose: a <code>sep</code> option for <code>format_duration</code>, checked by a held-out test.</p></div>
+                <div class="step"><span class="k">Tests</span><p>Your test command runs. <strong>6 of 7</strong> pass.</p></div>
+                <div class="step"><span class="k">Critic</span><p>A different model family reads the failing output and names the exact defect.</p></div>
+                <div class="step"><span class="k">Worker</span><p>The same session applies the fix, with its context intact.</p></div>
+                <div class="step"><span class="k">Tests</span><p><strong>7 of 7</strong> pass. The run ends: verified.</p></div>
+              </div>
+              <div class="tape">
+                <span class="th">$ claive-orch next RUN</span>
+                <div class="tc">
+                  <div class="te"><b>NEXT: implement lane a</b><span>Why:  lane has no implementer yet</span></div>
+                  <div class="te"><b>NEXT: verify lane a</b><span>Why:  implementer registered; verify after its turn completes</span></div>
+                  <div class="te"><b>NEXT: critique lane a round 1</b><span>Why:  verification failed; ask a cross-family critic for defects</span></div>
+                  <div class="te"><b>NEXT: correct lane a round 1</b><span>Why:  critic named concrete defects; same session corrects them</span></div>
+                  <div class="te"><b>NEXT: finish lane a -&gt; outcome verified</b><span>Why:  lane a: verifier passed; highest verification</span></div>
+                </div>
+              </div>
+            </div>
+            <div class="score">
+              <div class="strip" data-strip="ggggggg"></div>
+              <div class="cnt">
+                <span class="count"><span data-c="6">6 of 7</span><span data-c="7">7 of 7</span></span>
+                <span class="stamp">Verified</span>
+              </div>
+              <div class="verdict"><span class="bad" data-v="no">Not passing yet</span><span class="good" data-v="yes">Passing</span></div>
+              <p class="fine">245 s · 668k input tokens (544k cached) · one task, run once</p>
+            </div>
+          </div>
+
+          <div class="sc s4">
+            <h3 class="ttl">When a fix makes things worse</h3>
+            <div class="bf">
+              <div class="cp best"><span class="head">HEAD</span><span class="k">Best so far</span><div class="strip" data-strip="oooooff"></div><span class="sts"><span>Kept as the checkpoint</span></span></div>
+              <div class="col2">
+                <div class="cp att"><span class="head">HEAD</span><span class="k">The fix attempt</span><div class="strip" data-strip="oooooff"></div><span class="sts"><span class="a1">The fix is applied</span><span class="a2 bad">Worse than the best</span></span></div>
+                <div class="shelf"><span class="k">On the shelf</span><code>refs/claive-orch/&lt;run&gt;/a/rejected-r1</code></div>
+              </div>
+            </div>
+            <div class="tape">
+              <div class="tc">
+                <div class="te l1"><b>Lane a round 1: worse than the best checkpoint.</b></div>
+              </div>
+              <span class="l2">Reverted to the best commit. The attempt is kept on the shelf.</span>
+            </div>
+          </div>
+
+          <div class="sc s5">
+            <h3 class="ttl">When fixing stalls</h3>
+            <div class="lanes">
+              <div class="lane la">
+                <span class="ll">Lane a</span>
+                <div class="cp r1"><span class="k">Round 1</span><div class="strip" data-strip="oooooff"></div><span class="sts"><span>Same score</span></span></div>
+                <div class="cp r2"><span class="k">Round 2</span><div class="strip" data-strip="oooooff"></div><span class="sts"><span>Same score</span></span></div>
+                <span class="tag stalled">Stalled</span>
+              </div>
+              <div class="lane lb">
+                <span class="ll">Lane b</span>
+                <div class="cp rb"><span class="ring"></span><span class="k">A different approach</span><div class="strip" data-strip="ooooooo"></div><span class="sts"><span>Separate git worktree</span></span></div>
+                <span class="tag win">The tests pick lane b</span>
+              </div>
+            </div>
+            <p class="fine">Breadth runs only after refining stalls. In the experiment this is arm D.</p>
+          </div>
+
+          <div class="sc s6">
+            <div class="strip big" data-strip="ooooooo"></div>
+            <p class="end">Your tests are the referee.</p>
+            <p class="chip">Experimental. No results yet.</p>
+            <p class="fine">github.com/ham-zax/claive · MIT licensed</p>
+          </div>
+
+        </div>
+        <div class="capbar"></div>
+      </div>
+      <button class="poster" type="button" aria-label="Play the film">
+        <span class="strip big" data-strip="oooooof"></span>
+        <span class="ptitle">One run, start to finish</span>
+        <span class="pplay"><span class="tri"></span>Play <span data-dur>1:36</span></span>
+      </button>
+    </div>
+    <div class="ctrl">
+      <button class="pp" type="button" data-s="paused" aria-label="Play"><span class="ic"></span></button>
+      <input class="scrub" type="range" min="0" max="96" step="0.05" value="0" aria-label="Film position">
+      <span class="tm" aria-hidden="true"><span data-now>0:00</span> / <span data-tot>1:36</span></span>
+    </div>
+    <nav class="cnav" aria-label="Film chapters"></nav>
+    <p class="rmnote" hidden>Reduced motion is on, so the film will not start by itself and uses fades only.</p>
+    <details class="script" open>
+      <summary>Read the script</summary>
+
+      <section data-ch="1" data-title="The problem" data-short="Problem" data-s="0">
+        <h3>1. The problem</h3>
+        <ol>
+          <li data-s="0.8" data-e="5.0">An AI agent normally gets one attempt at a job.</li>
+          <li data-s="5.4" data-e="9.0">If the job is hard, that one try can go wrong, and nobody checks it.</li>
+        </ol>
+        <p class="onscreen">On screen: a job goes to one AI agent, which hands back code. Beside it, seven dashed squares and the words: did it work? Nobody checked.</p>
+      </section>
+
+      <section data-ch="2" data-title="The cast" data-short="Cast" data-s="9.2">
+        <h3>2. The cast</h3>
+        <ol>
+          <li data-s="9.8" data-e="15.2">claive puts a small cast around that single attempt. Each role has one job.</li>
+          <li data-s="15.6" data-e="22.0">The critic comes from a different model family, so it does not repeat the worker's blind spots.</li>
+          <li data-s="22.2" data-e="24.6">The tests, not any AI, have the final say.</li>
+        </ol>
+        <p class="onscreen">On screen: five roles, one line each: parent, worker, critic, verifier and arbiter.</p>
+      </section>
+
+      <section data-ch="3" data-title="A real run" data-short="Real run" data-s="25.2">
+        <h3>3. A real run</h3>
+        <ol>
+          <li data-s="25.8" data-e="30.8">This is a real run from the repo's shakedown log. A worker writes the code first.</li>
+          <li data-s="32.0" data-e="36.4">Then the tests score it. Six of seven pass, so the work is not done.</li>
+          <li data-s="36.8" data-e="41.4">A critic from a different model family reads the failing output and names the exact defect.</li>
+          <li data-s="41.8" data-e="45.3">The same worker session applies the fix.</li>
+          <li data-s="46.0" data-e="50.2">The tests run again: seven of seven. The run ends, verified.</li>
+          <li data-s="50.6" data-e="54.8">One small task, run once. It checks the mechanics. It is not evidence.</li>
+        </ol>
+        <p class="onscreen">On screen: five steps (write, test, critique, fix, retest); seven test squares going from six green and one red outline to seven green; and the arbiter's own output for each step, for example “NEXT: critique lane a round 1 / Why: verification failed; ask a cross-family critic for defects”. A stamp reads “Verified”. Run bd886bb32632: 245 seconds, 668k input tokens (544k cached).</p>
+      </section>
+
+      <section data-ch="4" data-title="A fix backfires" data-short="Backfire" data-s="55.2">
+        <h3>4. A fix backfires (illustration)</h3>
+        <ol>
+          <li data-s="56.4" data-e="61.6">Sometimes a fix makes things worse. This is an illustration of the rule, not a recorded run.</li>
+          <li data-s="62.0" data-e="67.9">The score drops, so the arbiter reverts the change with git. The rejected attempt stays on a shelf to inspect.</li>
+        </ol>
+        <p class="onscreen">On screen, marked as an illustration: a best-so-far checkpoint; a fix attempt that scores worse; the attempt moving onto a shelf labeled with its git ref; and the HEAD marker returning to the best checkpoint.</p>
+      </section>
+
+      <section data-ch="5" data-title="A fix stalls" data-short="Stall" data-s="68.2">
+        <h3>5. A fix stalls (illustration)</h3>
+        <ol>
+          <li data-s="69.2" data-e="75.6">Two rounds in a row with no improvement, and the lane has stalled. A reverted round counts as no progress too.</li>
+          <li data-s="76.4" data-e="82.4">Only then does claive try one deliberately different second attempt, in its own git worktree. The tests pick the winner.</li>
+          <li data-s="82.8" data-e="87.3">If neither passes, the run is reported as stalled or unresolved, never as a success.</li>
+        </ol>
+        <p class="onscreen">On screen, marked as an illustration: lane a with two rounds at the same score, tagged stalled; lane b, a different approach in a separate worktree, with all seven squares green; and the tests picking lane b.</p>
+      </section>
+
+      <section data-ch="6" data-title="The point" data-short="Point" data-s="87.8">
+        <h3>6. The point</h3>
+        <ol>
+          <li data-s="88.6" data-e="92.3">Models propose. Plain code and your tests decide.</li>
+          <li data-s="92.7" data-e="95.8">claive is an experiment, and it has no results yet.</li>
+        </ol>
+        <p class="onscreen">On screen: seven green squares, the line “Your tests are the referee.”, and the tag “Experimental. No results yet.”</p>
+      </section>
+    </details>
+  </figure>
+</section>
+
+<section>
+  <h2>One shot is a bad deal either way</h2>
+  <p>An agent normally gets a single attempt. Easy work is over-served with expensive reasoning. Hard work gets one try that can lock in a bad approach, with nobody checking it.</p>
+  <p>claive adds the checking, and spends more effort only when the tests show it is needed.</p>
+</section>
+
+<section id="how">
+  <h2>How it works</h2>
+  <p>Work climbs a ladder, and stops as soon as your tests pass.</p>
+  <ol class="rungs">
+    <li><b>Direct<span>L0</span></b><p>One worker tries the job and your test command runs. If it passes, that is the end.</p></li>
+    <li><b>Refine<span>L1</span></b><p>If it fails, a critic names concrete defects and the same worker session fixes them. Tests run again. A better or equal score is kept as a commit. <span class="bad">A worse score is reverted with git</span>, and the rejected attempt stays under a ref so you can inspect it. Two rounds by default, three at most.</p></li>
+    <li><b>Breadth<span>L2</span></b><p>Only if refining stalls, meaning two rounds without improvement, one deliberately different second attempt runs in a separate git worktree. The tests pick the winner. A run that never passes is reported as stalled or unresolved, never as success.</p></li>
+  </ol>
+  <dl class="terms">
+    <div><dt>Parent</dt><dd>The agent you talk to: Claude Code, Codex, a Pi agent, or a shell script. It hands out the jobs.</dd></div>
+    <div><dt>Worker</dt><dd>A cheaper agent that does the coding.</dd></div>
+    <div><dt>Critic</dt><dd>A second worker, from a different model family. It reads the result and names defects. It cannot edit.</dd></div>
+    <div><dt>Verifier</dt><dd>Your test command. Its score is the only thing that counts.</dd></div>
+    <div><dt>Arbiter</dt><dd><code>claive-orch</code>. Plain code, not a model. It names one legal next step at a time and refuses commands out of sequence.</dd></div>
+  </dl>
+</section>
+
+<section>
+  <h2>Why it's different</h2>
+  <ul class="why">
+    <li><strong>Your tests are the referee, not another AI's opinion.</strong><span>The critic proposes. Only the test score decides whether a change is kept.</span></li>
+    <li><strong>Fix before re-roll.</strong> Refine an attempt before paying for a second one.</li>
+    <li><strong>A different AI family critiques.</strong> The arbiter refuses a same-family critic unless you override it, and the override is recorded.</li>
+    <li><strong>Code runs the process.</strong> One legal next step at a time, with regressions reverted by git.</li>
+    <li><strong>Any agent that can run a shell command can drive it.</strong> It is a plain CLI with exit codes and file state.</li>
+    <li><strong>It measures itself.</strong> Compute-matched baselines, pass bars fixed before data, and a null result counts as an answer.</li>
+  </ul>
+  <p class="apart">Also in the repo: an unattended goal queue (<code>claive goal</code>, <code>claive serve</code>), and <code>stats</code> and <code>pick</code>, which choose a critic from past results.</p>
+</section>
+
+<section>
+  <h2>What it's built on</h2>
+  <p>The idea comes from <em>Refining Over Resampling</em> (Bilal et al., arXiv 2608.05643): sampling more answers hits diminishing returns, so refine one first. The paper studies math reasoning. claive adapts the idea to coding agents, which the paper did not test.</p>
+  <dl class="terms">
+    <div><dt>Foreman</dt><dd>A coding agent works while a watcher decides whether to step in, under deterministic rules.</dd></div>
+    <div><dt>Claudexor</dt><dd>Isolated best-of-N workspaces, cross-family reviewers, arbitration and bounded repair.</dd></div>
+    <div><dt>JevRouter</dt><dd>Treats models, tools and agents as options, while plain code owns what is allowed.</dd></div>
+    <div><dt>JevLoop</dt><dd>One authoritative event history, with every other view derived from it.</dd></div>
+    <div><dt>pi-subagents</dt><dd>Background runs and waiting, the pattern behind claive's async workers.</dd></div>
+  </dl>
+  <p class="apart">Ideas, not code. The repo calls these references, not dependencies.</p>
+</section>
+
+<section id="experiment">
+  <h2>The experiment</h2>
+  <p class="q">For frontier coding agents, does verifier-gated refinement, with selective breadth only when refinement stalls, beat a single run and compute-matched resampling?</p>
+  <dl class="arms">
+    <div><dt>A</dt><dd>One try.</dd></div>
+    <div><dt>R</dt><dd>Two identical tries; the tests pick.</dd></div>
+    <div><dt>R′</dt><dd>Two different setups; the tests pick.</dd></div>
+    <div><dt>B</dt><dd>Fix loop with a critic.</dd></div>
+    <div><dt>B0</dt><dd>Fix loop without a critic, from test output alone.</dd></div>
+    <div><dt>D</dt><dd>Fix loop, then a different second try only if stuck.</dd></div>
+  </dl>
+  <p>Each decision has a pass bar, written down before the first data run, and a null result is an acceptable outcome. The bars are still being tuned, so they are not published here yet.</p>
+  <p><strong>Status.</strong> A small set of tasks, built from real fix commits of the author's own project. The first batch has not run. The only run so far is the shakedown above. A set this small supports exploratory conclusions only. Compute is measured in tokens and wall-clock time, not money.</p>
+</section>
+
+<section>
+  <h2>Cheaper agents, same recipe</h2>
+  <p><em>Give a cheap agent the recipe and a failing test. The loop does the checking.</em> That is the bet the experiment tests. It is not a result.</p>
+  <p>What the repo supports: critics and second attempts run on free-tier and flash-class models through Pi. The <code>stats</code> and <code>pick</code> commands were built by a worker running through claive's own ladder. What it does not claim: that a cheap agent beats a frontier one, any cost savings, or local models.</p>
+</section>
+
+<section id="try" class="try">
+  <h2>Try it</h2>
+  <p><strong>You need</strong> Linux and Python 3 (standard library only). The default engine needs the Muse binary. The optional worker pane also needs tmux and Codex.</p>
+  <p><strong>New to this?</strong> All you need is a repo and one command that currently fails, such as a test. That command is your verifier.</p>
+  <h3>Install</h3>
+  <pre tabindex="0"><code>git clone https://github.com/ham-zax/claive.git &amp;&amp; cd claive
+./install.sh --dry-run   # lists what would be copied; changes nothing
+./install.sh             # installs the tools and skills for Claude Code and Codex</code></pre>
+  <h3>Ask your agent</h3>
+  <p>Start a new Claude Code or Codex session and say:</p>
+  <pre tabindex="0"><code>Use the worker-orchestration skill. You have my permission to delegate to Muse/Pi workers.
+Repo: /abs/repo. Task: &lt;goal&gt;. Verifier: &lt;command that fails now&gt;. Arm D. Don't commit.</code></pre>
+  <h3>Or drive the arbiter yourself</h3>
+  <pre tabindex="0"><code>claive-orch init --repo /abs/repo --task-file /abs/task.md --verify 'python3 -m pytest -q' --arm D
+claive-orch next RUN       # prints NEXT, Why and How: do exactly that one action
+claive-orch report RUN     # outcome, score trajectory, critics, tokens
+claive-orch integrate RUN  # apply the winner and re-verify in your checkout</code></pre>
+  <p>Source and issues: <a href="https://github.com/ham-zax/claive">github.com/ham-zax/claive</a>. MIT licensed.</p>
+</section>
+
+<section>
+  <h2>What isn't built</h2>
+  <ul class="gap">
+    <li>Jev-based control, so arms C and E do not exist.</li>
+    <li>Stuck detection inside a single turn.</li>
+    <li>A test-author worker for hidden checks.</li>
+    <li>Enforced token budgets.</li>
+    <li>Codex, OpenCode and Claude Code as workers. Here they are parents.</li>
+  </ul>
+</section>
+</main>
+<footer>
+  <p>claive by Hamza (<a href="https://github.com/ham-zax">ham-zax</a>). MIT licensed.</p>
+  <p><a href="https://github.com/ham-zax/claive">Source</a> · Last updated 2026-10-07</p>
+</footer>
+</div>
+</body>
+</html>

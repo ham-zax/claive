@@ -293,6 +293,42 @@ class FeatureChecks(unittest.TestCase):
             self.assertFalse(checks["config"]["ok"], bad)
             self.assertTrue(checks["config"]["required"])
 
+    def test_workspace_allowlist_limits_where_and_how_workers_run(self):
+        allowed, outside = self.path / "allowed", self.path / "outside"
+        (allowed / "rw" / "deep").mkdir(parents=True)
+        outside.mkdir()
+        (allowed / "escape").symlink_to(outside)
+        config = self.path / "config.json"
+        config.write_text(json.dumps({"default_engine": "fixture", "workspaces": [
+            {"path": str(allowed)}, {"path": str(allowed / "rw"), "write": True}]}))
+
+        def launch(workspace, *extra):
+            before = sorted(self.registry.iterdir()) if self.registry.exists() else []
+            result = self.run_cli("run", "--workspace", str(workspace), "--prompt-file", str(self.prompt),
+                                  *extra, CLAIVE_CONFIG=str(config))
+            created = sorted(self.registry.iterdir()) if self.registry.exists() else []
+            return result, created != before
+
+        for workspace, extra, message in (
+                (outside, (), "outside the claive config workspaces allowlist"),
+                (allowed / "escape", ("--read-only",), "outside the claive config workspaces allowlist"),
+                (allowed, (), "read-only in the claive config workspaces allowlist")):
+            result, created = launch(workspace, *extra)
+            self.assertNotEqual(result.returncode, 0, workspace)
+            self.assertIn(message, result.stderr, workspace)
+            self.assertFalse(created, workspace)
+        for workspace, extra in ((allowed, ("--read-only",)), (allowed / "rw" / "deep", ())):
+            result, created = launch(workspace, *extra)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(created)
+        doctor = json.loads(self.run_cli("doctor", "--json", cli=CLI, CLAIVE_CONFIG=str(config)).stdout)
+        detail = {check["name"]: check for check in doctor["checks"]}["config"]["detail"]
+        self.assertIn("workspaces allowlist: 2 entries, 1 writable", detail)
+        for bad in ([{"path": "relative/dir"}], [{"path": str(allowed), "write": "yes"}], {"path": "/"}):
+            config.write_text(json.dumps({"workspaces": bad}))
+            refused, created = launch(allowed, "--read-only")
+            self.assertIn("invalid claive config", refused.stderr, bad)
+
     # 7. parent questions -----------------------------------------------------
     def test_single_turn_question_exits_3(self):
         self.text.write_text(REPORT_ASK)

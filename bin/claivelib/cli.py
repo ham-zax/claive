@@ -808,6 +808,8 @@ def create_job(args):
     else:
         steps = engine.default_max_model_steps
     read_only = bool(args.read_only or (role_def and role_def.get("read_only")))
+    config.check_workspace([workspace] + ([Path(args.worktree_existing)] if args.worktree_existing else []),
+                           read_only)
     effective_model = args.model or (role_def["model"] if role_def else None)
     check_model_policy(effective_model)
     isolation = dict(mode="create" if args.worktree else "existing" if args.worktree_existing else "none",
@@ -1016,7 +1018,10 @@ def doctor_checks(live=False):
         resolved_roles()
         engine = default_engine()
         source = str(config.config_path()) if config.config_path().is_file() else "built-in defaults"
-        add("config", True, True, f"{source}; default engine {engine}")
+        allowed = config.load().get("workspaces")
+        scope = ("any workspace" if allowed is None else
+                 f"workspaces allowlist: {len(allowed)} entries, {sum(1 for e in allowed if e.get('write'))} writable")
+        add("config", True, True, f"{source}; default engine {engine}; {scope}")
     except ValueError as error:
         add("config", False, True, str(error)[:200])
     try:

@@ -220,6 +220,8 @@ Role keys: `engine`, `model`, `reasoning_effort`, `read_only`, `max_model_steps`
 
 A host whose `opencode2api` runs locally can route Pi turns over loopback instead of the public URL in `models.json` with `{"providers": {"opencode2api": {"base_url": "http://127.0.0.1:PORT/v1"}}}`. Only `localhost` and loopback addresses are accepted. Pi reads the URL only from `models.json`, so claive gives Pi turns an overlay agent directory (`$CLAIVE_DIR/pi-agent-overlay`: links to every entry of the real one plus a mode-600 `models.json` differing only in `baseUrl`), rebuilt each turn. The real `models.json` is never edited; `doctor` times both URLs, and workers record and print `Provider override:`.
 
+On a host where workers run unattended, `{"workspaces": [{"path": "~/repo/site", "write": false}, {"path": "~/repo/site/drafts", "write": true}]}` limits where workers may run. With the key present, `run`/`start`/`open`/`batch` refuse a `--workspace` or `--worktree-existing` whose real path (symlinks resolved) is outside every entry, and the deepest matching entry decides the mode: `write: false` requires `--read-only` or a read-only role. Without the key any workspace is allowed, as before. This limits the worker's cwd and write mode only; Pi has no OS sandbox, so its read tool can still open absolute paths elsewhere. `doctor` reports the entry counts.
+
 Run checks from the repository root. The suite is hermetic: `tests/hermetic.py` hides the host config, `CLAIVE_*` variables and installed Muse/Pi binaries. `CLAIVE_LIVE_TESTS=1` also runs the checks that drive the real Muse binary.
 
 ```bash

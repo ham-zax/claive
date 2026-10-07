@@ -8,12 +8,16 @@ the built-in defaults. CLAIVE_ENGINE overrides default_engine. Example (a Pi-onl
      "providers": {"opencode2api": {"base_url": "http://127.0.0.1:8080/v1"}}}
 
 providers.opencode2api.base_url must be a loopback URL; see claivelib.provider.
+
+"workspaces": [{"path": "~/work", "write": true}, {"path": "~/repo/notes"}] is an allowlist: when the
+key is present, workers may only run inside a listed directory, and only read-only unless the
+nearest listed ancestor sets "write": true. Without the key, any workspace is allowed.
 """
 import json
 import os
 from pathlib import Path
 
-TOP_LEVEL_KEYS = {"default_engine", "roles", "providers"}
+TOP_LEVEL_KEYS = {"default_engine", "roles", "providers", "workspaces"}
 ROLE_KEYS = {
     "engine": str, "model": str, "reasoning_effort": str, "read_only": bool,
     "max_model_steps": (int, type(None)), "preamble": str,
@@ -71,7 +75,37 @@ def load():
             check_loopback(entry["base_url"])
         except ValueError as error:
             raise ValueError(f"invalid claive config {path}: providers.{name}.base_url {error}") from error
+    workspaces = data.get("workspaces")
+    if workspaces is not None:
+        if not isinstance(workspaces, list):
+            raise ValueError(f"invalid claive config {path}: workspaces must be a list")
+        for index, entry in enumerate(workspaces):
+            where = f"invalid claive config {path}: workspaces[{index}]"
+            if not isinstance(entry, dict) or set(entry) - {"path", "write"}:
+                raise ValueError(f"{where} must be {{\"path\": ..., \"write\": true|false}}")
+            if not isinstance(entry.get("path"), str) or not Path(entry["path"]).expanduser().is_absolute():
+                raise ValueError(f"{where}.path must be an absolute or ~ path")
+            if not isinstance(entry.get("write", False), bool):
+                raise ValueError(f"{where}.write must be true or false")
     return data
+
+
+def check_workspace(directories, read_only):
+    """Refuse a launch outside the workspaces allowlist, or a writable one in a read-only entry."""
+    allowed = load().get("workspaces")
+    if allowed is None:
+        return
+    entries = [(Path(os.path.realpath(Path(entry["path"]).expanduser())), entry.get("write", False))
+               for entry in allowed]
+    for directory in directories:
+        real = Path(os.path.realpath(directory))
+        matches = [(base, write) for base, write in entries if real == base or base in real.parents]
+        if not matches:
+            raise ValueError(f"workspace {real} is outside the claive config workspaces allowlist")
+        _base, write = max(matches, key=lambda match: len(match[0].parts))
+        if not write and not read_only:
+            raise ValueError(f"workspace {real} is read-only in the claive config workspaces allowlist; "
+                             "pass --read-only or use a read-only role")
 
 
 def default_engine(builtin):

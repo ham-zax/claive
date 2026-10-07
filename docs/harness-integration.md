@@ -97,8 +97,23 @@ memory is the only thing missions cannot recover.
 ## Batches
 
 A plan is a JSON file of lanes. Lanes run in parallel and the stages inside a
-lane run in order. `context: "previous"` passes the prior stage's result
-forward. A stage that does not finish `done` skips the rest of its lane. Use
+lane run in order. Every lane and every stage needs a `key` (1-32 lowercase
+letters, digits, `_` or `-`); stages are reported as `lane.stage`. `defaults`
+applies stage options to every stage, and each stage needs an absolute
+`prompt_file`. `context: "previous"` passes the prior stage's result
+forward.
+
+```json
+{"label": "review", "workspace": "/abs/repo",
+ "defaults": {"engine": "pi", "model": "mimo-v2.6-flash-free", "read_only": true},
+ "lanes": [
+  {"key": "a", "stages": [{"key": "scan", "prompt_file": "/abs/scan.md", "report": true},
+                         {"key": "summary", "prompt_file": "/abs/sum.md", "context": "previous"}]},
+  {"key": "b", "stages": [{"key": "scan", "prompt_file": "/abs/scan2.md"}]}]}
+```
+
+A stage `model` applies to that stage only and does not change Pi's shared
+default model; an explicit `--model` on `run`/`start`/`open` does. A stage that does not finish `done` skips the rest of its lane. Use
 `claive batch validate` before `start`. After `batch wait`, read
 `claive batch status ID` and `claive show <stage worker>`. To rerun only the
 stages that did not finish, use `claive batch retry ID`. A batch whose
@@ -113,8 +128,8 @@ worker is still running and waits for it.
 - `claive doctor` checks binaries (it runs `pi --version`), the state directory,
   the config, that Pi's `models.json` lists every model claive may request
   (`pi_provider`), the provider's `GET /models` latency, and quota, without
-  launching a model. `--live` adds one tiny read-only Pi turn. Exit 0 means every
-  required check passed; it reports a loopback provider override when one is set.
+  launching a model. `--live` adds one tiny read-only Pi turn on Pi's shared
+  default model. Exit 0 means every required check passed; it reports a loopback provider override when one is set.
 - With a `workspaces` allowlist in the claive config, workers run only in listed
   directories, read-only unless the deepest matching entry has `write: true`.
 - A worker's report is evidence, not proof. Verify with your own tests, or use

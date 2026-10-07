@@ -55,7 +55,8 @@ that turn and keep the supervisor available.
 is listed under `opencode2api` in `models.json` (`pi_provider`), and times
 `GET /models` on the provider; it never prints the key. Both checks are required
 when Pi is the default engine. `claive doctor --live` also sends one tiny
-sessionless read-only turn.
+sessionless read-only turn on that shared default model (the initial model when
+none is saved), so it follows the last explicit `--model`.
 
 A host whose `opencode2api` runs locally can set
 `{"providers": {"opencode2api": {"base_url": "http://127.0.0.1:PORT/v1"}}}` in

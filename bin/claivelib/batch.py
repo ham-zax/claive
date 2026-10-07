@@ -19,6 +19,7 @@ STAGE_OPTIONS = {"prompt_file", "workspace", "label", "role", "engine", "model",
                  "report", "context"}
 TOP_KEYS = {"label", "workspace", "mission", "defaults", "lanes"}
 KEY_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+KEY_RULE = "(keys are 1-32 lowercase letters, digits, _ or -, starting with a letter or digit)"
 TERMINAL = {"done", "failed", "needs_parent", "cancelled", "skipped"}
 
 
@@ -138,8 +139,10 @@ def validate_plan(plan_path):
         if not isinstance(lane, dict) or set(lane) - {"key", "stages"}:
             raise ValueError("each lane needs only key and stages")
         key = lane.get("key")
+        if key is None:
+            raise ValueError("each lane needs a key")
         if not isinstance(key, str) or not KEY_RE.fullmatch(key):
-            raise ValueError(f"invalid lane key: {key}")
+            raise ValueError(f"invalid lane key: {key!r} {KEY_RULE}")
         if key in seen_lanes:
             raise ValueError(f"duplicate lane key: {key}")
         seen_lanes.add(key)
@@ -154,8 +157,10 @@ def validate_plan(plan_path):
                 if opt not in STAGE_OPTIONS | {"key"}:
                     raise ValueError(f"unknown option: {opt}")
             stage_key = stage.get("key")
+            if stage_key is None:
+                raise ValueError(f"lane {key} stage {position} needs a key")
             if not isinstance(stage_key, str) or not KEY_RE.fullmatch(stage_key):
-                raise ValueError(f"invalid stage key: {stage_key}")
+                raise ValueError(f"invalid stage key: {key}.{stage_key!r} {KEY_RULE}")
             if stage_key in seen_stages:
                 raise ValueError(f"duplicate stage key: {key}.{stage_key}")
             seen_stages.add(stage_key)

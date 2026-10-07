@@ -75,7 +75,7 @@ claive status-line
 ```bash
 claive doctor
 claive doctor --json
-claive doctor --live   # also one tiny read-only Pi turn, timed
+claive doctor --live   # also one tiny read-only Pi turn on Pi's shared default model, timed
 claive run --role reviewer --workspace /abs/repo --prompt-file /abs/task.md
 claive run --report --workspace /abs/repo --prompt-file /abs/task.md
 claive answer JOB_ID --message "Use design B."
@@ -103,7 +103,7 @@ claive goal add --title "Audit deps" --prompt-file /abs/goal.md --workspace /abs
 claive goal list [--all]                      # status, attempts, budget used, worker, open questions
 claive goal answer GOAL_ID --message "Use B"  # resume a parked goal in the same session
 claive goal cancel|retry|show GOAL_ID
-claive serve                                  # foreground loop for systemd; --once for one pass
+claive serve                                  # foreground loop for systemd; --once runs one pass (launch or harvest) and exits
 claive serve --stop | --resume | --status     # stop switch, clear it, show state
 ```
 

@@ -285,6 +285,15 @@ class AsyncChecks(unittest.TestCase):
                 self.assertEqual(self.cli("batch", "start", str(plan)).returncode, 1)
         self.assertEqual(self.workers(), [])
         self.assertEqual(json.loads(self.cli("batch", "list", "--json").stdout), [])
+        missing = {
+            "each lane needs a key": [{"stages": [{"key": "s", "prompt_file": good}]}],
+            "lane a stage 0 needs a key": [{"key": "a", "stages": [{"prompt_file": good}]}],
+        }
+        for message, lanes in missing.items():
+            with self.subTest(message):
+                result = self.cli("batch", "validate", str(self.plan(lanes)))
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(message, result.stdout + result.stderr)
 
     def test_batch_retry_keeps_done_stages(self):
         flaky = self.prompt_file("flaky", "FIXTURE_MODE=terminal-failure")

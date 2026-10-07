@@ -30,6 +30,13 @@ def emit(kind, **payload):
 emit("task.lifecycle.proposed", event={"task_kind": "model.meta.response"})
 if mode == "brief":
     time.sleep(0.3)
+if os.environ.get("MUSE_TEST_RECORD") and "--worktree-existing" in sys.argv:
+    tree = sys.argv[sys.argv.index("--worktree-existing") + 1]
+    with open(os.environ["MUSE_TEST_RECORD"], "w") as record:
+        record.write(subprocess.check_output(["git", "-C", tree, "rev-parse", "HEAD"], text=True).strip())
+if os.environ.get("MUSE_TEST_TOUCH") and "--worktree-existing" in sys.argv:
+    with open(os.path.join(sys.argv[sys.argv.index("--worktree-existing") + 1], "edited.txt"), "w") as edited:
+        edited.write("work in progress")
 if mode == "worktree":
     print("muse: workspace root: " + os.environ["MUSE_TEST_WORKTREE"] + " (worktree)", file=sys.stderr)
 if mode == "slow":
@@ -317,22 +324,43 @@ class WorkerChecks(unittest.TestCase):
         self.assertEqual(generic["task_failures"], 8)
         self.assertEqual(generic["task_failure_reasons"], [f"read: ENOENT {n}" for n in range(2, 7)])
 
-    def test_followup_reuses_created_worktree(self):
-        worktree = self.path / "isolated tree"
-        worktree.mkdir()
-        process, initial = self.open_worker(extra=("--worktree", "--worktree-base", "HEAD"),
-                                             mode="worktree", env=dict(self.env, MUSE_TEST_WORKTREE=str(worktree)))
+    def git_repo(self, repo):
+        repo.mkdir(exist_ok=True)
+        for command in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "one"],
+                        ["commit", "-q", "--allow-empty", "-m", "two"]):
+            subprocess.run(["git", "-c", "user.email=t@example.com", "-c", "user.name=T", *command],
+                           cwd=repo, check=True)
+        return repo
+
+    def test_writer_worktree_lasts_all_turns_and_is_kept_only_when_changed(self):
+        # Muse 1.4.3 cannot run `-w create` at all (its sandbox makes .git read-only before
+        # `git worktree add`), so claive creates the worktree on branch claive/<job>.
+        repo = self.git_repo(self.path)
+        process, initial = self.open_worker(extra=("--worktree", "--worktree-base", "HEAD"))
         job = initial["id"]
+        tree = str(self.registry / job / "worktree")
         first = self.until_idle(job)
-        self.assertEqual(first["actual_workspace"], str(worktree))
+        self.assertEqual(first["actual_workspace"], tree)
         self.assertEqual(self.cli("followup", job, "--prompt-file", str(self.prompt)).returncode, 0)
         second = self.until_idle(job, 2)
         command = second["command"]
         self.assertEqual(command[command.index("-w") + 1], "existing")
-        self.assertEqual(command[command.index("--worktree-existing") + 1], str(worktree))
+        self.assertEqual(command[command.index("--worktree-existing") + 1], tree)
         self.assertNotIn("--worktree-base", command)
         self.cli("close", job)
         process.communicate(timeout=5)
+        self.assertFalse(Path(tree).exists())  # unchanged: worktree and branch removed
+        branches = subprocess.check_output(["git", "branch", "--list", "claive/*"], cwd=repo, text=True)
+        self.assertEqual(branches.strip(), "")
+
+        self.env["MUSE_TEST_TOUCH"] = "1"
+        result = self.cli("run", "--workspace", str(repo), "--prompt-file", str(self.prompt), "--worktree")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        job = re.search(r"Worker ([0-9a-f]{12})", result.stdout).group(1)
+        tree = self.registry / job / "worktree"
+        self.assertEqual((tree / "edited.txt").read_text(), "work in progress")
+        self.assertIn(f"claive/{job}", subprocess.check_output(["git", "branch"], cwd=repo, text=True))
+        self.assertEqual(json.loads((self.registry / job / "state.json").read_text())["retained_worktree"], str(tree))
 
     def test_reopen_retained_session_in_existing_worktree(self):
         worktree = self.path / "existing worktree"
@@ -383,7 +411,7 @@ class WorkerChecks(unittest.TestCase):
         self.assertIn("Muse engine is unavailable", usage.stderr)
 
     def test_success_and_safe_arguments(self):
-        result, state = self.launch(extra=("--read-only", "--worktree", "--worktree-base", "HEAD"))
+        result, state = self.launch(extra=("--read-only",))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(state["status"], "completed")
         self.assertEqual(state["steps"], 1)
@@ -396,6 +424,35 @@ class WorkerChecks(unittest.TestCase):
         self.assertFalse((self.path / "INJECTED").exists())
         self.assertEqual((self.registry / state["id"] / "result.txt").read_text(), "fixture result")
         self.assertEqual((self.registry / state["id"] / "state.json").stat().st_mode & 0o777, 0o600)
+
+    def test_read_only_worktree_is_created_by_claive_and_removed_after(self):
+        # Read-only lanes get a detached worktree, always removed when the worker ends.
+        repo = self.git_repo(self.path / "repo")
+        base = subprocess.check_output(["git", "rev-parse", "HEAD~1"], cwd=repo, text=True).strip()
+        record = self.path / "seen-head"
+        self.env["MUSE_TEST_RECORD"] = str(record)
+        result = self.cli("run", "--workspace", str(repo), "--prompt-file", str(self.prompt),
+                          "--read-only", "--worktree", "--worktree-base", "HEAD~1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        job = re.search(r"Worker ([0-9a-f]{12})", result.stdout).group(1)
+        state = json.loads((self.registry / job / "state.json").read_text())
+        tree = str(self.registry / job / "worktree")
+        command = state["command"]
+        self.assertEqual(command[command.index("-w") + 1], "existing")
+        self.assertEqual(command[command.index("--worktree-existing") + 1], tree)
+        self.assertNotIn("--worktree-base", command)
+        self.assertIn("--disable-write", command)
+        self.assertEqual(state["actual_workspace"], tree)
+        self.assertEqual(record.read_text(), base)
+        self.assertFalse(Path(tree).exists())
+        self.assertNotIn(tree, subprocess.check_output(["git", "worktree", "list"], cwd=repo, text=True))
+
+        jobs = set(self.registry.iterdir())
+        refused = self.cli("run", "--workspace", str(self.path), "--prompt-file", str(self.prompt),
+                           "--read-only", "--worktree")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("HEAD is not a commit in a git repository", refused.stderr)
+        self.assertEqual(set(self.registry.iterdir()), jobs)
 
     def test_missing_terminal_is_failure(self):
         result, state = self.launch(mode="missing")
@@ -550,66 +607,27 @@ class WorkerChecks(unittest.TestCase):
         self.assertEqual(cancelled["status"], "cancelled")
 
     def test_actual_muse_worktree_characterization(self):
+        # Muse 1.4.3's own `-w create` fails under its sandbox, so claive creates the worktree.
         muse = hermetic.HOST_HOME / ".local/bin/muse"
         if not hermetic.LIVE or not muse.is_file():
             self.skipTest("live Muse check; set CLAIVE_LIVE_TESTS=1 with Muse installed")
-
-        repo = self.path / "worktree-repo"
-        repo.mkdir()
-        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
-        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
-        (repo / "file.txt").write_text("one\n")
-        subprocess.run(["git", "add", "file.txt"], cwd=repo, check=True)
-        subprocess.run(["git", "commit", "-qm", "first"], cwd=repo, check=True)
-        (repo / "file.txt").write_text("two\n")
-        subprocess.run(["git", "commit", "-qam", "second"], cwd=repo, check=True)
+        repo = self.git_repo(self.path / "worktree-repo")
         base = subprocess.check_output(["git", "rev-parse", "HEAD~1"], cwd=repo, text=True).strip()
-
-        prompt = self.path / "worktree-prompt.md"
-        prompt.write_text("echo worktree probe\n")
-        session = str(uuid.uuid4())
-        stdout_path = self.path / "worktree-out.jsonl"
-        stderr_path = self.path / "worktree-err.log"
-        command = [
-            str(muse), "exec", "--workspace", str(repo), "--trust-workspace",
-            "--disable-approval", "--json", "--provider", "echo", "--max-model-steps", "1",
-            "--user-input-auto-resolve", "--prompt-file", str(prompt), "--session-id", session,
-            "--disable-write", "--disable-shell", "--disable-web-tools",
-            "-w", "create", "--worktree-base", base,
-        ]
-        with stdout_path.open("w") as out, stderr_path.open("w") as err:
-            process = subprocess.Popen(command, stdout=out, stderr=err, text=True)
-            reported = None
-            for _ in range(2000):
-                text = stderr_path.read_text(errors="replace")
-                match = re.search(r"^muse: workspace root: (.+) \(explicit\)$", text, re.M)
-                if match and Path(match.group(1)).is_dir():
-                    reported = Path(match.group(1))
-                    break
-                if process.poll() is not None:
-                    break
-                time.sleep(0.002)
-            self.assertIsNotNone(reported, stderr_path.read_text(errors="replace"))
-            self.assertEqual(reported.parent, repo / ".muse/worktrees")
-            self.assertTrue((reported / ".git").is_file())
-            self.assertEqual(subprocess.check_output(["git", "rev-parse", "HEAD"],
-                                                    cwd=reported, text=True).strip(), base)
-            self.assertEqual(subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                                                    cwd=reported, text=True).strip(),
-                             f"muse/session-{session}")
-            listed = subprocess.check_output(["git", "worktree", "list", "--porcelain"],
-                                             cwd=repo, text=True)
-            self.assertIn(f"worktree {reported}", listed)
-            self.assertEqual(process.wait(timeout=15), 0)
-
-        self.assertFalse(reported.exists())
-        listed_after = subprocess.check_output(["git", "worktree", "list", "--porcelain"],
-                                               cwd=repo, text=True)
-        self.assertNotIn(str(reported), listed_after)
-        branches = subprocess.check_output(["git", "branch", "--format=%(refname:short)"],
-                                           cwd=repo, text=True).splitlines()
-        self.assertNotIn(f"muse/session-{session}", branches)
+        env = dict(self.env, MUSE_WORKER_BINARY=str(muse))
+        for extra in ((), ("--read-only",)):
+            result = subprocess.run([CLI, "run", "--workspace", str(repo), "--prompt-file", str(self.prompt),
+                                     "--worktree", "--worktree-base", base, "--provider", "echo",
+                                     "--max-model-steps", "1", *extra],
+                                    env=env, text=True, capture_output=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            job = re.search(r"Worker ([0-9a-f]{12})", result.stdout).group(1)
+            stderr = (self.registry / job / "stderr.log").read_text(errors="replace")
+            tree = self.registry / job / "worktree"
+            self.assertIn(f"muse: workspace root: {tree} (explicit)", stderr)
+            self.assertIn("caller-owned worktree retained", stderr)
+            self.assertFalse(tree.exists())
+            self.assertNotIn(str(tree), subprocess.check_output(["git", "worktree", "list"], cwd=repo, text=True))
+        self.assertEqual(subprocess.check_output(["git", "branch", "--list", "claive/*"], cwd=repo, text=True), "")
 
     def test_actual_muse_echo_transport(self):
         muse = hermetic.HOST_HOME / ".local/bin/muse"

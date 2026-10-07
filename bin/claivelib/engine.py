@@ -48,5 +48,9 @@ class WorkerEngine:
     def discover_workspace(self, command, stderr_text):
         return None
 
+    def prepare_isolation(self, launch, workspace, job_dir):
+        """Return the launch, adjusted for isolation claive must set up itself in job_dir."""
+        return launch
+
     def session_usage(self, state):
         raise ValueError(f"worker engine {self.name or 'unknown'} does not provide session usage")

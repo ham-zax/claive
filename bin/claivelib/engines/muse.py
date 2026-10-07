@@ -120,6 +120,35 @@ class MuseEngine(WorkerEngine):
                 ))
             return self.summarize_usage(json.loads(target.read_text()))
 
+    def prepare_isolation(self, launch, workspace, job_dir):
+        """Create the --worktree worktree, which Muse cannot.
+
+        Muse 1.4.3's sandbox makes the repository read-only before it runs `git worktree add`, so
+        `-w create` always fails. claive creates the worktree at the base in the job directory and
+        hands it to Muse as an existing worktree, which also keeps it across a reusable worker's
+        turns. Read-only lanes get a detached worktree; writers get branch claive/<job>.
+        release_worktree in cli.py removes it when the worker ends, unless a writer changed it.
+        """
+        isolation = launch.get("isolation") or {}
+        if isolation.get("mode") != "create":
+            return launch
+        target = Path(job_dir) / "worktree"
+        base = isolation.get("base") or "HEAD"
+        resolved = subprocess.run(["git", "-C", workspace, "rev-parse", "--verify", "--quiet", base + "^{commit}"],
+                                  capture_output=True, text=True, timeout=60)
+        if resolved.returncode:
+            raise ValueError(f"cannot create the worktree: {base} is not a commit in a git repository at {workspace}")
+        base_commit = resolved.stdout.strip()
+        branch = None if launch.get("read_only") else f"claive/{Path(job_dir).name}"
+        command = ["git", "-C", workspace, "worktree", "add"]
+        command += ["--detach", str(target)] if branch is None else ["-b", branch, str(target)]
+        result = subprocess.run(command + [base_commit], capture_output=True, text=True, timeout=120)
+        if result.returncode:
+            detail = " ".join(result.stderr.split())[:300]
+            raise ValueError(f"cannot create the worktree at {base}: {detail}")
+        return dict(launch, isolation=dict(mode="existing", base=None, existing_path=str(target), owner="claive",
+                                           source=workspace, branch=branch, base_commit=base_commit))
+
     def discover_workspace(self, command, stderr_text):
         if "-w" not in command:
             return None

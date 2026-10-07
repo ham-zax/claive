@@ -2,6 +2,7 @@
 """Track reusable coding workers and display their progress beside any parent agent. No dependencies."""
 
 import argparse
+import dataclasses
 import datetime
 import importlib
 import json
@@ -683,6 +684,44 @@ def outcome_code(state):
     return min(code, 255) if isinstance(code, int) and code > 0 else 1
 
 
+def release_worktree(job_id):
+    """Remove a worktree claive created for this worker (see MuseEngine.prepare_isolation).
+
+    A writer's worktree and branch are kept when it has uncommitted changes or new commits.
+    """
+    path = job_path(job_id)
+    state = load(path, check_alive=False)
+    isolation = launch_config(state).get("isolation") or {}
+    if isolation.get("owner") != "claive" or not Path(isolation.get("existing_path") or "").is_dir():
+        return
+    target, source, branch = isolation["existing_path"], isolation["source"], isolation.get("branch")
+
+    def git(*args, cwd=source):
+        return subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, timeout=120)
+
+    if branch:
+        dirty = git("status", "--porcelain", cwd=target)
+        ahead = git("rev-list", "--count", f"{isolation['base_commit']}..HEAD", cwd=target)
+        if dirty.returncode or dirty.stdout.strip() or ahead.returncode or ahead.stdout.strip() != "0":
+            state["retained_worktree"] = target
+            save(path / "state.json", state)
+            print(f"Worker {job_id}: worktree {target} (branch {branch}) has changes and is kept; "
+                  f"remove it with: git -C {shlex.quote(source)} worktree remove {shlex.quote(target)}", flush=True)
+            return
+    if git("worktree", "remove", "--force", target).returncode:
+        shutil.rmtree(target, ignore_errors=True)
+        git("worktree", "prune")
+    if branch:
+        git("branch", "-D", branch)
+
+
+def run_supervisor(job_id, reusable):
+    try:
+        return reusable_worker(job_id) if reusable else supervise(job_id)
+    finally:
+        release_worktree(job_id)
+
+
 def reusable_worker(job_id):
     """Keep one supervisor and durable worker session available between turns."""
     path = job_path(job_id)
@@ -839,6 +878,12 @@ def create_job(args):
     path = root() / job_id
     path.mkdir(mode=0o700)
     (path / "requests").mkdir(mode=0o700)
+    try:
+        launch = engine.prepare_isolation(launch, str(workspace), str(path))
+    except ValueError:
+        shutil.rmtree(path, ignore_errors=True)
+        raise
+    initial_turn = dataclasses.replace(initial_turn, isolation=launch["isolation"])
     save(path / "policy.json", dict(reasoning_effort=effort, max_model_steps=steps))
     report_contract = bool(getattr(args, "report", False) or role)
     effective_prompt, source_prompt = str(prompt), None
@@ -873,8 +918,8 @@ def create_job(args):
         state["role"] = role
     if source_prompt:
         state["source_prompt_file"] = source_prompt
-    if args.worktree_existing:
-        state["actual_workspace"] = str(Path(args.worktree_existing))
+    if launch["isolation"].get("mode") == "existing":
+        state["actual_workspace"] = launch["isolation"]["existing_path"]
     if mission_id:
         state["mission"] = mission_id
     save(path / "state.json", state)
@@ -890,6 +935,8 @@ def report(state):
     session = worker_session_id(state)
     if session:
         print(f"Session: {session} | {state.get('engine', DEFAULT_ENGINE)} | {state.get('model')} | {state['reasoning_effort']}")
+    if state.get("retained_worktree"):
+        print(f"Changed worktree kept: {clean(state['retained_worktree'])}")
     if state.get("provider_base_url"):
         print(f"Provider override: {clean(state['provider_base_url'])} (claive config providers.opencode2api)")
     if state.get("error"):
@@ -1353,9 +1400,9 @@ def main(launcher=None):
     if launcher is not None:
         set_launcher_path(launcher)
     if len(sys.argv) == 3 and sys.argv[1] == "_supervise":
-        return supervise(sys.argv[2])
+        return run_supervisor(sys.argv[2], reusable=False)
     if len(sys.argv) == 3 and sys.argv[1] == "_reusable":
-        return reusable_worker(sys.argv[2])
+        return run_supervisor(sys.argv[2], reusable=True)
     if len(sys.argv) == 3 and sys.argv[1] == "_batch":
         from claivelib import batch as batch_mod
         return batch_mod.runner(sys.argv[2])
@@ -1372,7 +1419,7 @@ def main(launcher=None):
                   f"Answer: claive answer {state['id']} --message ...\nClose: claive close {state['id']}")
             return 0
         if args.action in {"run", "open"}:
-            code = reusable_worker(state["id"]) if args.action == "open" else supervise(state["id"])
+            code = run_supervisor(state["id"], reusable=args.action == "open")
             report(load(path))
             return code
         with (path / "supervisor.log").open("w") as log:

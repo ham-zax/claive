@@ -1,0 +1,25 @@
+# claive supervisor: works the claive goal queue with no parent session.
+# Install:  install -Dm644 systemd/claive-serve.service ~/.config/systemd/user/claive-serve.service
+#           systemctl --user daemon-reload && systemctl --user enable --now claive-serve
+#           loginctl enable-linger "$USER"   # keep user services running after logout
+# Stop work cleanly: claive serve --stop (cancels workers, requeues goals, exits 0).
+[Unit]
+Description=claive supervisor (goal queue)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/claive serve
+# systemd and ssh sessions do not put ~/.local/bin on PATH; name the worker binaries explicitly.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PI_WORKER_BINARY=%h/.local/bin/pi
+# A clean exit (stop switch) stays stopped; crashes restart.
+Restart=on-failure
+RestartSec=30
+# Workers run in their own sessions. Leave them running across restarts; the next serve adopts them.
+KillMode=process
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

@@ -105,12 +105,21 @@ Common commands: `claive show ID --json`, `logs ID [--stderr]`,
 `usage ID --json`, `followup ID --prompt-file F`, `close ID`, `cancel ID`.
 
 Health and structured reports: `claive doctor [--json]` is a read-only
-check and never launches a model. `--role scout|worker|reviewer|oracle`
+check (binaries, config, Pi `models.json` coverage as `pi_provider`, provider
+latency, any loopback override) and never launches a model; `--live` adds one
+tiny read-only Pi turn. `--role scout|worker|reviewer|oracle`
 sets engine, model, effort, read-only, and step-cap defaults and always
 requests a `claive-report` block; `--report` requests it without a role.
 A turn asking for a decision exits 3, shows `ASK`, and records
 `needs_parent`; reply with `claive answer ID --message ...` (reusable
 workers only). Failed turns record `failure_kind`, visible in `show --json`.
+
+Unattended queue: `claive goal add --title T --prompt-file F --workspace W
+[--write] [--budget 2h]`, run by `claive serve` (systemd user unit in
+`systemd/`). Goals are read-only by default and obey the config `workspaces`
+allowlist. A parked goal shows as `goal ID ASK` in the inbox; answer it with
+`claive goal answer ID --message ...`. `claive serve --stop|--resume|--status`
+controls the stop switch.
 
 ## The verified ladder (default: arm D, rounds 2)
 

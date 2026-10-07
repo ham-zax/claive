@@ -42,7 +42,9 @@ Launch with `claive start`, `claive open --detach` or `claive batch start`
 (exit 124 means still running), or without `--timeout` under
 `run_in_background: true` to get a completion notification. After compaction,
 run `claive inbox --consumer claude` and `claive mission show ID`. Use a
-mission (`CLAIVE_MISSION`) for multi-turn efforts. The protocol is identical for
+mission (`CLAIVE_MISSION`) for multi-turn efforts. `goal ID ASK` inbox lines
+come from the `claive serve` queue; answer them with `claive goal answer ID
+--message ...`. The protocol is identical for
 Codex and Pi parents: `/home/hamza/repo/claive/docs/harness-integration.md`.
 
 ## Rules

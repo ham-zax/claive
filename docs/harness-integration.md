@@ -48,8 +48,8 @@ Pick whichever your host supports; all three read the same events.
    finished yet. Do other work, then wait again. Keep the timeout below your host's
    command time limit.
 2. **Inbox** (poll at natural pauses, or after a context reset):
-   `claive inbox --consumer <your-harness-name> --json`. This returns every turn
-   and batch event since that consumer's last read. Use one consumer name per
+   `claive inbox --consumer <your-harness-name> --json`. This returns every turn,
+   batch and goal event since that consumer's last read. Use one consumer name per
    parent (for example `claude`, `codex`, `pi-main`) so parents do not steal each
    other's events. `--peek` reads without advancing.
 3. **Push hook** (optional): set `CLAIVE_NOTIFY_CMD` before launching. It runs
@@ -65,6 +65,20 @@ A worker started with `--report` or `--role` may stop with `needs_decision` or
 `ASK` with the question. For a reusable worker, reply with
 `claive answer ID --message "..."`, then wait again. A single-turn worker cannot
 be answered; start a new one with the decision included.
+
+## Run goals without a parent (`claive goal`, `claive serve`)
+
+On a server with no parent session, queue goals with
+`claive goal add --title T --prompt-file F --workspace W [--write] [--budget 2h]`
+and let `claive serve` (a foreground loop, run under the user unit
+`systemd/claive-serve.service`) launch each one as a reusable `--report`
+worker on any engine. A question parks the goal and posts a `goal` event with
+badge `ASK` to the inbox; reply with `claive goal answer ID --message "..."`
+(not `claive answer`, so the goal record stays in step). Goals have a wall-clock
+budget, retries with backoff, and a global backoff on quota, protocol and launch
+failures. `claive serve --stop` cancels its workers and pauses the queue until
+`--resume`; `--status` shows the state. Logs are in
+`$CLAIVE_DIR/supervisor/serve.log`. See the README for details.
 
 ## Survive context loss with missions
 
@@ -94,8 +108,13 @@ stages that did not finish, use `claive batch retry ID`.
 - Workers get `CLAIVE_WORKER_ID` and cannot launch workers or batches (this
   prevents recursive orchestration when a worker reads claive's own skills).
   `CLAIVE_ALLOW_NESTED=1` overrides this; use it only on purpose.
-- `claive doctor` checks binaries, the state directory, the model gateway and
-  quota without launching a model.
+- `claive doctor` checks binaries (it runs `pi --version`), the state directory,
+  the config, that Pi's `models.json` lists every model claive may request
+  (`pi_provider`), the provider's `GET /models` latency, and quota, without
+  launching a model. `--live` adds one tiny read-only Pi turn. Exit 0 means every
+  required check passed; it reports a loopback provider override when one is set.
+- With a `workspaces` allowlist in the claive config, workers run only in listed
+  directories, read-only unless the deepest matching entry has `write: true`.
 - A worker's report is evidence, not proof. Verify with your own tests, or use
   `claive-orch` for the verified ladder.
 

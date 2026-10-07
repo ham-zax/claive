@@ -1288,6 +1288,37 @@ def parser():
     mission_list.add_argument("--json", action="store_true")
     mission_close = mission_sub.add_parser("close")
     mission_close.add_argument("id")
+    goal_cmd = commands.add_parser("goal", help="durable goal queue worked by claive serve")
+    goal_sub = goal_cmd.add_subparsers(dest="goal_action", required=True)
+    goal_add = goal_sub.add_parser("add", help="queue a goal; read-only unless --write")
+    goal_add.add_argument("--title", required=True)
+    goal_add.add_argument("--prompt-file", required=True)
+    goal_add.add_argument("--workspace", required=True)
+    goal_add.add_argument("--role", choices=sorted(ROLES))
+    goal_add.add_argument("--engine")
+    goal_add.add_argument("--model")
+    goal_add.add_argument("--write", action="store_true", help="let the worker edit the workspace")
+    goal_add.add_argument("--budget", help="wall-clock budget: seconds, or 30m / 2h (default 2h)")
+    goal_add.add_argument("--max-attempts", type=int, help="attempts before the goal fails (default 3)")
+    goal_list = goal_sub.add_parser("list")
+    goal_list.add_argument("--all", action="store_true", dest="all_goals", help="include finished goals")
+    goal_list.add_argument("--json", action="store_true")
+    goal_show = goal_sub.add_parser("show")
+    goal_show.add_argument("id")
+    goal_show.add_argument("--json", action="store_true")
+    goal_answer = goal_sub.add_parser("answer", help="answer a parked goal's question")
+    goal_answer.add_argument("id")
+    goal_answer.add_argument("--message", required=True)
+    for name in ("cancel", "retry"):
+        goal_sub.add_parser(name).add_argument("id")
+    serve_cmd = commands.add_parser("serve", help="work the goal queue in the foreground (for systemd)")
+    serve_mode = serve_cmd.add_mutually_exclusive_group()
+    serve_mode.add_argument("--stop", action="store_true", help="set the stop switch and return")
+    serve_mode.add_argument("--resume", action="store_true", help="clear the stop switch and return")
+    serve_mode.add_argument("--status", action="store_true", help="print serve, stop switch and queue state")
+    serve_mode.add_argument("--once", action="store_true", help="run one pass and exit")
+    serve_cmd.add_argument("--interval", type=float, default=5.0, help="seconds between passes (default 5)")
+    serve_cmd.add_argument("--max-parallel", type=int, default=1, help="goals run at once (default 1)")
     followup = commands.add_parser("followup", help="submit related work to an existing reusable worker")
     followup.add_argument("id")
     followup.add_argument("--prompt-file", required=True)
@@ -1545,6 +1576,23 @@ def main(launcher=None):
             return batch_mod.cmd_retry(args.id)
         if args.batch_action == "list":
             return batch_mod.cmd_list(json_output=args.json)
+    elif args.action == "goal":
+        from claivelib import serve as serve_mod
+        if args.goal_action == "add":
+            return serve_mod.cmd_add(args)
+        if args.goal_action == "list":
+            return serve_mod.cmd_list(args.json, args.all_goals)
+        if args.goal_action == "show":
+            return serve_mod.cmd_show(args.id, args.json)
+        if args.goal_action == "answer":
+            return serve_mod.cmd_answer(args.id, args.message)
+        if args.goal_action == "cancel":
+            return serve_mod.cmd_cancel(args.id)
+        if args.goal_action == "retry":
+            return serve_mod.cmd_retry(args.id)
+    elif args.action == "serve":
+        from claivelib import serve as serve_mod
+        return serve_mod.cmd_serve(args)
     elif args.action == "mission":
         from claivelib import mission as mission_mod
         if args.mission_action == "new":

@@ -1,7 +1,8 @@
 # Pi engine
 
 The Pi adapter targets the locally verified Pi 1.0.0 JSON protocol. Muse remains
-the default engine; selecting Pi never changes or falls back to another engine.
+the default engine unless the claive config sets `"default_engine": "pi"` (see
+the README); selecting Pi never changes or falls back to another engine.
 
 ```sh
 claive-worker --engine pi \
@@ -46,6 +47,22 @@ that turn and keep the supervisor available.
   create a worktree separately and supply its path as `--workspace`.
 - `--no-session-log` maps to Pi's `--no-session` for a single turn. Reusable workers
   still require retained sessions.
+
+## Health checks and loopback override
+
+`claive doctor` runs `pi --version`, checks that every model claive may request
+is listed under `opencode2api` in `models.json` (`pi_provider`), and times
+`GET /models` on the provider; it never prints the key. Both checks are required
+when Pi is the default engine. `claive doctor --live` also sends one tiny
+sessionless read-only turn.
+
+A host whose `opencode2api` runs locally can set
+`{"providers": {"opencode2api": {"base_url": "http://127.0.0.1:PORT/v1"}}}` in
+the claive config. Only `localhost` and loopback addresses are accepted. Pi turns
+then use an overlay agent directory, `$CLAIVE_DIR/pi-agent-overlay`, that links
+every entry of the real one and holds a private (0600) `models.json` differing
+only in `baseUrl`. The real `models.json` is never edited. Doctor and the launch
+output report the override.
 
 ## Sessions and results
 

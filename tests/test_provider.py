@@ -137,6 +137,13 @@ class ProviderChecks(unittest.TestCase):
         overlay = self.root / "state/pi-agent-overlay"
         self.assertEqual(oct((overlay / "models.json").stat().st_mode & 0o777), "0o600")
         self.assertEqual(os.readlink(overlay / "settings.json"), str(self.agent.resolve() / "settings.json"))
+        # From inside a Pi worker the agent dir is the overlay itself; its links must survive.
+        result = self.claive("run", "--engine", "pi", "--read-only", "--workspace", str(self.workspace),
+                             "--prompt-file", str(self.prompt), PI_TEST_RECORD=str(record),
+                             PI_CODING_AGENT_DIR=str(overlay))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(os.readlink(overlay / "settings.json"), str(self.agent.resolve() / "settings.json"))
+        self.assertEqual(record.read_text(), override)
 
         self.config.write_text("{}")
         result = self.claive("run", "--engine", "pi", "--read-only", "--workspace", str(self.workspace),

@@ -41,6 +41,7 @@ BREADTH_ROUNDS = 2
 STALL_AFTER = 2
 DIFF_LIMIT = 60000
 OUTPUT_LIMIT = 8000
+NO_SIGN = ("-c", "commit.gpgsign=false")  # checkpoint commits are internal; never prompt for a key
 GIT_IDENTITY = {"GIT_AUTHOR_NAME": "claive-orch", "GIT_AUTHOR_EMAIL": "claive-orch@localhost",
                 "GIT_COMMITTER_NAME": "claive-orch", "GIT_COMMITTER_EMAIL": "claive-orch@localhost"}
 VERSION_TOKENS = {"free", "preview", "flash", "lightning", "ultra", "contributor", "pro", "mini"}
@@ -85,14 +86,17 @@ def parse_score(output, custom=None):
     """Return (passed, total) from test-runner output, or None when unrecognised."""
     if custom:
         match = None
-        for match in re.finditer(custom, output, re.M):
-            pass
-        if match:
-            groups = match.groupdict()
-            passed = int(groups["passed"]) if groups.get("passed") else 0
-            if groups.get("total"):
-                return passed, int(groups["total"])
-            return passed, passed + int(groups.get("failed") or 0)
+        try:
+            for match in re.finditer(custom, output, re.M):
+                pass
+            if match:
+                groups = match.groupdict()
+                passed = int(groups["passed"]) if groups.get("passed") else 0
+                if groups.get("total"):
+                    return passed, int(groups["total"])
+                return passed, passed + int(groups.get("failed") or 0)
+        except (re.error, ValueError):
+            pass  # validated at init; a run recorded before that scores as unrecognised
         return None
     for kind, pattern in SCORE_PATTERNS:
         matches = list(pattern.finditer(output))
@@ -376,10 +380,10 @@ def finish(state, forced, reason):
     if chosen is None:
         outcome = forced or "failed"
         return action("finish", f"{reason}; {why}", outcome=outcome)
-    if forced:
+    if chosen["best"]["passed"]:
+        outcome = "verified"  # a passing checkpoint stays verified even when the budget ran out
+    elif forced:
         outcome = forced
-    elif chosen["best"]["passed"]:
-        outcome = "verified"
     elif state["config"]["arm"] == "D" and len(state["lane_order"]) == 2:
         outcome = "unresolved"
     else:
@@ -540,6 +544,21 @@ def remove_tree(path):
         pass
 
 
+def cache_entry(entry):
+    """Return a cache path normalized relative to the worktree, or None when it is unsafe.
+
+    Restoring an entry deletes and replaces it, so "." (the whole worktree), anything with
+    "..", absolute paths and .git are refused.
+    """
+    cleaned = str(entry).strip()
+    if not cleaned or Path(cleaned).is_absolute() or ".." in Path(cleaned).parts:
+        return None
+    normal = os.path.normpath(cleaned)
+    if normal in {".", ""} or Path(normal).parts[0] == ".git":
+        return None
+    return normal
+
+
 def copy_cached_entry(source, destination):
     """Copy one cached path, keeping symlinks as symlinks."""
     src, dst = Path(source), Path(destination)
@@ -663,8 +682,8 @@ def run_cache_key(config, workspace):
 
 def restore_cache(cache_dir, workspace, cache_paths):
     for entry in cache_paths:
-        cleaned = str(entry).strip().rstrip("/")
-        if not cleaned:
+        cleaned = cache_entry(entry)
+        if cleaned is None:
             continue
         source, destination = Path(cache_dir) / cleaned, Path(workspace) / cleaned
         if os.path.lexists(source):
@@ -681,8 +700,8 @@ def store_cache(cache_root, key, workspace, cache_paths):
             remove_tree(tmpdir)
         tmpdir.mkdir(parents=True, exist_ok=True)
         for entry in cache_paths:
-            cleaned = str(entry).strip().rstrip("/")
-            if not cleaned:
+            cleaned = cache_entry(entry)
+            if cleaned is None:
                 continue
             source, destination = Path(workspace) / cleaned, tmpdir / cleaned
             if os.path.lexists(source):
@@ -997,10 +1016,17 @@ def command_init(args):
     verify_memory = getattr(args, "verify_memory", None)
     if verify_memory:
         memcap.parse_size(verify_memory)
+    if args.score_regex is not None:
+        try:
+            groups = re.compile(args.score_regex).groupindex
+        except re.error as error:
+            raise ValueError(f"--score-regex is not a valid regex: {error}") from error
+        if "passed" not in groups or not {"failed", "total"} & set(groups):
+            raise ValueError("--score-regex needs named groups passed and failed or total")
     for entry in cache_paths:
-        cleaned = str(entry).strip()
-        if not cleaned or Path(cleaned).is_absolute() or ".." in Path(cleaned).parts:
-            raise ValueError(f"--cache-path must be repo-relative without '..': {entry}")
+        if cache_entry(entry) is None:
+            raise ValueError(f"--cache-path must be a repo-relative path inside the worktree "
+                             f"(not '.', '..' or .git): {entry}")
     base = git(repo, "rev-parse", "--verify", (args.base or "HEAD") + "^{commit}")
     run_id = uuid.uuid4().hex[:12]
     path = runs_root() / run_id
@@ -1102,6 +1128,9 @@ def command_worker(args):
         if Path(record.get("actual_workspace") or record["workspace"]).resolve() != Path(lane["path"]).resolve():
             raise ValueError(f"implementer workspace must be the lane worktree {lane['path']}")
     else:
+        if not (record.get("launch") or {}).get("read_only"):
+            raise ValueError(f"{args.role} {args.worker_id} must be a read-only worker (launch it with --read-only); "
+                             "it would otherwise be able to edit the lane")
         candidates = [(model, family)]
         for fallback in record.get("fallback_models") or []:
             candidates.append((fallback, model_family(fallback, engine)))
@@ -1160,30 +1189,42 @@ def command_verify(args):
     locals_ = lane_local_paths(lane, config)
     result = verify_with_cache(config, lane["path"], path / "verify" / f"{args.lane}-r{round_number}.txt", path)
     result["round"] = round_number
-    append(path, "verification.completed", lane=args.lane, result=result)
     best = lane["best"] or state["base"]
     refining = config["arm"] in REFINING
+    # Git work happens before any event is written: a failing reset or commit must not leave a
+    # recorded round without its checkpoint.
     if refining and best is not None and verification_key(result) < verification_key(best):
+        # Keep the rejected candidate reachable before resetting (the first round has no
+        # earlier checkpoint of its own to fall back to).
+        git(lane["path"], "add", "-A", *stage_pathspecs(locals_))
+        git(lane["path"], *NO_SIGN, "commit", "-q", "--no-verify", "--allow-empty", "-m",
+            f"claive-orch {config['run_id']} lane {args.lane} round {round_number} (rejected): {describe(result)}",
+            env=GIT_IDENTITY)
+        rejected = git(lane["path"], "rev-parse", "HEAD")
+        rejected_ref = f"refs/claive-orch/{config['run_id']}/{args.lane}/rejected-r{round_number}"
+        git(lane["path"], "update-ref", rejected_ref, rejected)
         git(lane["path"], "reset", "-q", "--hard", lane["best_commit"])
         clean_args = ["clean", "-fdq"]
         for entry in locals_:
             clean_args += ["-e", f"/{entry}"]
         git(lane["path"], *clean_args)
+        append(path, "verification.completed", lane=args.lane, result=result)
         append(path, "checkpoint.reverted", lane=args.lane, round=round_number, result=result,
-               to_commit=lane["best_commit"], best=best)
+               to_commit=lane["best_commit"], best=best, rejected_ref=rejected_ref)
         print(f"Lane {args.lane} round {round_number}: {describe(result)} is worse than {describe(best)}; "
-              f"reverted to {lane['best_commit'][:12]}")
+              f"reverted to {lane['best_commit'][:12]} (candidate kept at {rejected_ref})")
     else:
         # Local setup/cache outputs and verifier byproducts are never committed; a worker
         # change inside a local path is therefore also left uncommitted (documented limitation).
         git(lane["path"], "add", "-A", *stage_pathspecs(locals_))
-        git(lane["path"], "commit", "-q", "--no-verify", "--allow-empty", "-m",
+        git(lane["path"], *NO_SIGN, "commit", "-q", "--no-verify", "--allow-empty", "-m",
             f"claive-orch {config['run_id']} lane {args.lane} round {round_number}: {describe(result)}",
             env=GIT_IDENTITY)
         commit = git(lane["path"], "rev-parse", "HEAD")
         improved = best is None or verification_key(result) > verification_key(best)
         stat = git(lane["path"], "diff", "--shortstat", lane["base_commit"], commit, check=False)
         lines = sum(int(n) for n in re.findall(r"(\d+) (?:insertion|deletion)", stat))
+        append(path, "verification.completed", lane=args.lane, result=result)
         append(path, "checkpoint.accepted", lane=args.lane, round=round_number, result=result,
                commit=commit, improved=improved, diff_lines=lines)
         print(f"Lane {args.lane} round {round_number}: {describe(result)}; checkpoint {commit[:12]}"
@@ -1612,28 +1653,46 @@ def command_integrate(args):
     diff_extra = ["--", *spec] if spec else []
 
     def filtered_names():
-        output = git(repo, "diff", base, commit, "--name-only", *diff_extra, check=False)
+        output = git(repo, "diff", "--no-renames", base, commit, "--name-only", *diff_extra, check=False)
         return [line.strip() for line in output.splitlines() if line.strip()]
 
-    patch = git(repo, "diff", "--binary", base, commit, *diff_extra, check=False)
+    # Bytes, unstripped: trailing whitespace and CRLF line endings are part of the patch.
+    patch = subprocess.run(["git", "-C", str(repo), "diff", "--no-renames", "--binary", base, commit,
+                            *diff_extra], capture_output=True).stdout
     if not patch.strip():
         if spec:
             raise ValueError("nothing to integrate for the selected paths")
     if patch.strip():
-        patch = patch if patch.endswith("\n") else patch + "\n"
-        first = subprocess.run(["git", "-C", str(repo), "apply"], input=patch,
-                               capture_output=True, text=True)
+        first = subprocess.run(["git", "-C", str(repo), "apply"], input=patch, capture_output=True)
         if first.returncode != 0:
+            # --3way can fail after writing conflict markers and index stages; snapshot the
+            # touched files so a failure leaves the checkout exactly as it was.
+            touched = filtered_names()
+            snapshot = {name: ((Path(repo) / name).read_bytes() if (Path(repo) / name).is_file() else None)
+                        for name in touched}
+            staged = set(git(repo, "diff", "--cached", "--name-only", "--", *touched, check=False).splitlines()
+                         if touched else [])
             second = subprocess.run(["git", "-C", str(repo), "apply", "--3way"], input=patch,
-                                    capture_output=True, text=True)
+                                    capture_output=True)
             if second.returncode == 0:
                 names = filtered_names()
                 if names:
                     subprocess.run(["git", "-C", str(repo), "reset", "-q", "--", *names],
                                    capture_output=True, text=True)
             else:
-                output = ((second.stdout or "") + (second.stderr or "")
-                          + (first.stdout or "") + (first.stderr or ""))
+                for name, content in snapshot.items():
+                    target = Path(repo) / name
+                    if content is None:
+                        target.unlink(missing_ok=True)
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(content)
+                if touched:
+                    git(repo, "reset", "-q", "--", *touched, check=False)
+                if staged:
+                    git(repo, "add", "--", *sorted(staged), check=False)
+                output = b"".join(part or b"" for part in (second.stdout, second.stderr,
+                                                            first.stdout, first.stderr)).decode(errors="replace")
                 names = filtered_names()
                 conflicting = [name for name in names if name and name in output]
                 if not conflicting:

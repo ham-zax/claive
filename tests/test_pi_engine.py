@@ -171,6 +171,24 @@ class PiChecks(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(later["launch"]["model"], override["launch"]["model"])
 
+    def test_only_an_explicit_model_becomes_the_shared_default(self):
+        from claivelib.engines.pi import PiEngine
+        engine = PiEngine()
+        options = dict(session_id=None, session_root=str(self.root / "sessions"))
+        engine.resolve_launch(model="role-or-fallback-model", **options)  # role, batch or fallback
+        self.assertIsNone(engine._selected_model)
+        engine.resolve_launch(model="big-pickle", remember_model=True, **options)
+        self.assertEqual(engine._selected_model, "big-pickle")
+
+    def test_a_stale_settings_lock_is_taken_over(self):
+        lock = self.settings.with_name("settings.json.lock")
+        lock.mkdir()
+        os.utime(lock, (time.time() - 60, time.time() - 60))
+        result, selected = self.launch("--model", "big-pickle")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.settings.read_text())["defaultModel"], "big-pickle")
+        self.assertFalse(lock.exists())
+
     def test_failure_with_zero_exit_and_transport_validation(self):
         for mode in ("failure", "missing", "malformed", "exit-failure"):
             with self.subTest(mode=mode):

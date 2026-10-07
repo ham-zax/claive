@@ -3,6 +3,7 @@ import hermetic  # noqa: F401  (must run before claivelib reads the environment)
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -53,6 +54,31 @@ class MemcapUnit(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 5)
         left = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True)
         self.assertEqual(left.stdout, "")
+
+    def test_terminating_memcap_kills_the_command(self):
+        def children(parent):
+            found = []
+            for entry in Path("/proc").iterdir():
+                try:
+                    if entry.name.isdigit() and int((entry / "stat").read_text().rsplit(")", 1)[1].split()[1]) == parent:
+                        found.append(int(entry.name))
+                except (OSError, IndexError):
+                    pass
+            return found
+
+        for stop in (signal.SIGTERM, signal.SIGKILL):
+            with self.subTest(signal=stop.name):
+                capped = subprocess.Popen([MEMCAP, "1G", "--", "sleep", "60"], stderr=subprocess.PIPE, text=True)
+                deadline = time.monotonic() + 10
+                while not children(capped.pid) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                child = children(capped.pid)[0]
+                capped.send_signal(stop)
+                capped.communicate(timeout=10)
+                deadline = time.monotonic() + 5
+                while memcap.session_processes(child) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertFalse(memcap.session_processes(child), f"command survived {stop.name}")
 
     def test_cli_exit_codes(self):
         hog = subprocess.run([MEMCAP, "100M", "--", "python3", "-c", HOG], capture_output=True, text=True,

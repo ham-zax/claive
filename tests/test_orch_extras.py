@@ -133,7 +133,7 @@ class OrchRun(unittest.TestCase):
         path = self.registry / worker_id
         (path / "requests").mkdir(parents=True)
         state = {"id": worker_id, "engine": engine, "model": model, "workspace": str(workspace),
-                 "status": "completed", "started_at": time.time(), "turn": 1, "launch": {"model": model}}
+                 "status": "completed", "started_at": time.time(), "turn": 1, "launch": {"model": model, "read_only": True}}
         (path / "state.json").write_text(json.dumps(state))
         (path / "result.txt").write_text(answer)
         return worker_id
@@ -234,6 +234,31 @@ class OrchRun(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("calc.py", result.stdout + result.stderr)
         self.assertIn("conflict", (result.stdout + result.stderr).lower())
+        # The failed three-way apply leaves no conflict markers or unmerged index entries.
+        self.assertEqual((self.repo / "calc.py").read_text(), "def add(a, b):\n    return b - a\n")
+        self.assertEqual(self.git("status", "--porcelain").strip(), "")
+
+    def test_integrate_keeps_trailing_whitespace_and_crlf(self):
+        content = FIXED + "# end   \r\n\t\n"
+        run = self.init("D")
+        self.solve(run, content)
+        self.orch("finish", run)
+        self.orch("integrate", run, "--no-verify")
+        self.assertEqual((self.repo / "calc.py").read_bytes(), content.encode())
+
+    def test_a_passing_run_past_its_budget_is_verified(self):
+        run = self.init("D", "--max-minutes", "0.001")
+        self.solve(run)
+        time.sleep(0.1)
+        decision = self.next(run)
+        self.assertEqual((decision["action"], decision["outcome"]), ("finish", "verified"))
+
+    def test_score_regex_is_validated_at_init(self):
+        for bad, message in (("(?P<passed>\\d+", "not a valid regex"), ("(?P<passed>\\d+) ok", "named groups")):
+            result = self.orch("init", "--repo", str(self.repo), "--task-file", str(self.task), "--arm", "A",
+                               "--verify", "true", "--score-regex", bad, ok=False)
+            self.assertIn(message, result.stderr)
+        self.assertIsNone(orch.parse_score("3 ok", "(?P<passed>\\d+"))  # recorded before validation
 
     def test_integrate_refuses_unfinished_or_unverified(self):
         run = self.init("D")

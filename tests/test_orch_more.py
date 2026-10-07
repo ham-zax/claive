@@ -84,7 +84,7 @@ class OrchMore(unittest.TestCase):
         path = self.registry / worker_id
         (path / "requests").mkdir(parents=True)
         state = {"id": worker_id, "engine": engine, "model": model, "workspace": str(workspace),
-                 "status": "completed", "started_at": time.time(), "turn": 1, "launch": {"model": model},
+                 "status": "completed", "started_at": time.time(), "turn": 1, "launch": {"model": model, "read_only": True},
                  **extra}
         (path / "state.json").write_text(json.dumps(state))
         (path / "result.txt").write_text(answer)
@@ -358,7 +358,12 @@ class OrchMore(unittest.TestCase):
 
     def test_cache_options_go_together(self):
         for extra in (["--cache-key", "echo v1"], ["--cache-path", "build"],
-                      ["--cache-key", "echo v1", "--cache-path", "../out"]):
+                      ["--cache-key", "echo v1", "--cache-path", "../out"],
+                      # "." would make a cache restore delete the whole lane worktree.
+                      ["--cache-key", "echo v1", "--cache-path", "."],
+                      ["--cache-key", "echo v1", "--cache-path", "./"],
+                      ["--cache-key", "echo v1", "--cache-path", "src/.."],
+                      ["--cache-key", "echo v1", "--cache-path", ".git/hooks"]):
             result = self.orch("init", "--repo", str(self.repo), "--task-file", str(self.task), "--arm", "D",
                                "--verify", "python3 -m unittest -q", *extra, ok=False)
             self.assertNotEqual(result.returncode, 0, extra)

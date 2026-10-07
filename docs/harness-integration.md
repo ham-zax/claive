@@ -101,7 +101,9 @@ lane run in order. `context: "previous"` passes the prior stage's result
 forward. A stage that does not finish `done` skips the rest of its lane. Use
 `claive batch validate` before `start`. After `batch wait`, read
 `claive batch status ID` and `claive show <stage worker>`. To rerun only the
-stages that did not finish, use `claive batch retry ID`.
+stages that did not finish, use `claive batch retry ID`. A batch whose
+runner process died is reported as `failed`; retry keeps any stage whose
+worker is still running and waits for it.
 
 ## Safety
 

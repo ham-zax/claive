@@ -120,6 +120,15 @@ class ServeChecks(unittest.TestCase):
         goal = self.until(goal_id, lambda g: g["status"] == "done", "writable goal")
         self.assertFalse(self.worker(goal["worker"])["launch"]["read_only"])
 
+    def test_workers_cannot_queue_goals(self):
+        prompt = self.root / "p.md"
+        prompt.write_text("x")
+        self.env["CLAIVE_WORKER_ID"] = "abc"
+        refused = self.claive("goal", "add", "--title", "n", "--prompt-file", str(prompt),
+                              "--workspace", str(self.workspace), "--engine", "fixture")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("may not launch workers", refused.stderr)
+
     def test_budget_cancels_a_goal_that_runs_too_long(self):
         goal_id = self.add("slow", "slow", "--budget", "1")
         goal = self.until(goal_id, lambda g: g["status"] == "timed_out", "budget")
@@ -194,6 +203,17 @@ class ServeChecks(unittest.TestCase):
         self.assertIn("left running", (self.state / "supervisor/serve.log").read_text())
         goal = self.until(goal_id, lambda g: g["status"] == "timed_out", "adopted goal")
         self.assertEqual(self.worker(goal["worker"])["status"], "cancelled")
+
+
+    def test_a_dead_supervisor_is_not_retried_while_its_worker_still_runs(self):
+        goal_id = self.add("orphan", "slow", "--max-attempts", "2")
+        goal = self.until(goal_id, lambda g: g["status"] == "running" and g.get("worker"), "running")
+        self.until(goal_id, lambda g: self.worker(g["worker"]).get("worker_pid"), "worker pid", serve=False)
+        worker = self.worker(goal["worker"])
+        os.kill(worker["supervisor_pid"], signal.SIGKILL)  # the worker process itself survives
+        goal = self.until(goal_id, lambda g: g["status"] != "running", "orphan handled")
+        self.assertIsNone(module.identity(worker["worker_pid"]), "orphaned worker must be killed before a retry")
+        self.assertIn("orphaned worker", json.dumps(goal))
 
 
 if __name__ == "__main__":

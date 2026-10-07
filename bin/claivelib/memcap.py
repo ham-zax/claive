@@ -71,14 +71,33 @@ def kill_session(session):
         time.sleep(0.05)
 
 
-def run_capped(command, limit=None, timeout=None, cwd=None, env=None, capture=True):
+def _die_with_parent():
+    """In the child: get SIGKILL when the parent dies, even if the parent was SIGKILLed (Linux)."""
+    try:
+        import ctypes
+        ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGKILL)  # PR_SET_PDEATHSIG
+    except (OSError, AttributeError):
+        pass
+
+
+class Stopped(Exception):
+    """SIGTERM or SIGHUP reached claive-memcap; the capped session is killed on the way out."""
+
+
+def _raise_stopped(signum, frame):
+    raise Stopped(signal.Signals(signum).name)
+
+
+def run_capped(command, limit=None, timeout=None, cwd=None, env=None, capture=True, die_with_parent=False):
     """Run argv under the cap. Returns a dict: code, stdout, stderr, exceeded, timed_out, peak.
 
-    code is None when the command was killed for memory or time.
+    code is None when the command was killed for memory or time. die_with_parent ties the
+    command's lifetime to the calling thread; use it only from a thread that outlives the run.
     """
     outputs = [tempfile.TemporaryFile(mode="w+") for _ in range(2)] if capture else [None, None]
     process = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL if capture else None,
-                               stdout=outputs[0], stderr=outputs[1], text=True, start_new_session=True)
+                               stdout=outputs[0], stderr=outputs[1], text=True, start_new_session=True,
+                               preexec_fn=_die_with_parent if die_with_parent else None)
     started = time.monotonic()
     exceeded = timed_out = False
     peak = 0
@@ -134,10 +153,16 @@ def entrypoint(argv=None):
         limit = parse_size(args.limit)
         if args.timeout is not None and args.timeout <= 0:
             raise ValueError("--timeout must be positive")
-        result = run_capped(command, limit, args.timeout, capture=False)
+        # Default SIGTERM/SIGHUP handling would exit without killing the session.
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(signum, _raise_stopped)
+        result = run_capped(command, limit, args.timeout, capture=False, die_with_parent=True)
     except (ValueError, OSError) as error:
         print(f"claive-memcap: {error}", file=sys.stderr)
         return 2
+    except Stopped as stopped:
+        print(f"claive-memcap: stopped by {stopped}; killed the command", file=sys.stderr)
+        return 128 + signal.Signals[str(stopped)].value
     if result["exceeded"]:
         print(f"claive-memcap: killed: memory exceeded {format_size(limit)} "
               f"(peak sampled {format_size(result['peak'])})", file=sys.stderr)

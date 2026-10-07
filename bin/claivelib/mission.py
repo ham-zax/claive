@@ -58,12 +58,14 @@ def resolve_mission(explicit=None):
 
 
 def link_auto(mission_id, kind, target_id):
-    require_open(mission_id)
-    _add_link(mission_id, kind, target_id)
+    _add_link(mission_id, kind, target_id, require_open=True)
 
 
-def _add_link(mission_id, kind, target_id):
+def _add_link(mission_id, kind, target_id, require_open=False):
     with updating(mission_id) as data:
+        # Checked under the lock so a concurrent close cannot slip in between check and link.
+        if require_open and data.get("status") != "open":
+            raise ValueError(f"mission is closed: {mission_id}")
         if not any(link.get("kind") == kind and link.get("id") == target_id for link in data["links"]):
             data["links"].append(dict(kind=kind, id=target_id, at=time.time()))
 

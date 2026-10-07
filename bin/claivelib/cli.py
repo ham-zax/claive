@@ -475,6 +475,9 @@ def supervise(job_id, control=None):
 
     signal.signal(signal.SIGTERM, stop_requested)
     signal.signal(signal.SIGINT, stop_requested)
+    # A foreground run whose terminal closes gets SIGHUP; stop the worker (it is in its own
+    # session and would outlive us) and release the worktree instead of dying mid-turn.
+    signal.signal(signal.SIGHUP, stop_requested)
     save(path / "state.json", state)
     attempt = 0
     try:
@@ -668,6 +671,8 @@ def supervise(job_id, control=None):
     state.pop("answer", None)
     state["ended_at"] = time.time()
     state["phase"] = state["status"]
+    if control is None or stopping:
+        release_worktree(state)
     save(path / "state.json", state)
     _write_turn_event(state)
     return outcome_code(state)
@@ -684,42 +689,88 @@ def outcome_code(state):
     return min(code, 255) if isinstance(code, int) and code > 0 else 1
 
 
-def release_worktree(job_id):
-    """Remove a worktree claive created for this worker (see MuseEngine.prepare_isolation).
+def _worktree_git(cwd, *args):
+    return subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, timeout=120)
 
-    A writer's worktree and branch are kept when it has uncommitted changes or new commits.
+
+DEPENDENCY_DIRS = {"node_modules", ".venv", "venv", ".tox", ".nox"}  # ignored and reinstallable
+
+
+def _worktree_changes(target, base_commit):
+    """Return why a writer worktree must be kept, or None when it holds nothing new.
+
+    Untracked and ignored files count, except tool caches and reinstallable dependency trees;
+    a failed git query counts too.
     """
-    path = job_path(job_id)
-    state = load(path, check_alive=False)
+    from claivelib.orchestration import BYPRODUCT_DIRS
+    status = _worktree_git(target, "status", "--porcelain", "--untracked-files=all", "--ignored")
+    if status.returncode:
+        return "git status failed"
+    for line in status.stdout.splitlines():
+        parts = line[3:].strip('"').rstrip("/").split("/")
+        if line.startswith("!!") and (set(parts) & (BYPRODUCT_DIRS | DEPENDENCY_DIRS)
+                                      or parts[-1].endswith((".pyc", ".pyo"))):
+            continue
+        return "has changes"
+    ahead = _worktree_git(target, "rev-list", "--count", f"{base_commit}..HEAD")
+    if ahead.returncode or ahead.stdout.strip() != "0":
+        return "has new commits"
+    return None
+
+
+def remove_worktree(isolation):
+    """Remove a claive-created worktree (and its branch); return an error string when git refuses."""
+    target, source, branch = isolation["existing_path"], isolation["source"], isolation.get("branch")
+    removed = _worktree_git(source, "worktree", "remove", "--force", target)
+    if removed.returncode:
+        return (removed.stderr or removed.stdout).strip() or "git worktree remove failed"
+    if branch:
+        _worktree_git(source, "branch", "-D", branch)
+    return None
+
+
+def release_worktree(state):
+    """Remove the worktree claive created for this worker (see MuseEngine.prepare_isolation).
+
+    Runs before the worker's terminal state is saved, so `claive wait` sees `retained_worktree`.
+    A writer's worktree and branch are kept when it has changes or new commits, and any
+    worktree is kept when git refuses to remove it.
+    """
     isolation = launch_config(state).get("isolation") or {}
-    if isolation.get("owner") != "claive" or not Path(isolation.get("existing_path") or "").is_dir():
+    if (isolation.get("owner") != "claive" or state.get("retained_worktree")
+            or not Path(isolation.get("existing_path") or "").is_dir()):
         return
     target, source, branch = isolation["existing_path"], isolation["source"], isolation.get("branch")
-
-    def git(*args, cwd=source):
-        return subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, timeout=120)
-
-    if branch:
-        dirty = git("status", "--porcelain", cwd=target)
-        ahead = git("rev-list", "--count", f"{isolation['base_commit']}..HEAD", cwd=target)
-        if dirty.returncode or dirty.stdout.strip() or ahead.returncode or ahead.stdout.strip() != "0":
-            state["retained_worktree"] = target
-            save(path / "state.json", state)
-            print(f"Worker {job_id}: worktree {target} (branch {branch}) has changes and is kept; "
-                  f"remove it with: git -C {shlex.quote(source)} worktree remove {shlex.quote(target)}", flush=True)
+    reason = _worktree_changes(target, isolation["base_commit"]) if branch else None
+    if reason is None:
+        error = remove_worktree(isolation)
+        if error is None:
             return
-    if git("worktree", "remove", "--force", target).returncode:
-        shutil.rmtree(target, ignore_errors=True)
-        git("worktree", "prune")
-    if branch:
-        git("branch", "-D", branch)
+        reason = f"could not be removed ({error})"
+    state["retained_worktree"] = target
+    label = f"worktree {target}" + (f" (branch {branch})" if branch else "")
+    try:
+        print(f"Worker {state['id']}: {label} {reason} and is kept; remove it with: "
+              f"git -C {shlex.quote(source)} worktree remove {shlex.quote(target)}", flush=True)
+    except OSError:
+        pass  # the terminal may be gone (SIGHUP); retained_worktree records it anyway
 
 
 def run_supervisor(job_id, reusable):
     try:
         return reusable_worker(job_id) if reusable else supervise(job_id)
     finally:
-        release_worktree(job_id)
+        # Normal exits released the worktree already; this covers a supervisor that raised.
+        # A failure here must not replace the supervisor's own result or exception.
+        try:
+            path = job_path(job_id)
+            state = load(path, check_alive=False)
+            before = state.get("retained_worktree")
+            release_worktree(state)
+            if state.get("retained_worktree") != before:
+                save(path / "state.json", state)
+        except Exception as error:
+            print(f"Worker {job_id}: worktree cleanup failed: {error}", file=sys.stderr, flush=True)
 
 
 def reusable_worker(job_id):
@@ -803,12 +854,14 @@ def reusable_worker(job_id):
                 break
             if (path / "close.request").exists():
                 state.update(status=state["last_turn_status"], phase="session closed", ended_at=time.time())
+                release_worktree(state)
                 save(path / "state.json", state)
                 print(f"Worker {job_id} closed; durable session {worker_session_id(state)} retained", flush=True)
                 return outcome_code(state)
             time.sleep(0.2)
         if control["stopping"]:
             state.update(status="cancelled", phase="cancelled", ended_at=time.time())
+            release_worktree(state)
             save(path / "state.json", state)
             return 130
 
@@ -857,7 +910,7 @@ def create_job(args):
         provider=args.provider, model=effective_model, read_only=read_only, web=args.web,
         output_schema=args.output_schema, session_logging=not args.no_session_log,
         isolation=isolation, session_id=session_id, session_root=str(root() / "sessions"),
-        workspace=str(workspace),
+        workspace=str(workspace), remember_model=bool(args.model and getattr(args, "remember_model", True)),
     )
     check_model_policy(launch.get("model"))
     engine.validate_launch(launch)
@@ -883,50 +936,73 @@ def create_job(args):
     except ValueError:
         shutil.rmtree(path, ignore_errors=True)
         raise
-    initial_turn = dataclasses.replace(initial_turn, isolation=launch["isolation"])
-    save(path / "policy.json", dict(reasoning_effort=effort, max_model_steps=steps))
-    report_contract = bool(getattr(args, "report", False) or role)
-    effective_prompt, source_prompt = str(prompt), None
-    if report_contract:
-        source_prompt = str(prompt)
-        preamble = role_def["preamble"] if role_def else None
-        body = prompt.read_text()
-        composed = f"{preamble}\n\n{body}\n\n{REPORT_CONTRACT}" if preamble else f"{body}\n\n{REPORT_CONTRACT}"
-        (path / "prompt-0001.md").write_text(composed)
-        effective_prompt = str(path / "prompt-0001.md")
-        initial_turn = TurnRequest(
-            binary=launch["binary"], workspace=str(workspace), prompt_file=effective_prompt,
-            session_id=session_id, provider=launch["provider"], model=launch["model"],
-            reasoning_effort=effort, max_model_steps=steps,
-            read_only=launch["read_only"], web=launch["web"], output_schema=launch["output_schema"],
-            session_logging=launch["session_logging"], isolation=launch["isolation"],
-            session_dir=launch.get("session_dir"),
-        )
-    command = engine.build_command(initial_turn)
-    state = dict(schema_version=SCHEMA_VERSION, engine=engine_name, session_id=session_id,
-                 id=job_id, label=args.label or prompt.stem, workspace=str(workspace), log_dir=str(path),
-                 prompt_file=effective_prompt, command=command, launch=launch, status="starting", phase="starting",
-                 started_at=time.time(), steps=0, task_failures=0, malformed_events=0,
-                 model=launch.get("model"), reasoning_effort=effort, max_model_steps=steps,
-                 reusable=args.action == "open", turn=1,
-                 fallback_models=fallback_models, fallbacks=[])
-    if turn_timeout is not None:
-        state["turn_timeout"] = turn_timeout
-    if report_contract:
-        state["report_contract"] = True
-    if role:
-        state["role"] = role
-    if source_prompt:
-        state["source_prompt_file"] = source_prompt
-    if launch["isolation"].get("mode") == "existing":
-        state["actual_workspace"] = launch["isolation"]["existing_path"]
-    if mission_id:
-        state["mission"] = mission_id
-    save(path / "state.json", state)
-    if mission_id:
-        from claivelib import mission as mission_mod
-        mission_mod.link_auto(mission_id, "worker", job_id)
+    try:
+        initial_turn = dataclasses.replace(initial_turn, isolation=launch["isolation"])
+        save(path / "policy.json", dict(reasoning_effort=effort, max_model_steps=steps))
+        report_contract = bool(getattr(args, "report", False) or role)
+        effective_prompt, source_prompt = str(prompt), None
+        if report_contract:
+            source_prompt = str(prompt)
+            preamble = role_def["preamble"] if role_def else None
+            body = prompt.read_text()
+            composed = f"{preamble}\n\n{body}\n\n{REPORT_CONTRACT}" if preamble else f"{body}\n\n{REPORT_CONTRACT}"
+            (path / "prompt-0001.md").write_text(composed)
+            effective_prompt = str(path / "prompt-0001.md")
+            initial_turn = TurnRequest(
+                binary=launch["binary"], workspace=str(workspace), prompt_file=effective_prompt,
+                session_id=session_id, provider=launch["provider"], model=launch["model"],
+                reasoning_effort=effort, max_model_steps=steps,
+                read_only=launch["read_only"], web=launch["web"], output_schema=launch["output_schema"],
+                session_logging=launch["session_logging"], isolation=launch["isolation"],
+                session_dir=launch.get("session_dir"),
+            )
+        command = engine.build_command(initial_turn)
+        state = dict(schema_version=SCHEMA_VERSION, engine=engine_name, session_id=session_id,
+                     id=job_id, label=args.label or prompt.stem, workspace=str(workspace), log_dir=str(path),
+                     prompt_file=effective_prompt, command=command, launch=launch, status="starting", phase="starting",
+                     started_at=time.time(), steps=0, task_failures=0, malformed_events=0,
+                     model=launch.get("model"), reasoning_effort=effort, max_model_steps=steps,
+                     reusable=args.action == "open", turn=1,
+                     fallback_models=fallback_models, fallbacks=[])
+        if turn_timeout is not None:
+            state["turn_timeout"] = turn_timeout
+        if report_contract:
+            state["report_contract"] = True
+        if role:
+            state["role"] = role
+        if source_prompt:
+            state["source_prompt_file"] = source_prompt
+        if launch["isolation"].get("mode") == "existing":
+            state["actual_workspace"] = launch["isolation"]["existing_path"]
+        if mission_id:
+            state["mission"] = mission_id
+        save(path / "state.json", state)
+        if mission_id:
+            from claivelib import mission as mission_mod
+            mission_mod.link_auto(mission_id, "worker", job_id)
+    except BaseException:
+        discard_job(path, launch)
+        raise
     return path, state
+
+
+def discard_job(path, launch):
+    """Undo a job no supervisor ever ran: its claive-created worktree, branch and job dir."""
+    isolation = launch.get("isolation") or {}
+    if isolation.get("owner") == "claive":
+        remove_worktree(isolation)
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def spawn_supervisor(path, state, entry):
+    """Start a detached supervisor (`_supervise` or `_reusable`); discard the job if it cannot start."""
+    try:
+        with (path / "supervisor.log").open("w") as log:
+            subprocess.Popen([sys.executable, launcher_path(), entry, state["id"]],
+                             stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+    except BaseException:
+        discard_job(path, launch_config(state))
+        raise
 
 
 def report(state):
@@ -1412,9 +1488,7 @@ def main(launcher=None):
         path, state = create_job(args)
         print(f"Worker {state['id']} | {clean(state['label'])} | {path}", flush=True)
         if args.action == "open" and getattr(args, "detach", False):
-            with (path / "supervisor.log").open("w") as log:
-                subprocess.Popen([sys.executable, launcher_path(), "_reusable", state["id"]],
-                                 stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+            spawn_supervisor(path, state, "_reusable")
             print(f"Wait: claive wait {state['id']}\nFollow-up: claive followup {state['id']} --prompt-file ...\n"
                   f"Answer: claive answer {state['id']} --message ...\nClose: claive close {state['id']}")
             return 0
@@ -1422,9 +1496,7 @@ def main(launcher=None):
             code = run_supervisor(state["id"], reusable=args.action == "open")
             report(load(path))
             return code
-        with (path / "supervisor.log").open("w") as log:
-            subprocess.Popen([sys.executable, launcher_path(), "_supervise", state["id"]],
-                             stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+        spawn_supervisor(path, state, "_supervise")
         print(f"Inspect: claive show {state['id']}\nCancel:  claive cancel {state['id']}")
         return 0
     if args.action == "list":

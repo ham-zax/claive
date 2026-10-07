@@ -15,7 +15,8 @@ Pi uses `opencode2api` and high thinking. The initial model is
 `muse-spark-1.3-contributor-free`. When `--model` is omitted, new workers read
 Pi's global `defaultModel` for this provider. An explicit `--model ID` is saved
 after launch-option validation, so later agents inherit that selection, including
-across worker registries and workspaces. A failed model request does not undo the
+across worker registries and workspaces. Role models, batch stage models and timeout fallback
+models are not saved. A failed model request does not undo the
 selection. Already-open workers keep their launch model; their follow-ups do not
 reset the shared default. Settings are in `~/.pi/agent/settings.json`, or the directory
 selected by `PI_CODING_AGENT_DIR`; unrelated settings are preserved. `PI_WORKER_BINARY`

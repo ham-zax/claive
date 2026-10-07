@@ -20,6 +20,7 @@ from claivelib import config
 
 PROVIDER = "opencode2api"
 FALLBACK_MODEL = "muse-spark-1.3-contributor-free"
+SOURCE_MARKER = ".claive-source"  # in the overlay: the real agent dir it mirrors
 
 
 def agent_dir():
@@ -30,9 +31,9 @@ def models_file():
     return agent_dir() / "models.json"
 
 
-def read_models():
+def read_models(directory=None):
     """Return (models.json data, provider entry); raise ValueError when either is unusable."""
-    path = models_file()
+    path = Path(directory) / "models.json" if directory else models_file()
     if not path.is_file():
         raise ValueError(f"missing {path}")
     try:
@@ -80,12 +81,24 @@ def overlay_agent_dir(state_root):
     url = override_url()
     if not url:
         return None
-    data, entry = read_models()
-    real = agent_dir().resolve()
     overlay = Path(state_root) / "pi-agent-overlay"
+    source = overlay / SOURCE_MARKER
+    real = agent_dir().resolve()
+    if overlay.exists() and real == overlay.resolve():
+        # Run from inside a Pi worker, whose agent dir already is this overlay: relinking it
+        # into itself would replace every link with a self-loop and then delete them all.
+        try:
+            real = Path(source.read_text().strip()).resolve()
+        except OSError as error:
+            raise ValueError(f"Pi agent dir is the claive overlay but {source} is unreadable") from error
+        if real == overlay.resolve():
+            raise ValueError(f"{source} points at the overlay itself")
+    data, entry = read_models(real)
     overlay.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not source.is_file() or source.read_text().strip() != str(real):
+        source.write_text(str(real) + "\n")
     for child in real.iterdir():
-        if child.name == "models.json":
+        if child.name in {"models.json", SOURCE_MARKER}:
             continue
         link = overlay / child.name
         if link.is_symlink() and os.readlink(link) == str(child):

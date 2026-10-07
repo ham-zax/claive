@@ -1,5 +1,6 @@
 """Completion inbox: append-only events with per-consumer cursors."""
 import datetime
+import fcntl
 import json
 import os
 import re
@@ -70,13 +71,21 @@ def read_new(consumer="default", peek=False):
     cursors = root / "inbox-cursors"
     cursors.mkdir(parents=True, exist_ok=True, mode=0o700)
     cursor_file = cursors / consumer
+    # One reader per consumer at a time, and the cursor is replaced atomically: a torn or
+    # concurrent cursor would read as 0 and replay the whole inbox.
+    with (cursors / f".{consumer}.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _read_from(inbox, cursor_file, peek)
+
+
+def _read_from(inbox, cursor_file, peek):
     try:
         start = int(cursor_file.read_text().strip() or 0)
     except (OSError, ValueError):
         start = 0
     if not inbox.exists():
         if not peek:
-            cursor_file.write_text("0")
+            _save_cursor(cursor_file, 0)
         return []
     size = inbox.stat().st_size
     if start > size:
@@ -97,8 +106,14 @@ def read_new(consumer="default", peek=False):
         if line.strip():
             events.append(json.loads(line))
     if not peek:
-        cursor_file.write_text(str(end))
+        _save_cursor(cursor_file, end)
     return events
+
+
+def _save_cursor(cursor_file, offset):
+    temporary = cursor_file.with_name(f".{cursor_file.name}.{os.getpid()}.tmp")
+    temporary.write_text(str(offset))
+    os.replace(temporary, cursor_file)
 
 
 def format_text(events):

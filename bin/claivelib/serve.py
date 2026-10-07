@@ -133,6 +133,7 @@ def claive_command(*args):
 # --- claive goal -------------------------------------------------------------------------------
 
 def cmd_add(args):
+    cli_mod.check_nested()  # queued goals launch workers
     prompt = Path(args.prompt_file)
     if not prompt.is_absolute() or not prompt.is_file() or not prompt.stat().st_size:
         raise ValueError("--prompt-file must be an existing nonempty absolute file")
@@ -196,6 +197,7 @@ def cmd_show(goal_id, json_output=False):
 
 
 def cmd_answer(goal_id, message):
+    cli_mod.check_nested()  # queued goals launch workers
     with updating(goal_id) as goal:
         if goal["status"] != "parked":
             raise ValueError(f"goal {goal_id} is {goal['status']}, not waiting for an answer")
@@ -224,6 +226,13 @@ def cmd_answer(goal_id, message):
     return 0
 
 
+def orphan_alive(state):
+    """True when an interrupted worker's own process outlived its supervisor."""
+    pid = state.get("worker_pid")
+    return (state.get("status") == "interrupted" and bool(pid)
+            and cli_mod.identity(pid) == state.get("worker_identity"))
+
+
 def cancel_worker(worker):
     if not worker:
         return
@@ -231,7 +240,7 @@ def cancel_worker(worker):
         state = cli_mod.load(cli_mod.job_path(worker))
     except ValueError:
         return
-    if state["status"] in cli_mod.ACTIVE:
+    if state["status"] in cli_mod.ACTIVE or orphan_alive(state):
         claive_command("cancel", worker)
 
 
@@ -249,6 +258,7 @@ def cmd_cancel(goal_id):
 
 
 def cmd_retry(goal_id):
+    cli_mod.check_nested()  # queued goals launch workers
     with updating(goal_id) as goal:
         if goal["status"] not in {"failed", "timed_out", "cancelled"}:
             raise ValueError(f"goal {goal_id} is {goal['status']}; only failed, timed_out or cancelled goals retry")
@@ -318,7 +328,11 @@ class Server:
                     continue
                 worker = current.get("worker")
                 cancel_worker(worker)
-                self.wait_stopped(worker)
+                if not self.wait_stopped(worker):
+                    # Requeuing now would let the next launch run beside it; reconcile on resume.
+                    note(current, f"worker {worker} did not stop after cancel; still tracked")
+                    self.log(f"goal {current['id']}: worker {worker} did not stop; left running")
+                    continue
                 pause_clock(current)
                 if current["status"] == "running":
                     current.update(status="queued", worker=None)
@@ -329,16 +343,19 @@ class Server:
         self.log(f"stop switch {stop_file()} present; exiting (remove with claive serve --resume)")
 
     def wait_stopped(self, worker, timeout=15):
+        """Return True once the worker (and any orphaned child) has stopped."""
         if not worker:
-            return
+            return True
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        while True:
             try:
                 state = cli_mod.load(cli_mod.job_path(worker))
             except ValueError:
-                return
-            if state["status"] not in cli_mod.ACTIVE:
-                return
+                return True
+            if state["status"] not in cli_mod.ACTIVE and not orphan_alive(state):
+                return True
+            if time.monotonic() >= deadline:
+                return False
             time.sleep(0.2)
 
     def reconcile(self, goal):
@@ -389,6 +406,16 @@ class Server:
             self.log(f"goal {goal['id']}: done (worker {goal['worker']})")
             post(goal, "done")
             return
+        if orphan_alive(state):
+            # The supervisor died but its worker process still runs: stop it before any retry,
+            # or two workers would edit the same workspace.
+            claive_command("cancel", goal["worker"])
+            # SIGKILL is not instant; give the orphan a moment to go before deferring.
+            if not self.wait_stopped(goal["worker"], timeout=5):
+                self.log(f"goal {goal['id']}: orphaned worker {goal['worker']} still running; retry deferred")
+                return
+            note(goal, f"orphaned worker {goal['worker']} stopped")
+            state = cli_mod.load(path)  # cancel rewrote the record
         kind = state.get("failure_kind") or ("interrupted" if turn_status == "interrupted" else "worker")
         self.close(goal["worker"], state)
         self.failed(goal, kind, state.get("error") or turn_status)

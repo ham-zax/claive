@@ -180,7 +180,7 @@ class RunChecks(unittest.TestCase):
         path = self.registry / worker_id
         (path / "requests").mkdir(parents=True)
         state = {"id": worker_id, "engine": engine, "model": model, "workspace": str(workspace),
-                 "status": "completed", "started_at": time.time(), "turn": 1, "launch": {"model": model}}
+                 "status": "completed", "started_at": time.time(), "turn": 1, "launch": {"model": model, "read_only": True}}
         (path / "state.json").write_text(json.dumps(state))
         (path / "result.txt").write_text(answer)
         return worker_id
@@ -205,6 +205,11 @@ class RunChecks(unittest.TestCase):
         same = self.worker(lane_a, "pi", "muse-spark-1.3-free")
         refused = self.orch("worker", run, "a", "--role", "critic", "--worker-id", same, ok=False)
         self.assertIn("family", refused.stderr)
+        writer = self.worker(lane_a, "pi", "nemotron-3-ultra-free")
+        record = self.registry / writer / "state.json"
+        record.write_text(json.dumps(dict(json.loads(record.read_text()), launch={"model": "nemotron-3-ultra-free"})))
+        refused = self.orch("worker", run, "a", "--role", "critic", "--worker-id", writer, ok=False)
+        self.assertIn("must be a read-only worker", refused.stderr)
         answer = '```json\n{"no_concrete_defect": false, "approach_sound": true, "defects": [{"location": ' \
                  '"calc.py:6", "description": "mul returns a + b", "evidence": "both", "localized": true}]}\n```'
         critic = self.worker(lane_a, "pi", "nemotron-3-ultra-free", answer)
@@ -217,6 +222,9 @@ class RunChecks(unittest.TestCase):
         self.assertIn("reverted", self.orch("verify", run, "a").stdout)
         self.assertEqual((lane_a / "calc.py").read_text(), HALF)
         self.assertFalse((lane_a / "junk.py").exists())
+        kept = subprocess.run(["git", "-C", str(lane_a), "show", f"refs/claive-orch/{run}/a/rejected-r1:junk.py"],
+                              capture_output=True, text=True)
+        self.assertEqual(kept.stdout, "x = 1\n", "the rejected candidate stays reachable")
         decision = self.next(run)
         self.assertEqual((decision["action"], decision["round"]), ("critique", 2))
         nothing = self.worker(lane_a, "pi", "mimo-v2.6-flash-free", '{"no_concrete_defect": true, "defects": []}')

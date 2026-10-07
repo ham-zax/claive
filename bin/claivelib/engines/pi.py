@@ -10,6 +10,8 @@ from claivelib import provider
 from claivelib.engine import WorkerEngine
 from claivelib.state import launch_config, session_id
 
+STALE_LOCK_SECONDS = 10
+
 
 def default_binary():
     return os.environ.get("PI_WORKER_BINARY", str(Path.home() / ".local/bin/pi"))
@@ -42,6 +44,13 @@ class PiEngine(WorkerEngine):
                 lock.mkdir()
                 break
             except FileExistsError:
+                try:
+                    # Like Pi's lockfile: a lock untouched for 10s belongs to a crashed writer.
+                    if time.time() - lock.stat().st_mtime > STALE_LOCK_SECONDS:
+                        lock.rmdir()
+                        continue
+                except OSError:
+                    pass
                 if attempt == 9:
                     raise ValueError(f"Pi settings are locked: {path}")
                 time.sleep(0.02)
@@ -74,7 +83,9 @@ class PiEngine(WorkerEngine):
         identifier = options.get("session_id")
         settings = self._settings()
         remembered = settings.get("defaultModel") if settings.get("defaultProvider") == "opencode2api" else None
-        self._selected_model = options.get("model")
+        # Only a model the user chose (--model) becomes Pi's shared default; role models,
+        # batch stage models and timeout fallbacks are per-worker choices.
+        self._selected_model = options.get("model") if options.get("remember_model") else None
         launch = {
             "binary": default_binary(),
             "provider": options.get("provider") or "opencode2api",

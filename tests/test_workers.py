@@ -362,6 +362,57 @@ class WorkerChecks(unittest.TestCase):
         self.assertIn(f"claive/{job}", subprocess.check_output(["git", "branch"], cwd=repo, text=True))
         self.assertEqual(json.loads((self.registry / job / "state.json").read_text())["retained_worktree"], str(tree))
 
+    def test_worktree_release_counts_ignored_files_and_keeps_what_git_refuses(self):
+        repo = self.git_repo(self.path / "repo")
+        (repo / ".gitignore").write_text("build/\n__pycache__/\nnode_modules/\n")
+        git = ["git", "-c", "user.email=t@example.com", "-c", "user.name=T"]
+        subprocess.run([*git, "add", ".gitignore"], cwd=repo, check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "ignore"], cwd=repo, check=True)
+        base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+        def worker(name, branch=None):
+            tree = self.path / name
+            subprocess.run(["git", "worktree", "add", "-q", *(["-b", branch] if branch else ["--detach"]),
+                            str(tree), base], cwd=repo, check=True)
+            isolation = dict(mode="existing", existing_path=str(tree), owner="claive", source=str(repo),
+                             branch=branch, base_commit=base)
+            return tree, dict(id=name, schema_version=module.SCHEMA_VERSION, launch=dict(isolation=isolation))
+
+        tree, state = worker("caches", "claive/caches")
+        (tree / "__pycache__").mkdir()
+        (tree / "__pycache__" / "m.cpython-312.pyc").write_bytes(b"")
+        (tree / "node_modules" / "pkg").mkdir(parents=True)
+        (tree / "node_modules" / "pkg" / "index.js").write_text("")
+        module.release_worktree(state)
+        self.assertFalse(tree.exists())  # tool caches alone do not keep a worktree
+        self.assertNotIn("retained_worktree", state)
+
+        tree, state = worker("built", "claive/built")
+        (tree / "build").mkdir()
+        (tree / "build" / "out.bin").write_text("artifact")
+        module.release_worktree(state)
+        self.assertEqual(state["retained_worktree"], str(tree))
+        self.assertTrue((tree / "build" / "out.bin").exists())
+
+        tree, state = worker("locked")
+        subprocess.run(["git", "worktree", "lock", str(tree)], cwd=repo, check=True)
+        module.release_worktree(state)
+        self.assertEqual(state["retained_worktree"], str(tree))
+        self.assertTrue(tree.is_dir())
+
+    def test_launch_failure_after_worktree_creation_leaves_nothing_behind(self):
+        repo = self.git_repo(self.path / "repo")
+        prompt = self.path / "latin1.md"
+        prompt.write_bytes(b"caf\xe9 task\n")  # not UTF-8: --report reads it after the worktree exists
+        before = set(self.registry.iterdir()) if self.registry.exists() else set()
+        result = self.cli("start", "--workspace", str(repo), "--prompt-file", str(prompt), "--worktree", "--report")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(set(self.registry.iterdir()) - before, set())
+        trees = subprocess.check_output(["git", "worktree", "list", "--porcelain"], cwd=repo, text=True)
+        self.assertEqual(trees.count("worktree "), 1, trees)
+        branches = subprocess.check_output(["git", "branch", "--list", "claive/*"], cwd=repo, text=True)
+        self.assertEqual(branches.strip(), "")
+
     def test_reopen_retained_session_in_existing_worktree(self):
         worktree = self.path / "existing worktree"
         worktree.mkdir()

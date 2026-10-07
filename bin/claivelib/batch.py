@@ -1,5 +1,6 @@
 """Batches: parallel lanes of ordered single-turn stage workers."""
 import argparse
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -37,7 +38,35 @@ def batch_path(batch_id):
 
 
 def load_state(batch_id):
-    return json.loads((batch_path(batch_id) / "state.json").read_text())
+    state_file = batch_path(batch_id) / "state.json"
+    state = json.loads(state_file.read_text())
+    if state.get("status") == "running" and not _runner_alive(batch_id):
+        # Any reader may notice the dead runner; the lock and re-read make exactly one record it.
+        with (batch_path(batch_id) / ".runner.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            state = json.loads(state_file.read_text())
+            if state.get("status") == "running" and not _runner_alive(batch_id):
+                _fail_batch(batch_id, state, "batch runner exited without finishing")
+    return state
+
+
+def _runner_alive(batch_id):
+    """False only when the recorded runner process is gone; batches without a record count as alive."""
+    try:
+        record = json.loads((batch_path(batch_id) / "runner.json").read_text())
+    except (OSError, ValueError):
+        return True
+    return cli_mod.identity(record.get("pid")) == record.get("identity")
+
+
+def _fail_batch(batch_id, state, error):
+    state.update(status="failed", code=1, ended_at=time.time(), error=error)
+    save_state(batch_id, state)
+    from claivelib import inbox as inbox_mod
+    try:
+        inbox_mod.append(inbox_mod.batch_event(batch_id, state["label"], "failed", 1, state.get("mission")))
+    except Exception:
+        pass
 
 
 def save_state(batch_id, state):
@@ -181,7 +210,8 @@ def _stage_args(resolved, workspace, prompt_file):
         read_only=bool(resolved.get("read_only")), worktree=False,
         worktree_existing=None, worktree_base=None, web=False,
         model=resolved.get("model"), session_id=None, output_schema=None,
-        no_session_log=False, provider=resolved.get("provider"), mission=None)
+        no_session_log=False, provider=resolved.get("provider"), mission=None,
+        remember_model=False)
 
 
 def _launch_stage(batch_id, lane_key, stage_key, resolved, workspace, prompt_file):
@@ -197,10 +227,7 @@ def _launch_stage(batch_id, lane_key, stage_key, resolved, workspace, prompt_fil
     if batch.get("mission"):
         state["mission"] = batch["mission"]
     cli_mod.save(path / "state.json", state)
-    with (path / "supervisor.log").open("w") as log:
-        subprocess.Popen([sys.executable, cli_mod.launcher_path(), "_supervise", state["id"]],
-                         stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                         start_new_session=True)
+    cli_mod.spawn_supervisor(path, state, "_supervise")
     return state["id"]
 
 
@@ -233,9 +260,10 @@ def _start_runner(batch_id):
     path = batch_path(batch_id)
     env = {key: value for key, value in os.environ.items() if key != "CLAIVE_WORKER_ID"}
     with (path / "runner.log").open("w") as log:
-        subprocess.Popen([sys.executable, cli_mod.launcher_path(), "_batch", batch_id],
-                         stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                         start_new_session=True, env=env)
+        child = subprocess.Popen([sys.executable, cli_mod.launcher_path(), "_batch", batch_id],
+                                 stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                 start_new_session=True, env=env)
+    cli_mod.save(path / "runner.json", dict(pid=child.pid, identity=cli_mod.identity(child.pid)))
 
 
 def cmd_validate(plan_path):
@@ -276,7 +304,8 @@ def cmd_start(plan_path, json_output=False):
 
 
 def _render(state):
-    lines = [f"Batch {state['id']} | {state['label']} | {state['status']}"]
+    lines = [f"Batch {state['id']} | {state['label']} | {state['status']}"
+             + (f" ({state['error']})" if state.get("error") else "")]
     for lane in state.get("lanes", []):
         for stage in lane.get("stages", []):
             worker = stage.get("worker") or "-"
@@ -320,13 +349,17 @@ def cmd_cancel(batch_id):
     for lane in state.get("lanes", []):
         for stage in lane.get("stages", []):
             if stage.get("status") == "running" and stage.get("worker"):
-                try:
-                    subprocess.run([sys.executable, cli_mod.launcher_path(), "cancel", stage["worker"]],
-                                   capture_output=True, timeout=15)
-                except Exception:
-                    pass
+                _cancel_worker(stage["worker"])
     print(f"Batch {batch_id} cancelled")
     return 0
+
+
+def _cancel_worker(worker):
+    try:
+        subprocess.run([sys.executable, cli_mod.launcher_path(), "cancel", worker],
+                       capture_output=True, timeout=15)
+    except Exception:
+        pass
 
 
 def cmd_retry(batch_id):
@@ -336,11 +369,15 @@ def cmd_retry(batch_id):
     count = 0
     for lane in state.get("lanes", []):
         for stage in lane.get("stages", []):
-            if stage.get("status") != "done":
-                stage.update(status="pending", worker=None, code=None, error=None)
-                count += 1
-    state.update(status="running", code=None, ended_at=None)
+            if stage.get("status") == "done":
+                continue
+            if stage.get("status") == "running" and stage.get("worker") and not _settle_worker(stage["worker"]):
+                continue  # still running after a lost runner; the new runner waits for it
+            stage.update(status="pending", worker=None, code=None, error=None)
+            count += 1
+    state.update(status="running", code=None, ended_at=None, error=None)
     (batch_path(batch_id) / "cancel.request").unlink(missing_ok=True)
+    (batch_path(batch_id) / "runner.json").unlink(missing_ok=True)
     save_state(batch_id, state)
     _start_runner(batch_id)
     print(f"Batch {batch_id} retrying {count} stages")
@@ -394,14 +431,7 @@ def runner(batch_id):
         try:
             state = load_state(batch_id)
             if state.get("status") == "running":
-                state.update(status="failed", code=1, ended_at=time.time())
-                save_state(batch_id, state)
-                from claivelib import inbox as inbox_mod
-                try:
-                    inbox_mod.append(inbox_mod.batch_event(batch_id, state["label"], "failed", 1,
-                                                           state.get("mission")))
-                except Exception:
-                    pass
+                _fail_batch(batch_id, state, "batch runner crashed")
         except Exception:
             pass
         return 1
@@ -410,6 +440,7 @@ def runner(batch_id):
 def _run(batch_id):
     path = batch_path(batch_id)
     plan = json.loads((path / "plan.json").read_text())
+    cancel_sent = {}
     while True:
         state = load_state(batch_id)
         cancelled = (path / "cancel.request").exists()
@@ -428,6 +459,12 @@ def _run(batch_id):
                         continue
                     worker_state = _settle_worker(stage.get("worker")) if stage.get("worker") else None
                     if worker_state is None:
+                        # `batch cancel` only saw the workers running when it ran, and its
+                        # cancels can fail: (re)send one every few seconds until it stops.
+                        worker = stage.get("worker")
+                        if worker and time.monotonic() - cancel_sent.get(worker, -60) >= 5:
+                            cancel_sent[worker] = time.monotonic()
+                            _cancel_worker(worker)
                         continue
                     status, code = _stage_outcome(worker_state)
                     stage.update(status=status, code=code)

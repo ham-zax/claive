@@ -322,6 +322,22 @@ class AsyncChecks(unittest.TestCase):
         self.assertIn(stages["a.s1"]["status"], {"cancelled", "failed"})
         self.assertEqual(self.batch_state(batch)["status"], "cancelled")
 
+    def test_batch_with_a_dead_runner_fails_and_retry_adopts_running_stages(self):
+        slow = self.prompt_file("slow", "FIXTURE_MODE=slow")
+        batch = self.start_batch(self.plan([{"key": "a", "stages": [{"key": "s1", "prompt_file": str(slow)}]}]))
+        self.eventually(lambda: self.stages(batch)["a.s1"]["status"] == "running", "stage did not start")
+        worker = self.stages(batch)["a.s1"]["worker"]
+        runner = json.loads((self.registry / "batches" / batch / "runner.json").read_text())
+        os.kill(runner["pid"], signal.SIGKILL)
+        self.eventually(lambda: module.identity(runner["pid"]) is None, "runner did not die")
+        self.assertEqual(self.cli("batch", "wait", batch, "--timeout", "5").returncode, 1)
+        self.assertIn("runner exited", self.batch_state(batch)["error"])
+        retried = self.cli("batch", "retry", batch)
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        self.assertEqual(self.stages(batch)["a.s1"]["worker"], worker, "a live stage must not be relaunched")
+        self.assertEqual(self.cli("batch", "cancel", batch).returncode, 0)
+        self.assertEqual(self.cli("batch", "wait", batch, timeout=60).returncode, 130)
+
     # F. missions ---------------------------------------------------------------------------------
     def test_mission_links_and_next_action(self):
         created = self.cli("mission", "new", "--title", "Ship parser", "--goal", "Parser with tests")

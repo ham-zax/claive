@@ -18,6 +18,7 @@ import tempfile
 import time
 import uuid
 
+from claivelib import config, provider
 from claivelib.engine import TurnRequest
 from claivelib.engines import DEFAULT_ENGINE, default_engine, get_engine
 from claivelib.roles import ROLES, resolved_roles
@@ -497,11 +498,19 @@ def supervise(job_id, control=None):
             timed_out = False
             kill_at = None
             turn_start = None
+            child_env = dict(os.environ, CLAIVE_WORKER_ID=job_id)
+            if state.get("engine") == "pi":
+                # Rebuilt every turn so models.json edits and config changes take effect.
+                overlay = provider.overlay_agent_dir(root())
+                if overlay:
+                    child_env["PI_CODING_AGENT_DIR"] = overlay
+                    state["provider_base_url"] = provider.override_url()
+                else:
+                    state.pop("provider_base_url", None)
             with (path / "events.jsonl").open(log_mode) as events, (path / "stderr.log").open(log_mode) as errors:
                 child = subprocess.Popen(state["command"], stdout=subprocess.PIPE, stderr=errors,
                                          stdin=subprocess.DEVNULL, start_new_session=True,
-                                         cwd=state["workspace"],
-                                         env=dict(os.environ, CLAIVE_WORKER_ID=job_id))
+                                         cwd=state["workspace"], env=child_env)
                 turn_start = time.monotonic()
                 state["worker_pid"] = child.pid
                 state["worker_identity"] = identity(child.pid)
@@ -879,6 +888,8 @@ def report(state):
     session = worker_session_id(state)
     if session:
         print(f"Session: {session} | {state.get('engine', DEFAULT_ENGINE)} | {state.get('model')} | {state['reasoning_effort']}")
+    if state.get("provider_base_url"):
+        print(f"Provider override: {clean(state['provider_base_url'])} (claive config providers.opencode2api)")
     if state.get("error"):
         print(clean(state["error"]))
     if state.get("task_failures"):
@@ -924,7 +935,59 @@ def report(state):
     sys.stdout.flush()
 
 
-def doctor_checks():
+def pi_models_needed():
+    """Models claive may ask Pi for: Pi-engine roles and Pi's remembered or built-in default."""
+    from claivelib.engines.pi import PiEngine
+    settings = PiEngine._settings()
+    remembered = settings.get("defaultModel") if settings.get("defaultProvider") == provider.PROVIDER else None
+    needed = [remembered or provider.FALLBACK_MODEL]
+    for role in resolved_roles().values():
+        if role.get("engine") == "pi" and role.get("model") and role["model"] not in needed:
+            needed.append(role["model"])
+    return needed
+
+
+def live_ping(timeout=120):
+    """One real read-only Pi turn with no session, the way claive launches Pi; return (ok, detail)."""
+    from claivelib.engines.pi import PiEngine, default_binary
+    engine = PiEngine()
+    settings = engine._settings()
+    remembered = settings.get("defaultModel") if settings.get("defaultProvider") == provider.PROVIDER else None
+    model = remembered or provider.FALLBACK_MODEL
+    env = dict(os.environ)
+    overlay = provider.overlay_agent_dir(root())
+    if overlay:
+        env["PI_CODING_AGENT_DIR"] = overlay
+    with tempfile.TemporaryDirectory(prefix="claive-ping-") as directory:
+        prompt = Path(directory) / "ping.md"
+        prompt.write_text("Reply with the single word OK. Do not use tools.\n")
+        request = TurnRequest(binary=default_binary(), workspace=directory, prompt_file=str(prompt),
+                              session_id=None, provider=provider.PROVIDER, model=model,
+                              reasoning_effort="minimal", max_model_steps=None, read_only=True, web=False,
+                              output_schema=None, session_logging=False, isolation={})
+        started = time.monotonic()
+        try:
+            completed = subprocess.run(engine.build_command(request), cwd=directory, env=env, text=True,
+                                       capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+            return False, f"{model}: {error}"[:200]
+        seconds = time.monotonic() - started
+    outcome = None
+    for line in completed.stdout.splitlines():
+        try:
+            event = json.loads(line)
+            for normalized in engine.normalize_event(event) if isinstance(event, dict) else []:
+                if normalized["type"].startswith("terminal_"):
+                    outcome = normalized
+        except ValueError:
+            continue
+    if completed.returncode == 0 and outcome and outcome["terminal"] == "completed":
+        return True, f"{model} answered in {seconds:.1f}s" + (" via override" if overlay else "")
+    reason = (outcome or {}).get("reason") or completed.stderr.strip()[-160:] or f"exit {completed.returncode}"
+    return False, f"{model}: {reason}"[:200]
+
+
+def doctor_checks(live=False):
     checks = []
 
     def add(name, ok, required, detail):
@@ -949,7 +1012,6 @@ def doctor_checks():
             add("state_dir", True, True, str(directory))
     except Exception as error:
         add("state_dir", False, True, str(error)[:200])
-    from claivelib import config
     try:
         resolved_roles()
         engine = default_engine()
@@ -957,67 +1019,71 @@ def doctor_checks():
         add("config", True, True, f"{source}; default engine {engine}")
     except ValueError as error:
         add("config", False, True, str(error)[:200])
+    try:
+        default = default_engine()
+    except ValueError:
+        default = None
     results = {}
     for name in ("muse", "pi"):
         try:
             binary = importlib.import_module(f"claivelib.engines.{name}").default_binary()
         except ImportError:
             results[name] = False
-            add(name, False, False, "engine module not installed")
+            add(name, False, name == default, "engine module not installed")
             continue
         ok = Path(binary).is_file() and os.access(binary, os.X_OK)
+        detail = binary if ok else f"missing or not executable: {binary}"
+        if ok and name == "pi":
+            # Proves the launcher and its Node runtime work, not only that the file exists.
+            try:
+                version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=20,
+                                         stdin=subprocess.DEVNULL)
+                ok = version.returncode == 0
+                detail = (f"{binary} ({version.stdout.strip()[:40]})" if ok else
+                          f"{binary} --version exited {version.returncode}: {version.stderr.strip()[:120]}")
+            except (OSError, subprocess.TimeoutExpired) as error:
+                ok, detail = False, f"{binary} --version failed: {error}"[:200]
         results[name] = ok
-        add(name, ok, False, binary if ok else f"missing or not executable: {binary}")
+        add(name, ok, name == default, detail)
     add("engines", results["muse"] or results["pi"], True,
         "muse ok" if results["muse"] and not results["pi"] else
         "pi ok" if results["pi"] and not results["muse"] else
         "muse, pi available" if results["muse"] else "no engine binary found")
+    entry = None
     try:
-        agent_dir = Path(os.environ.get("PI_CODING_AGENT_DIR", str(Path.home() / ".pi/agent"))).expanduser()
-        models_file = agent_dir / "models.json"
-        if not models_file.is_file():
-            add("opencode2api", False, False, f"missing {models_file}")
-        else:
-            try:
-                data = json.loads(models_file.read_text())
-            except ValueError as error:
-                add("opencode2api", False, False, f"invalid models.json: {error}")
-            else:
-                providers = data.get("providers") if isinstance(data, dict) else None
-                config = providers.get("opencode2api") if isinstance(providers, dict) else None
-                base_url = config.get("baseUrl") if isinstance(config, dict) else None
-                if not base_url:
-                    add("opencode2api", False, False, "provider opencode2api.baseUrl not configured")
-                else:
-                    import urllib.request
-                    headers = {}
-                    api_key = config.get("apiKey") if isinstance(config, dict) else None
-                    if api_key:
-                        headers["Authorization"] = f"Bearer {api_key}"
-                    request = urllib.request.Request(str(base_url).rstrip("/") + "/models", headers=headers)
-                    try:
-                        with urllib.request.urlopen(request, timeout=3) as response:
-                            payload = json.loads(response.read())
-                    except ValueError:
-                        add("opencode2api", False, False, "GET /models did not return JSON")
-                    except Exception as error:
-                        add("opencode2api", False, False, f"GET /models failed: {error}"[:200])
-                    else:
-                        items = []
-                        if isinstance(payload, list):
-                            items = payload
-                        elif isinstance(payload, dict):
-                            items = payload.get("data") if isinstance(payload.get("data"), list) else (
-                                payload.get("models") if isinstance(payload.get("models"), list) else [])
-                        ids = [item if isinstance(item, str)
-                               else item.get("id") if isinstance(item, dict) else None
-                               for item in items]
-                        ids = [item for item in ids if isinstance(item, str)]
-                        missing = [name for name in PREFERRED_MODELS if name not in ids]
-                        detail = f"{len(ids)} models" + (f"; missing: {', '.join(missing)}" if missing else "")
-                        add("opencode2api", True, False, detail)
-    except Exception as error:
-        add("opencode2api", False, False, str(error)[:200])
+        _data, entry = provider.read_models()
+        listed = provider.listed_models(entry)
+        missing = [model for model in pi_models_needed() if model not in listed]
+        detail = f"{provider.models_file()}: {len(listed)} models"
+        if missing:
+            detail += f"; not listed: {', '.join(missing)}"
+        add("pi_provider", not missing, default == "pi", detail)
+    except ValueError as error:
+        add("pi_provider", False, default == "pi", str(error)[:200])
+    if entry is None:
+        add("opencode2api", False, False, "provider not configured")
+    else:
+        try:
+            override = provider.override_url()
+            parts, used = [], None
+            for label, url in (("models.json", entry["baseUrl"]), ("override", override)):
+                if not url:
+                    continue
+                result = provider.probe(url, entry)
+                used = result
+                parts.append(f"{label} {url}: " + (f"{result['ms']} ms, {len(result['ids'])} models"
+                                                   if result["ok"] else result["error"]))
+            missing = [name for name in PREFERRED_MODELS if name not in used["ids"]] if used["ok"] else []
+            if missing:
+                parts.append(f"missing: {', '.join(missing)}")
+            if override:
+                parts.append("Pi turns use the override")
+            add("opencode2api", used["ok"], False, "; ".join(parts))
+        except Exception as error:
+            add("opencode2api", False, False, str(error)[:200])
+    if live:
+        ok, detail = live_ping()
+        add("live", ok, True, detail)
     git = shutil.which("git")
     add("git", bool(git), False, git or "not on PATH")
     try:
@@ -1073,8 +1139,8 @@ def doctor_checks():
     return checks
 
 
-def doctor(json_output=False):
-    checks = doctor_checks()
+def doctor(json_output=False, live=False):
+    checks = doctor_checks(live)
     ok = all(item["ok"] for item in checks if item["required"])
     if json_output:
         print(json.dumps({"ok": ok, "checks": checks}, indent=2))
@@ -1233,8 +1299,10 @@ def parser():
     watch.add_argument("--no-color", action="store_true")
     watch.add_argument("--compact", action="store_true", help="at most five lines; one row per worker")
     commands.add_parser("status-line", help="one-line summary for tmux or shell status bars")
-    examined = commands.add_parser("doctor", help="read-only health check; never launches a model")
+    examined = commands.add_parser("doctor", help="read-only health check; launches a model only with --live")
     examined.add_argument("--json", action="store_true")
+    examined.add_argument("--live", action="store_true",
+                          help="also send one tiny read-only Pi turn (no session) and time it")
     answer = commands.add_parser("answer", help="answer a reusable worker waiting for a parent decision")
     answer.add_argument("id")
     message = answer.add_mutually_exclusive_group(required=True)
@@ -1423,7 +1491,7 @@ def main(launcher=None):
         os.kill(pid, signal.SIGTERM)
         print(f"Cancellation requested for {args.id}. Check with claive wait {args.id}.")
     elif args.action == "doctor":
-        return doctor(args.json)
+        return doctor(args.json, args.live)
     elif args.action == "answer":
         path = job_path(args.id)
         state = load(path)

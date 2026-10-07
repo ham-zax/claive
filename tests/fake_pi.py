@@ -13,7 +13,15 @@ def value(flag):
     return sys.argv[sys.argv.index(flag) + 1] if flag in sys.argv else None
 
 
+if sys.argv[1:] == ["--version"]:
+    print("1.0.4")
+    sys.exit(0)
 mode = os.environ.get("PI_TEST_MODE", "success")
+if os.environ.get("PI_TEST_RECORD"):
+    # The provider URL this process would use, as Pi reads it from its agent directory.
+    agent = Path(os.environ.get("PI_CODING_AGENT_DIR", ""))
+    models = json.loads((agent / "models.json").read_text())
+    Path(os.environ["PI_TEST_RECORD"]).write_text(models["providers"]["opencode2api"]["baseUrl"])
 fixture_dir = Path(__file__).parent / "fixtures/pi"
 prompt_argument = sys.argv[sys.argv.index("--") + 1]
 prompt = Path(prompt_argument[1:]).read_text()

@@ -6,6 +6,7 @@ import re
 import tempfile
 import time
 
+from claivelib import provider
 from claivelib.engine import WorkerEngine
 from claivelib.state import launch_config, session_id
 
@@ -74,7 +75,7 @@ class PiEngine(WorkerEngine):
         settings = self._settings()
         remembered = settings.get("defaultModel") if settings.get("defaultProvider") == "opencode2api" else None
         self._selected_model = options.get("model")
-        return {
+        launch = {
             "binary": default_binary(),
             "provider": options.get("provider") or "opencode2api",
             "model": options.get("model") or remembered or "muse-spark-1.3-contributor-free",
@@ -85,6 +86,10 @@ class PiEngine(WorkerEngine):
             "session_dir": str(Path(options["session_root"]) / "pi" / identifier) if identifier else None,
             "isolation": dict(options.get("isolation") or {}),
         }
+        override = provider.override_url()
+        if override:
+            launch["provider_base_url"] = override  # visible in the job record; applied per turn
+        return launch
 
     def validate_launch(self, launch):
         binary = Path(launch["binary"])

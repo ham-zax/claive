@@ -4,13 +4,16 @@ The file is ${CLAIVE_CONFIG:-${XDG_CONFIG_HOME:-~/.config}/claive/config.json}; 
 the built-in defaults. CLAIVE_ENGINE overrides default_engine. Example (a Pi-only host):
 
     {"default_engine": "pi",
-     "roles": {"worker": {"engine": "pi", "model": "muse-spark-1.3-contributor-free"}}}
+     "roles": {"worker": {"engine": "pi", "model": "muse-spark-1.3-contributor-free"}},
+     "providers": {"opencode2api": {"base_url": "http://127.0.0.1:8080/v1"}}}
+
+providers.opencode2api.base_url must be a loopback URL; see claivelib.provider.
 """
 import json
 import os
 from pathlib import Path
 
-TOP_LEVEL_KEYS = {"default_engine", "roles"}
+TOP_LEVEL_KEYS = {"default_engine", "roles", "providers"}
 ROLE_KEYS = {
     "engine": str, "model": str, "reasoning_effort": str, "read_only": bool,
     "max_model_steps": (int, type(None)), "preamble": str,
@@ -57,6 +60,17 @@ def load():
         steps = override.get("max_model_steps")
         if isinstance(steps, bool) or (steps is not None and steps < 1):
             raise ValueError(f"invalid claive config {path}: roles.{name}.max_model_steps must be positive or null")
+    providers = data.get("providers", {})
+    if not isinstance(providers, dict) or set(providers) - {"opencode2api"}:
+        raise ValueError(f"invalid claive config {path}: providers may only hold opencode2api")
+    for name, entry in providers.items():
+        if not isinstance(entry, dict) or set(entry) - {"base_url"} or not isinstance(entry.get("base_url"), str):
+            raise ValueError(f"invalid claive config {path}: providers.{name} must be {{\"base_url\": \"...\"}}")
+        from claivelib.provider import check_loopback
+        try:
+            check_loopback(entry["base_url"])
+        except ValueError as error:
+            raise ValueError(f"invalid claive config {path}: providers.{name}.base_url {error}") from error
     return data
 
 

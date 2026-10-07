@@ -75,12 +75,13 @@ claive status-line
 ```bash
 claive doctor
 claive doctor --json
+claive doctor --live   # also one tiny read-only Pi turn, timed
 claive run --role reviewer --workspace /abs/repo --prompt-file /abs/task.md
 claive run --report --workspace /abs/repo --prompt-file /abs/task.md
 claive answer JOB_ID --message "Use design B."
 ```
 
-`doctor` is a read-only health check (exit 0 when all required checks pass); it never launches a model. `--role scout|worker|reviewer|oracle` selects engine, model, effort, read-only, and step-cap defaults (explicit flags win) and always enables the report contract; `--report` enables the contract without a role. The worker ends its answer with a `claive-report` JSON block (`done|blocked|needs_decision`); `run`/`wait` exit 3 when it asks for a decision, the dashboard shows `ASK`, and `status-line` counts `N need you`. `answer` queues a parent decision to a reusable worker waiting for one. Failed turns record `failure_kind` (`quota|protocol|worker|launch|supervisor|rejected|interrupted`), shown by `show`/`wait`/`run` and in `--json` output.
+`doctor` is a read-only health check (exit 0 when all required checks pass); it launches a model only with `--live`. It runs `pi --version`, checks that every model claive may request from Pi is listed under `opencode2api` in Pi's `models.json` (`pi_provider`), and times `GET /models` on the provider. The default engine's binary and, when Pi is the default, `pi_provider` are required. `--role scout|worker|reviewer|oracle` selects engine, model, effort, read-only, and step-cap defaults (explicit flags win) and always enables the report contract; `--report` enables the contract without a role. The worker ends its answer with a `claive-report` JSON block (`done|blocked|needs_decision`); `run`/`wait` exit 3 when it asks for a decision, the dashboard shows `ASK`, and `status-line` counts `N need you`. `answer` queues a parent decision to a reusable worker waiting for one. Failed turns record `failure_kind` (`quota|protocol|worker|launch|supervisor|rejected|interrupted`), shown by `show`/`wait`/`run` and in `--json` output.
 
 ### Async workers, inbox, batches, and missions (any harness)
 
@@ -216,6 +217,8 @@ Hosts without Muse (for example a Pi-only server) set the default engine and rol
 ```
 
 Role keys: `engine`, `model`, `reasoning_effort`, `read_only`, `max_model_steps` (ignored by Pi, which has no step cap), `preamble`. Stored workers keep the engine they were launched with.
+
+A host whose `opencode2api` runs locally can route Pi turns over loopback instead of the public URL in `models.json` with `{"providers": {"opencode2api": {"base_url": "http://127.0.0.1:PORT/v1"}}}`. Only `localhost` and loopback addresses are accepted. Pi reads the URL only from `models.json`, so claive gives Pi turns an overlay agent directory (`$CLAIVE_DIR/pi-agent-overlay`: links to every entry of the real one plus a mode-600 `models.json` differing only in `baseUrl`), rebuilt each turn. The real `models.json` is never edited; `doctor` times both URLs, and workers record and print `Provider override:`.
 
 Run checks from the repository root. The suite is hermetic: `tests/hermetic.py` hides the host config, `CLAIVE_*` variables and installed Muse/Pi binaries. `CLAIVE_LIVE_TESTS=1` also runs the checks that drive the real Muse binary.
 

@@ -1,4 +1,7 @@
 """Role presets for claive workers."""
+from copy import deepcopy
+
+from claivelib import config
 
 ROLES = {
     "scout": {
@@ -51,3 +54,13 @@ ROLES = {
         ),
     },
 }
+
+
+def resolved_roles():
+    """ROLES with the per-host overrides from the claive config applied."""
+    roles = deepcopy(ROLES)
+    for name, override in config.role_overrides().items():
+        if name not in roles:
+            raise ValueError(f"invalid claive config {config.config_path()}: unknown role {name}")
+        roles[name].update(override)
+    return roles

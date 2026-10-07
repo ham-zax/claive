@@ -10,8 +10,8 @@ import time
 import uuid
 
 from claivelib import cli as cli_mod
-from claivelib.engines import DEFAULT_ENGINE, get_engine
-from claivelib.roles import ROLES
+from claivelib.engines import default_engine, get_engine
+from claivelib.roles import resolved_roles
 
 STAGE_OPTIONS = {"prompt_file", "workspace", "label", "role", "engine", "model",
                  "provider", "reasoning_effort", "max_model_steps", "read_only",
@@ -131,6 +131,7 @@ def validate_plan(plan_path):
                 raise ValueError(f"duplicate stage key: {key}.{stage_key}")
             seen_stages.add(stage_key)
             total += 1
+    roles = resolved_roles()
     for lane_index, lane in enumerate(lanes):
         for stage_index, stage in enumerate(lane["stages"]):
             name = f"{lane['key']}.{stage['key']}"
@@ -150,14 +151,14 @@ def validate_plan(plan_path):
             if not isinstance(workspace, str) or not Path(workspace).is_absolute() or not Path(workspace).is_dir():
                 raise ValueError(f"stage {name}: workspace must be an existing absolute directory")
             role = resolved.get("role")
-            if role is not None and role not in ROLES:
+            if role is not None and role not in roles:
                 raise ValueError(f"stage {name}: unknown role: {role}")
             model = resolved.get("model")
             if model is None and role:
-                model = ROLES[role].get("model")
+                model = roles[role].get("model")
             if model is not None:
                 cli_mod.check_model_policy(model)
-            engine_name = resolved.get("engine") or (ROLES[role]["engine"] if role else None) or DEFAULT_ENGINE
+            engine_name = resolved.get("engine") or (roles[role]["engine"] if role else None) or default_engine()
             get_engine(engine_name)
             steps = resolved.get("max_model_steps")
             if steps is not None and steps < 1:

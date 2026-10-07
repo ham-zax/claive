@@ -19,12 +19,14 @@ import time
 import uuid
 
 from claivelib.engine import TurnRequest
-from claivelib.engines import DEFAULT_ENGINE, get_engine
-from claivelib.roles import ROLES
+from claivelib.engines import DEFAULT_ENGINE, default_engine, get_engine
+from claivelib.roles import ROLES, resolved_roles
 from claivelib.state import SCHEMA_VERSION, launch_config, session_id as worker_session_id
 
 
 ACTIVE = {"starting", "running", "cancelling", "idle"}
+# Seconds between SIGTERM and SIGKILL for a worker process group that is being stopped.
+KILL_GRACE_SECONDS = float(os.environ.get("CLAIVE_KILL_GRACE", "3"))
 SCRIPT = None
 REPORT_CONTRACT = (
     "End your final answer with exactly one fenced block tagged claive-report "
@@ -531,7 +533,7 @@ def supervise(job_id, control=None):
                                 os.killpg(child.pid, signal.SIGTERM)
                             except ProcessLookupError:
                                 pass
-                        if kill_at is not None and time.monotonic() - kill_at > 3:
+                        if kill_at is not None and time.monotonic() - kill_at > KILL_GRACE_SECONDS:
                             try:
                                 os.killpg(child.pid, signal.SIGKILL)
                             except ProcessLookupError:
@@ -782,10 +784,11 @@ def create_job(args):
         raise ValueError("--session-id requires retained session logging")
 
     role = getattr(args, "role", None)
-    role_def = ROLES.get(role) if role else None
+    roles = resolved_roles()  # validates the whole claive config, even without --role
+    role_def = roles.get(role) if role else None
     if role and role_def is None:
         raise ValueError(f"unknown role: {role}")
-    engine_name = getattr(args, "engine", None) or (role_def["engine"] if role_def else None) or DEFAULT_ENGINE
+    engine_name = getattr(args, "engine", None) or (role_def["engine"] if role_def else None) or default_engine()
     engine = get_engine(engine_name)
     session_id = engine.resolve_session_id(args.session_id, not args.no_session_log)
     effort = args.reasoning_effort or (role_def["reasoning_effort"] if role_def else None) or engine.default_reasoning_effort
@@ -946,6 +949,14 @@ def doctor_checks():
             add("state_dir", True, True, str(directory))
     except Exception as error:
         add("state_dir", False, True, str(error)[:200])
+    from claivelib import config
+    try:
+        resolved_roles()
+        engine = default_engine()
+        source = str(config.config_path()) if config.config_path().is_file() else "built-in defaults"
+        add("config", True, True, f"{source}; default engine {engine}")
+    except ValueError as error:
+        add("config", False, True, str(error)[:200])
     results = {}
     for name in ("muse", "pi"):
         try:

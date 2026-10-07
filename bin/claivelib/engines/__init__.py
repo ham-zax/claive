@@ -1,9 +1,18 @@
 """Production worker engine registry."""
 import importlib
 
+from claivelib import config
+
+# Built-in default. Stored records always carry their engine (v1 records are Muse), so this
+# constant is also the fallback when reading state; new launches use default_engine() instead.
 DEFAULT_ENGINE = "muse"
 _ENGINES = {}
 _MODULES = {"muse": ("muse", "MuseEngine"), "pi": ("pi", "PiEngine")}
+
+
+def default_engine():
+    """Engine for new workers that name neither --engine nor a role (config / CLAIVE_ENGINE)."""
+    return config.default_engine(DEFAULT_ENGINE)
 
 
 def get_engine(name):
@@ -28,4 +37,4 @@ def unregister_engine(name):
     _ENGINES.pop(name, None)
 
 
-__all__ = ["DEFAULT_ENGINE", "get_engine", "register_engine", "unregister_engine"]
+__all__ = ["DEFAULT_ENGINE", "default_engine", "get_engine", "register_engine", "unregister_engine"]

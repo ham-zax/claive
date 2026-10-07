@@ -1,4 +1,5 @@
 """Tests: claive-memcap (session RSS cap) and claive-orch init --verify-memory."""
+import hermetic  # noqa: F401  (must run before claivelib reads the environment)
 import os
 from pathlib import Path
 import re

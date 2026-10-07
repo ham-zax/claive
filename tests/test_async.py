@@ -2,6 +2,7 @@
 
 Spec: docs/superpowers/specs/2026-10-06-async-workers.md
 """
+import hermetic  # noqa: F401  (must run before claivelib reads the environment)
 import json
 import os
 from pathlib import Path

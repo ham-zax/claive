@@ -2,6 +2,7 @@
 
 Spec: docs/superpowers/specs/2026-10-06-worker-contract-features.md
 """
+import hermetic  # noqa: F401  (must run before claivelib reads the environment)
 import json
 import os
 from pathlib import Path
@@ -113,7 +114,7 @@ class FeatureChecks(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = json.loads(result.stdout)
         names = [check["name"] for check in report["checks"]]
-        self.assertEqual(names, ["python", "state_dir", "muse", "pi", "engines", "opencode2api",
+        self.assertEqual(names, ["python", "state_dir", "config", "muse", "pi", "engines", "opencode2api",
                                  "git", "quota", "interrupted"])
         checks = {check["name"]: check for check in report["checks"]}
         self.assertTrue(report["ok"])
@@ -257,6 +258,40 @@ class FeatureChecks(unittest.TestCase):
         state = self.state(job)
         self.assertEqual(state["engine"], "muse")
         self.assertEqual(state["reasoning_effort"], "xhigh")
+
+    def test_config_sets_default_engine_and_role_overrides(self):
+        config = self.path / "config.json"
+        config.write_text(json.dumps({"default_engine": "fixture", "roles": {"worker": {
+            "engine": "fixture", "model": "config-model", "reasoning_effort": "high"}}}))
+
+        def launch(*extra, **env):
+            result = self.run_cli("run", "--workspace", str(self.path), "--prompt-file", str(self.prompt),
+                                  *extra, CLAIVE_CONFIG=str(config), **env)
+            found = re.search(r"Worker ([0-9a-f]{12})", result.stdout)
+            self.assertIsNotNone(found, result.stdout + result.stderr)
+            return self.state(found.group(1))
+
+        self.assertEqual(launch()["engine"], "fixture")
+        state = launch("--role", "worker")
+        self.assertEqual((state["engine"], state["model"], state["reasoning_effort"]),
+                         ("fixture", "config-model", "high"))
+        self.assertTrue(state["report_contract"])
+        self.assertEqual(launch(CLAIVE_ENGINE="muse")["engine"], "muse")
+        self.assertEqual(launch("--engine", "muse")["engine"], "muse")
+
+        for bad in ({"roles": {"wrker": {}}}, {"rolez": {}}, {"roles": {"worker": {"max_model_steps": 0}}},
+                    {"roles": {"worker": {"read_only": "yes"}}}, {"default_engine": ""}):
+            config.write_text(json.dumps(bad))
+            before = sorted(self.registry.iterdir()) if self.registry.exists() else []
+            refused = self.run_cli("run", "--workspace", str(self.path), "--prompt-file", str(self.prompt),
+                                   CLAIVE_CONFIG=str(config))
+            self.assertNotEqual(refused.returncode, 0, bad)
+            self.assertIn("invalid claive config", refused.stderr, bad)
+            self.assertEqual(sorted(self.registry.iterdir()) if self.registry.exists() else [], before, bad)
+            doctor = json.loads(self.run_cli("doctor", "--json", cli=CLI, CLAIVE_CONFIG=str(config)).stdout)
+            checks = {check["name"]: check for check in doctor["checks"]}
+            self.assertFalse(checks["config"]["ok"], bad)
+            self.assertTrue(checks["config"]["required"])
 
     # 7. parent questions -----------------------------------------------------
     def test_single_turn_question_exits_3(self):

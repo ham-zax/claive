@@ -206,7 +206,18 @@ Both relay copies are historical and are excluded from the active Muse-only mode
 
 Job metadata, JSONL events, diagnostic output, and final answers are retained under `${XDG_STATE_HOME:-$HOME/.local/state}/claive`, with private directories and files. Logs can contain task prompts and source excerpts; keep this state outside the repository. Set `CLAIVE_DIR` to an absolute path to use a different registry. Finished jobs remain available for inspection; the dashboard shows all active jobs and up to 20 recent results.
 
-Run checks from the repository root:
+### Per-host engine config
+
+Hosts without Muse (for example a Pi-only server) set the default engine and role overrides in `${CLAIVE_CONFIG:-${XDG_CONFIG_HOME:-~/.config}/claive/config.json}` instead of editing code. Without the file, behaviour is the built-in default (Muse, with Pi for scout/reviewer/oracle). `CLAIVE_ENGINE` overrides `default_engine` for one shell; `--engine` and role engines still win over the default. `claive doctor` reports the config in use, and an invalid config refuses every launch.
+
+```json
+{"default_engine": "pi",
+ "roles": {"worker": {"engine": "pi", "model": "muse-spark-1.3-contributor-free"}}}
+```
+
+Role keys: `engine`, `model`, `reasoning_effort`, `read_only`, `max_model_steps` (ignored by Pi, which has no step cap), `preamble`. Stored workers keep the engine they were launched with.
+
+Run checks from the repository root. The suite is hermetic: `tests/hermetic.py` hides the host config, `CLAIVE_*` variables and installed Muse/Pi binaries. `CLAIVE_LIVE_TESTS=1` also runs the checks that drive the real Muse binary.
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_*.py' -v

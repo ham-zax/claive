@@ -1,4 +1,5 @@
 """Acceptance tests: per-turn timeout, fallback models and the failure reason in list."""
+import hermetic  # noqa: F401  (must run before claivelib reads the environment)
 import json
 import os
 from pathlib import Path

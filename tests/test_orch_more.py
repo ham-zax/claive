@@ -1,4 +1,5 @@
 """Acceptance tests: setup-local paths, rescore, reject, integrate paths, report tokens and verify cache."""
+import hermetic  # noqa: F401  (must run before claivelib reads the environment)
 import json
 import os
 from pathlib import Path
@@ -380,6 +381,21 @@ class OrchMore(unittest.TestCase):
         event = next(e["data"] for e in self.events(run) if e["type"] == "critique.completed")
         self.assertEqual(event["model"], "big-pickle")
         self.assertEqual(event["fallbacks"], fallbacks)
+
+
+    def test_lane_engine_defaults_to_config_default_engine(self):
+        run = self.init("D")
+        config = self.base / "config.json"
+        config.write_text(json.dumps({"default_engine": "pi"}))
+        self.env["CLAIVE_CONFIG"] = str(config)
+        self.orch("lane", run, "a", "--model", "big-pickle")
+        explicit = self.init("D")
+        self.orch("lane", explicit, "a", "--engine", "muse", "--model", MUSE)
+        engines = []
+        for run_id in (run, explicit):
+            events = (self.registry / "runs" / run_id / "events.jsonl").read_text().splitlines()
+            engines += [event["data"]["engine"] for event in map(json.loads, events) if event["type"] == "lane.added"]
+        self.assertEqual(engines, ["pi", "muse"])
 
 
 if __name__ == "__main__":

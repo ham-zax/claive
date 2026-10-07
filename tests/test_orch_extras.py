@@ -1,4 +1,5 @@
 """Acceptance tests: post-pass critic, integrate, branch cleanup and lane setup for claive-orch."""
+import hermetic  # noqa: F401  (must run before claivelib reads the environment)
 import json
 import os
 from pathlib import Path

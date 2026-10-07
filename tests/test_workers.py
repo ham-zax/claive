@@ -1,3 +1,4 @@
+import hermetic  # noqa: F401  (must run before claivelib reads the environment)
 import json
 import os
 from pathlib import Path
@@ -549,9 +550,9 @@ class WorkerChecks(unittest.TestCase):
         self.assertEqual(cancelled["status"], "cancelled")
 
     def test_actual_muse_worktree_characterization(self):
-        muse = Path.home() / ".local/bin/muse"
-        if not muse.is_file():
-            self.skipTest("Muse is not installed; worktree characterization skipped")
+        muse = hermetic.HOST_HOME / ".local/bin/muse"
+        if not hermetic.LIVE or not muse.is_file():
+            self.skipTest("live Muse check; set CLAIVE_LIVE_TESTS=1 with Muse installed")
 
         repo = self.path / "worktree-repo"
         repo.mkdir()
@@ -611,9 +612,9 @@ class WorkerChecks(unittest.TestCase):
         self.assertNotIn(f"muse/session-{session}", branches)
 
     def test_actual_muse_echo_transport(self):
-        muse = Path.home() / ".local/bin/muse"
-        if not muse.is_file():
-            self.skipTest("Muse is not installed; fake-worker checks still run")
+        muse = hermetic.HOST_HOME / ".local/bin/muse"
+        if not hermetic.LIVE or not muse.is_file():
+            self.skipTest("live Muse check; set CLAIVE_LIVE_TESTS=1 with Muse installed")
         env = dict(self.env, MUSE_WORKER_BINARY=str(muse))
         result = subprocess.run([CLI, "run", "--workspace", str(self.path),
                                  "--prompt-file", str(self.prompt), "--read-only",

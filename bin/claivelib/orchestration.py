@@ -23,7 +23,7 @@ import uuid
 
 from claivelib import cli as workers
 from claivelib import memcap
-from claivelib.engines import DEFAULT_ENGINE, get_engine
+from claivelib.engines import DEFAULT_ENGINE, default_engine, get_engine
 
 ARMS = {
     "A": "single worker, verify once",
@@ -1040,6 +1040,7 @@ def command_init(args):
 
 
 def command_lane(args):
+    args.engine = args.engine or default_engine()
     path, state = load_state(args.run)
     config = state["config"]
     name = args.name
@@ -1727,7 +1728,7 @@ def parser():
     lane = commands.add_parser("lane", help="add a candidate lane (git worktree at the base revision)")
     lane.add_argument("run")
     lane.add_argument("name")
-    lane.add_argument("--engine", default=DEFAULT_ENGINE)
+    lane.add_argument("--engine", help="worker engine (default: the claive config default_engine, else muse)")
     lane.add_argument("--model")
     lane.add_argument("--strategy", help="deliberate strategy instruction for this candidate")
     worker = commands.add_parser("worker", help="register a claive worker with a lane")

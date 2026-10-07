@@ -7,12 +7,14 @@ See docs/experiment/06-skill-driven-implementation.md.
 """
 
 import argparse
+import datetime
 import fcntl
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
+import random
 import re
 import shlex
 import shutil
@@ -44,6 +46,9 @@ OUTPUT_LIMIT = 8000
 NO_SIGN = ("-c", "commit.gpgsign=false")  # checkpoint commits are internal; never prompt for a key
 GIT_IDENTITY = {"GIT_AUTHOR_NAME": "claive-orch", "GIT_AUTHOR_EMAIL": "claive-orch@localhost",
                 "GIT_COMMITTER_NAME": "claive-orch", "GIT_COMMITTER_EMAIL": "claive-orch@localhost"}
+CATEGORIES = ("change", "bug-fix", "feature", "debugging", "refactor", "docs", "other")
+CRITIC_ROSTER = ("mimo-v2.6-flash-free", "big-pickle", "space-bunny-free")
+CRITIC_RESERVE = ("longcat-2.5-preview-free",)
 VERSION_TOKENS = {"free", "preview", "flash", "lightning", "ultra", "contributor", "pro", "mini"}
 
 
@@ -401,6 +406,241 @@ def wilson(successes, n, z=1.96):
     spread = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
     denominator = 1 + z * z / n
     return (max(0.0, (centre - spread) / denominator), min(1.0, (centre + spread) / denominator))
+
+
+def critic_outcomes(events):
+    """Outcome of each critique from the next checkpoint of the same lane."""
+    out = []
+    for index, event in enumerate(events):
+        if event.get("type") != "critique.completed":
+            continue
+        data = event.get("data", {})
+        if data.get("post_pass"):
+            outcome = "post_pass"
+        elif data.get("error"):
+            outcome = "error"
+        elif data.get("no_concrete_defect"):
+            outcome = "no_defect"
+        else:
+            outcome = "unused"
+            for later in events[index + 1:]:
+                if later.get("type") not in ("checkpoint.accepted", "checkpoint.reverted"):
+                    continue
+                if later.get("data", {}).get("lane") != data.get("lane"):
+                    continue
+                if later["type"] == "checkpoint.reverted":
+                    outcome = "reverted"
+                elif later["data"].get("improved"):
+                    outcome = "improved"
+                else:
+                    outcome = "no_change"
+                break
+        out.append({"lane": data.get("lane"), "round": data.get("round"), "model": data.get("model"),
+                    "family": data.get("family"), "outcome": outcome})
+    return out
+
+
+def collect_stats(histories):
+    """Aggregate critic, implementer and category stats over run histories."""
+    critics, implementers, categories = {}, {}, {}
+    for history in histories:
+        state = fold(history)
+        for entry in critic_outcomes(history):
+            model = entry.get("model") or "unknown"
+            row = critics.setdefault(model, {"family": entry.get("family") or model_family(model, "pi"),
+                                             "critiques": 0, "improved": 0, "no_change": 0,
+                                             "reverted": 0, "no_defect": 0, "error": 0,
+                                             "unused": 0, "post_pass": 0})
+            row["critiques"] += 1
+            if entry["outcome"] in row:
+                row[entry["outcome"]] += 1
+        for name in state.get("lane_order", []):
+            lane = state["lanes"][name]
+            key = f"{lane.get('engine')}/{lane.get('model')}"
+            row = implementers.setdefault(key, {"lanes": 0, "l0_passed": 0, "passed": 0})
+            row["lanes"] += 1
+            verifs = lane.get("verifications") or []
+            if verifs and verifs[0].get("passed"):
+                row["l0_passed"] += 1
+            if any(v.get("passed") for v in verifs):
+                row["passed"] += 1
+        finished = state.get("finished")
+        if finished and finished.get("outcome") != "invalid":
+            config = state.get("config") or {}
+            cat = config.get("category") or "uncategorized"
+            row = categories.setdefault(cat, {"runs": 0, "verified": 0, "l0_passed": 0, "recovered": 0})
+            row["runs"] += 1
+            if finished.get("outcome") == "verified":
+                row["verified"] += 1
+            first = (state["lanes"].get("a", {}).get("verifications") or [])
+            l0 = bool(first and first[0].get("passed"))
+            if l0:
+                row["l0_passed"] += 1
+            if finished.get("outcome") == "verified" and not l0:
+                row["recovered"] += 1
+    for row in critics.values():
+        scored = row["improved"] + row["no_change"] + row["reverted"] + row["no_defect"]
+        row["helpful_rate"] = (row["improved"] / scored) if scored else None
+    return {"critics": critics, "implementers": implementers, "categories": categories}
+
+
+def pick_critic(stats_critics, lane_family, seed, roster=CRITIC_ROSTER, reserve=CRITIC_RESERVE,
+                min_uses=3, explore=0.2):
+    """Choose a cross-family critic: cold-start, then epsilon-greedy on smoothed rates."""
+    def pool_candidates(pool):
+        return [m for m in pool if model_family(m, "pi") != lane_family and not workers.disallowed_model(m)]
+    candidates = pool_candidates(roster)
+    order = list(roster)
+    if not candidates:
+        candidates = pool_candidates(reserve)
+        order = list(reserve)
+    if not candidates:
+        raise ValueError("no critic candidate available")
+    def scored(m):
+        row = stats_critics.get(m, {})
+        return (row.get("improved", 0) + row.get("no_change", 0) + row.get("reverted", 0)
+                + row.get("no_defect", 0))
+    scores = {}
+    for model in candidates:
+        row = stats_critics.get(model, {})
+        scores[model] = (row.get("improved", 0) + 1) / (scored(model) + 2)
+    positions = {model: index for index, model in enumerate(order)}
+    ranked = sorted(candidates, key=lambda m: (-scores[m], positions.get(m, 0)))
+    cold = next((m for m in candidates if scored(m) < min_uses), None)
+    if cold is not None:
+        return {"model": cold, "mode": "cold-start",
+                "fallbacks": [m for m in ranked if m != cold], "scores": scores}
+    rng = random.Random(seed)
+    draw = rng.random()
+    if draw < explore and len(ranked) >= 2:
+        chosen = rng.choice(ranked[1:])
+        mode = "explore"
+    else:
+        chosen = ranked[0]
+        mode = "exploit"
+    return {"model": chosen, "mode": mode,
+            "fallbacks": [m for m in ranked if m != chosen], "scores": scores}
+
+
+def implementer_choice(muse_available, pi_available, muse_quota_reset=None, configured_engine=None):
+    """Pick the implementer engine: Muse when possible, else Pi muse free."""
+    if configured_engine == "pi" and pi_available:
+        return {"engine": "pi", "model": "muse-spark-1.3-contributor-free", "reasoning_effort": "max",
+                "provider": "opencode2api", "fallback": False, "reason": "configured engine is pi"}
+    if muse_available and not muse_quota_reset:
+        return {"engine": "muse", "model": "muse-spark-1.3-contributor", "reasoning_effort": "xhigh",
+                "provider": None, "fallback": False, "reason": "muse available"}
+    if pi_available:
+        if muse_quota_reset:
+            reason = f"muse quota exhausted until {muse_quota_reset}"
+        else:
+            reason = "muse binary not found"
+        return {"engine": "pi", "model": "muse-spark-1.3-contributor-free", "reasoning_effort": "max",
+                "provider": "opencode2api", "fallback": True, "reason": reason}
+    raise ValueError("no implementer available: neither muse nor pi is available")
+
+
+def _engine_available(engine):
+    """True when the engine binary is executable; any error means unavailable."""
+    try:
+        if engine == "muse":
+            from claivelib.engines import muse as module
+        elif engine == "pi":
+            from claivelib.engines import pi as module
+        else:
+            return False
+        return os.access(module.default_binary(), os.X_OK)
+    except Exception:
+        return False
+
+
+def _parse_reset(value):
+    """Epoch seconds for an ISO reset time (Z allowed), or None when unparsable."""
+    try:
+        parsed = datetime.datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.timestamp()
+
+
+def muse_quota_block(now=None):
+    """Latest active Muse quota reset string, or None when Muse is usable.
+
+    Workers record quota_exhausted and quota_reset_at; records without an engine predate
+    multi-engine support and are Muse. Without a reset time the 5-hour window counts from ended_at.
+    """
+    now = time.time() if now is None else now
+    try:
+        children = list(workers.root().iterdir())
+    except OSError:
+        return None
+    reset_found, hit_found = None, None
+    for child in children:
+        if not re.fullmatch(r"[0-9a-f]{12}", child.name):
+            continue
+        try:
+            record = json.loads((child / "state.json").read_text())
+        except (OSError, ValueError):
+            continue
+        if (record.get("engine") or DEFAULT_ENGINE) != "muse" or not record.get("quota_exhausted"):
+            continue
+        reset = record.get("quota_reset_at")
+        if reset:
+            moment = _parse_reset(reset)
+            if moment is not None and moment > now and (reset_found is None or moment > reset_found[0]):
+                reset_found = (moment, str(reset))
+            continue
+        ended = record.get("ended_at")
+        if isinstance(ended, (int, float)) and 0 <= now - ended <= 5 * 3600:
+            if hit_found is None or ended > hit_found:
+                hit_found = ended
+    if reset_found:
+        return reset_found[1]
+    if hit_found is not None:
+        iso = datetime.datetime.fromtimestamp(hit_found, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return f"unknown (quota hit at {iso})"
+    return None
+
+
+def _configured_engine():
+    """Configured default engine, or None when unset or unreadable."""
+    try:
+        from claivelib import config as cfg
+        return cfg.default_engine(None)
+    except Exception:
+        return None
+
+
+def breadth_choice(stats_implementers, lane_a_family, critic_families, roster=CRITIC_ROSTER,
+                   reserve=CRITIC_RESERVE):
+    """Pick a diverse breadth candidate that avoids lane a and its critics."""
+    critics = set(critic_families or ())
+    def filtered(pool, strict):
+        out = []
+        for model in pool:
+            family = model_family(model, "pi")
+            if family == lane_a_family or workers.disallowed_model(model):
+                continue
+            if strict and family in critics:
+                continue
+            out.append(model)
+        return out
+    candidates = filtered(roster, True) or filtered(roster, False)
+    order = list(roster)
+    if not candidates:
+        candidates = filtered(reserve, True) or filtered(reserve, False)
+        order = list(reserve)
+    if not candidates:
+        raise ValueError("no breadth candidate available")
+    def rate(model):
+        row = stats_implementers.get(f"pi/{model}", {})
+        return (row.get("passed", 0) + 1) / (row.get("lanes", 0) + 2)
+    positions = {model: index for index, model in enumerate(order)}
+    ranked = sorted(candidates, key=lambda m: (-rate(m), positions.get(m, 0)))
+    return {"engine": "pi", "model": ranked[0], "provider": "opencode2api",
+            "reasoning_effort": "max", "fallbacks": ranked[1:]}
 
 
 # ------------------------------------------------------------ run storage / IO
@@ -990,6 +1230,9 @@ def build_prompt(state, kind, lane_name=None):
 # ------------------------------------------------------------------- commands
 
 def command_init(args):
+    if args.experiment and args.post_pass_critic:
+        raise ValueError("--post-pass-critic is not allowed in experiment runs: "
+                         "the post-pass critic changes the arm being measured")
     repo = Path(args.repo)
     task = Path(args.task_file)
     if not repo.is_absolute() or not (repo / ".git").exists():
@@ -1041,7 +1284,7 @@ def command_init(args):
               "experiment": args.experiment, "repeat": args.repeat, "max_minutes": args.max_minutes,
               "label": args.label or task.stem, "post_pass_critic": bool(args.post_pass_critic),
               "setup": args.setup, "cache_key": cache_key, "cache_paths": cache_paths,
-              "verify_memory": verify_memory}
+              "verify_memory": verify_memory, "category": args.category}
     append(path, "run.started", config=config)
     print(f"Run {run_id} | arm {args.arm} | base {base[:12]} | {path}")
     if args.skip_base_check:
@@ -1486,7 +1729,8 @@ def summarize(run_id):
                        "critic_families": sorted({c["family"] for c in lane["critiques"] if c.get("family")}),
                        "workers": [{k: w[k] for k in ("role", "worker_id", "model")} for w in lane["workers"]]}
     first = state["lanes"].get("a", {}).get("verifications") or []
-    return {"run_id": run_id, "experiment": config.get("experiment"), "task_id": config["task_id"],
+    return {"run_id": run_id, "experiment": config.get("experiment"), "category": config.get("category"),
+            "task_id": config["task_id"],
             "repeat": config.get("repeat"), "arm": config["arm"], "rounds_limit": config["rounds"],
             "base": state["base"] and state["base"]["score"],
             "outcome": state["finished"]["outcome"] if state["finished"] else "running",
@@ -1548,8 +1792,113 @@ def all_runs(experiment=None):
 def command_list(args):
     for run in all_runs(args.experiment):
         print(f"{run['run_id']} {run['arm']:<3} {run['outcome']:<10} task {run['task_id']} "
-              f"repeat {run['repeat']} {run['experiment'] or ''}")
+              f"repeat {run['repeat']} {run['experiment'] or ''} cat {run.get('category') or '-'}")
     return 0
+
+
+def _all_histories(experiment=None):
+    """Event histories of every run, optionally filtered by experiment."""
+    try:
+        paths = sorted(runs_root().iterdir())
+    except OSError:
+        return []
+    histories = []
+    for path in paths:
+        if not (path / "events.jsonl").is_file():
+            continue
+        try:
+            history = events(path)
+            state = fold(history)
+        except (OSError, ValueError, KeyError):
+            continue
+        if experiment is not None and (state.get("config") or {}).get("experiment") != experiment:
+            continue
+        histories.append(history)
+    return histories
+
+
+def command_stats(args):
+    histories = _all_histories(args.experiment)
+    stats = collect_stats(histories)
+    if args.json:
+        print(json.dumps(stats, indent=2))
+        return 0
+    print("Critics:")
+    print(f"  {'model':<32} {'crit':>5} {'improved':>8} {'helpful':>8}")
+    for model in sorted(stats["critics"]):
+        row = stats["critics"][model]
+        helpful = f"{row['helpful_rate']:.3f}" if row["helpful_rate"] is not None else "-"
+        print(f"  {model:<32} {row['critiques']:>5} {row['improved']:>8} {helpful:>8}")
+    print("Implementers:")
+    print(f"  {'implementer':<42} {'lanes':>5} {'l0':>5} {'passed':>6}")
+    for key in sorted(stats["implementers"]):
+        row = stats["implementers"][key]
+        print(f"  {key:<42} {row['lanes']:>5} {row['l0_passed']:>5} {row['passed']:>6}")
+    print("Categories:")
+    print(f"  {'category':<16} {'runs':>5} {'verified':>8} {'l0':>5} {'recovered':>9}")
+    for cat in sorted(stats["categories"]):
+        row = stats["categories"][cat]
+        print(f"  {cat:<16} {row['runs']:>5} {row['verified']:>8} {row['l0_passed']:>5} "
+              f"{row['recovered']:>9}")
+    return 0
+
+
+def command_pick(args):
+    path, state = load_state(args.run)
+    config = state.get("config") or {}
+    if config.get("experiment"):
+        raise ValueError("pick is disabled in experiment runs: the protocol fixes models per batch")
+    stats = collect_stats(_all_histories())
+    role = args.role
+    if role == "implementer":
+        choice = implementer_choice(_engine_available("muse"), _engine_available("pi"),
+                                    muse_quota_block(), _configured_engine())
+        append(path, "pick.made", role="implementer", lane=None, choice=choice)
+        if args.json:
+            print(json.dumps(choice, indent=2))
+        else:
+            print(f"Implementer: {choice['engine']} {choice['model']} ({choice['reason']})")
+            print(f"Next: claive-orch lane {args.run} a --engine {choice['engine']} "
+                  f"--model {choice['model']} (use reasoning effort {choice['reasoning_effort']})")
+        return 0
+    if role == "critic":
+        lane_name = args.lane or "a"
+        lane = state["lanes"].get(lane_name)
+        if lane is None:
+            raise ValueError(f"unknown lane: {lane_name}")
+        family = lane.get("family") or model_family(lane.get("model"), lane.get("engine"))
+        round_number = len(lane.get("critiques") or []) + 1
+        choice = pick_critic(stats["critics"], family, f"{args.run}:{lane_name}:{round_number}")
+        append(path, "pick.made", role="critic", lane=lane_name, choice=choice)
+        if args.json:
+            print(json.dumps(choice, indent=2))
+        else:
+            fallbacks = ",".join(choice["fallbacks"])
+            print(f"Critic: {choice['model']} ({choice['mode']})")
+            command = (f"claive start --engine pi --provider opencode2api --model {choice['model']} "
+                       "--reasoning-effort max --read-only --turn-timeout 900")
+            if fallbacks:
+                command += f" --fallback-models {fallbacks}"
+            command += (f" --workspace {lane['path']} --prompt-file \"$P\" "
+                        f"--label {args.run}-{lane_name}-critic")
+            print(f"Next: {command}")
+        return 0
+    if role == "breadth":
+        lane_a = state["lanes"].get("a")
+        if lane_a is None:
+            raise ValueError("lane a is missing")
+        family = lane_a.get("family") or model_family(lane_a.get("model"), lane_a.get("engine"))
+        families = {c.get("family") for c in (lane_a.get("critiques") or []) if c.get("family")}
+        choice = breadth_choice(stats["implementers"], family, families)
+        append(path, "pick.made", role="breadth", lane="b", choice=choice)
+        if args.json:
+            print(json.dumps(choice, indent=2))
+        else:
+            print(f"Breadth: {choice['engine']} {choice['model']}")
+            print(f"Next: claive-orch lane {args.run} b --engine pi --model {choice['model']} "
+                  "--strategy \"<a materially different approach>\"")
+        return 0
+    raise ValueError(f"unknown pick role: {role}")
 
 
 def command_compare(args):
@@ -1777,6 +2126,7 @@ def parser():
     init.add_argument("--allow-passing-base", action="store_true")
     init.add_argument("--post-pass-critic", action="store_true",
                       help="after a pass, run one post-pass critic review (arms B and D only)")
+    init.add_argument("--category", choices=list(CATEGORIES), default=None)
     init.add_argument("--setup", help="shell command run with bash -c in each new worktree "
                       "(CLAIVE_ORCH_REPO/CLAIVE_ORCH_LANE in env; keep its files gitignored)")
     init.add_argument("--cache-key", help="shell command printing the cache key for build outputs "
@@ -1841,6 +2191,14 @@ def parser():
     usage.add_argument("--json", action="store_true")
     listing = commands.add_parser("list", help="list runs")
     listing.add_argument("--experiment")
+    stats = commands.add_parser("stats", help="aggregate critic, implementer and category stats")
+    stats.add_argument("--experiment")
+    stats.add_argument("--json", action="store_true")
+    pick = commands.add_parser("pick", help="pick the next worker from collected stats")
+    pick.add_argument("run")
+    pick.add_argument("role", choices=["implementer", "critic", "breadth"])
+    pick.add_argument("--lane")
+    pick.add_argument("--json", action="store_true")
     compare = commands.add_parser("compare", help="per-arm results for an experiment")
     compare.add_argument("--experiment", required=True)
     compare.add_argument("--json", action="store_true")
@@ -1872,6 +2230,7 @@ def main():
                 "review": command_review, "rescore": command_rescore, "reject": command_reject,
                 "next": command_next, "finish": command_finish,
                 "usage": command_usage, "report": command_report, "list": command_list,
+                "stats": command_stats, "pick": command_pick,
                 "compare": command_compare, "cleanup": command_cleanup, "integrate": command_integrate,
                 "prune": command_prune}
     if args.action == "arms":

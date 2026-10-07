@@ -37,7 +37,9 @@ identical to the `worker-orchestration` skill. Load it too and follow its
    models silently. Pause and ask the user. Defaults: Muse at `xhigh`, every Pi
    model at `max`, Pi models from `mimo-v2.6-flash-free`, `big-pickle`,
    `space-bunny-free` (rarely `longcat-2.5-preview-free`; never `nemotron-*` or
-   `ling-3.1-flash-free`).
+   `ling-3.1-flash-free`). `claive-orch pick` (the daily-use bandit) refuses
+   experiment runs, and `init` refuses `--post-pass-critic` with `--experiment`:
+   both would change the arm being measured.
 4. **Never reveal** `difficulty`, the reference commit, other arms' results, or
    held-out checks to any worker. Task text is the manifest's `task` field
    verbatim.

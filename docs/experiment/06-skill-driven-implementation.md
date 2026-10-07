@@ -39,6 +39,7 @@ diverse, a same-family critic, or finishing early without `--abort`.
 | §11 selection | Verifier first, then the reviewer's preference, then the smaller diff. Ties are recorded |
 | §15 arms | A, R, R', B, B0, D implemented. C and E not implemented |
 | §16 measures | `claive-orch report --json` per run, `claive-orch compare --experiment` across runs |
+| Daily use (outside the protocol) | `claive-orch stats` mines every run's events: critic helpfulness (did the next checkpoint of the lane improve), implementer pass rates per engine/model, and how often each `init --category` needed the ladder. `claive-orch pick RUN implementer\|critic\|breadth` turns that into the next model: Muse, or Pi `muse-spark-1.3-contributor-free` when Muse is missing or out of quota; the critic with the best smoothed helpful rate after 3 scored uses each, with 20 % seeded exploration; a lane-b family different from lane a and its critics. Picks are recorded as `pick.made`; `pick` is refused in experiment runs, which fix models per batch |
 
 ## Deliberate deviations
 

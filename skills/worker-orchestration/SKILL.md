@@ -131,11 +131,14 @@ first. Worker writes go only into lane worktrees, never into the user's checkout
 # 0. Task text: goal, constraints, files and symbols, acceptance criteria.
 #    Do not include the solution. Write it to an absolute file.
 claive-orch init --repo /abs/repo --task-file /abs/task.md \
-  --verify 'python3 -m pytest -q tests/test_x.py' --arm D --rounds 2
+  --verify 'python3 -m pytest -q tests/test_x.py' --arm D --rounds 2 \
+  --category bug-fix   # change|bug-fix|feature|debugging|refactor|docs|other
 #    -> "Run <RUN>". It runs the verifier at base. If the verifier already
 #       passes, the run is invalid: fix the check.
+#    --category feeds `claive-orch stats` (how often each kind needs the ladder).
 #    Options: --post-pass-critic (arms B/D) adds one critic pass after the
-#    tests pass, looking for behaviour changes beyond the task.
+#    tests pass, looking for behaviour changes beyond the task (not allowed
+#    with --experiment).
 #    --setup 'ln -s "$CLAIVE_ORCH_REPO/node_modules" node_modules' runs in the
 #    base check and in every new lane worktree. Files it creates are lane-local:
 #    never committed into checkpoints and kept on revert (nor are __pycache__,
@@ -154,12 +157,12 @@ Then loop on `claive-orch next RUN` and do what it names:
 
 | `next` says | Do |
 |---|---|
-| `add_lane a` | `claive-orch lane RUN a --engine muse --model muse-spark-1.3-contributor` |
+| `add_lane a` | `claive-orch pick RUN implementer` and run the `claive-orch lane` command it prints: Muse `muse-spark-1.3-contributor`, or Pi `muse-spark-1.3-contributor-free` (effort `max`) when Muse is missing or its quota is exhausted. Tell the user when it picked the fallback |
 | `implement a` | `P=$(claive-orch prompt RUN implement a)`; launch `claive open --detach --workspace <lane path> --prompt-file "$P" --label RUN-a --reasoning-effort xhigh --max-model-steps 100` (`max` for very complicated tasks; for a Pi lane use `--engine pi --provider opencode2api --model <lane model> --reasoning-effort max` and no step cap); `claive-orch worker RUN a --role implementer --worker-id W`; `claive wait W` |
 | `verify a` | after the implementer's turn ends: `claive-orch verify RUN a`. It runs the tests, then checkpoints or **reverts a regression automatically** |
-| `critique a` | `P=$(claive-orch prompt RUN critique a)`; `claive start --engine pi --provider opencode2api --model <next preferred critic> --reasoning-effort max --read-only --turn-timeout 900 --fallback-models big-pickle,space-bunny-free --workspace <lane path> --prompt-file "$P" --label RUN-a-critic` (fallbacks: the remaining preferred critics, never lane a's family); `claive-orch worker RUN a --role critic --worker-id C`; `claive wait C`; `claive-orch critique RUN a --worker-id C` (the lane argument is required) |
+| `critique a` | `P=$(claive-orch prompt RUN critique a)`; `claive-orch pick RUN critic --lane a` prints the `claive start ... --read-only --fallback-models ...` launch (critic and fallbacks never lane a's family); run it as printed, with the generated prompt and **no** `--role`/`--report` (the critic prompt carries its own JSON contract; a role adds a competing report format); `claive-orch worker RUN a --role critic --worker-id C`; `claive wait C`; `claive-orch critique RUN a --worker-id C` (the lane argument is required) |
 | `correct a` | if a suggested defect is wrong (e.g. relaxes a task constraint), first `claive-orch reject RUN a --defect N --reason "..."`; then `P=$(claive-orch prompt RUN correct a)`; `claive followup W --prompt-file "$P"` (**same session**: it keeps its context); `claive wait W`; `claive-orch verify RUN a` |
-| `add_lane b` | lane a stalled. `claive-orch lane RUN b --engine pi --model <preferred family ≠ a and ≠ the last critic> --strategy "<a materially different approach>"`, then the same implement, verify, critique and correct cycle in lane b, with a critic of yet another family where possible. Lane b **never** sees lane a's diff |
+| `add_lane b` | lane a stalled. `claive-orch pick RUN breadth` prints `claive-orch lane RUN b --engine pi --model <family ≠ a and ≠ a's critics> --strategy "..."`; write the strategy (a materially different approach) yourself, then the same implement, verify, critique and correct cycle in lane b, with a critic of yet another family where possible. Lane b **never** sees lane a's diff |
 | `review` | `P=$(claive-orch prompt RUN review)`; start a read-only Pi reviewer; `claive-orch review RUN --worker-id R` |
 | `finish` | `claive-orch finish RUN`, `claive-orch report RUN` (collects token usage automatically), then integrate (below) |
 
@@ -175,6 +178,18 @@ round.
 
 Arms for daily use: `D` is the default (cheap when L0 passes, escalates only on
 evidence). `B` means no breadth. `A` means a single attempt plus verification.
+
+### Self-tuning picks (no experiments needed)
+
+Every run is data. `claive-orch stats [--json]` reads all runs' events: per
+critic, whether the lane's next checkpoint improved, stayed equal, was reverted,
+or the critic found nothing (`helpful_rate`); per implementer, first-try and
+eventual pass rates; per `--category`, how often L0 failed and the ladder
+recovered. `claive-orch pick` uses it: each critic gets 3 scored uses first
+(cold start), then the best smoothed helpful rate wins with 20 % seeded
+exploration; breadth models rank by lane pass rate. Picks are recorded in the
+run (`pick.made`). They are suggestions inside the rules above: the arbiter
+still refuses a same-family critic. `pick` is refused in experiment runs.
 
 ### Rules the arbiter enforces (so you know why)
 
@@ -239,7 +254,9 @@ worktree. Rules:
   `--base <that commit>` (or the original base if none) and
   `claive-orch lane NEW a --engine pi --model muse-spark-1.3-contributor-free`.
   Any other fallback model needs the user's approval. Go back to Muse after the
-  reset.
+  reset. `claive-orch pick RUN implementer` does this choice for new runs: it
+  reads the quota state recorded by earlier Muse workers (and whether the Muse
+  binary exists) and picks the fallback until the reset time passes.
 - A worker that fails (non-zero `wait`) is not success. Read
   `claive logs ID --stderr`, retry once only with a changed hypothesis,
   otherwise `claive-orch finish RUN --abort --reason "..."` and report.

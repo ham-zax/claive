@@ -7,6 +7,19 @@ Pi is available explicitly with `--engine pi`, using only `opencode2api`. Its in
 Pi model when `--model` is omitted. See [Pi setup, sessions, supported options and verification](docs/pi-engine.md).
 Muse remains the default engine. Use `claive-worker --engine pi` to select Pi.
 
+Claude Code is available with `--engine claude` (headless `claude -p`, binary `~/.local/bin/claude` or
+`CLAUDE_WORKER_BINARY`). It is strictly locked to `claude-haiku-5-5`: any other `--model`, role model or
+timeout fallback is refused. Efforts are `low` to `max` (default `max`), auto-compacting at 100k tokens; `--max-model-steps`,
+`--output-schema` and worktree isolation are unsupported. Settings, hooks, MCP servers and skills are not loaded;
+read-only workers get `Read,Grep,Glob`.
+
+Codex is available with `--engine codex` (`codex exec --json`, binary from `CODEX_WORKER_BINARY` or the nvm install).
+It is strictly locked to `gpt-6-luna` at reasoning effort `max`; any other `--model` or `--reasoning-effort` is refused.
+Compaction is left at Codex's own behaviour. Codex chooses its own thread ID,
+so the job's session ID is replaced by it once the thread starts. User config and rules are ignored; read-only workers
+use the read-only sandbox, writers `workspace-write` with approvals off. `--max-model-steps`, `--output-schema` and
+worktree isolation are unsupported.
+
 ## Native Codex progress
 
 The default integration uses Codex's existing background-terminal indicator and `/ps`. The agent runs `claive-worker` through its managed shell tool with a short yield, retains the returned terminal session ID, and collects the final output. The launcher stays alive between related turns until explicitly closed, so Codex can track it while the parent continues working. The worker also appears in the optional registry dashboard.

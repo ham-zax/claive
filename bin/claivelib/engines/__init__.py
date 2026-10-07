@@ -7,7 +7,9 @@ from claivelib import config
 # constant is also the fallback when reading state; new launches use default_engine() instead.
 DEFAULT_ENGINE = "muse"
 _ENGINES = {}
-_MODULES = {"muse": ("muse", "MuseEngine"), "pi": ("pi", "PiEngine")}
+_MODULES = {"muse": ("muse", "MuseEngine"), "pi": ("pi", "PiEngine"),
+            "claude": ("claude", "ClaudeEngine"),
+            "codex": ("codex", "CodexEngine")}
 
 
 def default_engine():

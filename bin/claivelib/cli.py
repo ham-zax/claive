@@ -402,6 +402,8 @@ def event_update(state, event):
         state["terminal_reason"] = event.get("reason")
         state["answer"] = event.get("text", "")
         state["phase"] = "finishing"
+    elif kind == "session_bound":
+        state["session_id"] = event["session_id"]  # engines that choose their own session ID
     elif kind == "quota_exhausted":
         state["quota_exhausted"] = True
         state["fallback_requires_user_approval"] = True
@@ -1152,7 +1154,7 @@ def doctor_checks(live=False):
     except ValueError:
         default = None
     results = {}
-    for name in ("muse", "pi"):
+    for name in ("muse", "pi", "claude", "codex"):
         try:
             binary = importlib.import_module(f"claivelib.engines.{name}").default_binary()
         except ImportError:
@@ -1173,10 +1175,9 @@ def doctor_checks(live=False):
                 ok, detail = False, f"{binary} --version failed: {error}"[:200]
         results[name] = ok
         add(name, ok, name == default, detail)
-    add("engines", results["muse"] or results["pi"], True,
-        "muse ok" if results["muse"] and not results["pi"] else
-        "pi ok" if results["pi"] and not results["muse"] else
-        "muse, pi available" if results["muse"] else "no engine binary found")
+    available = [name for name, ok in results.items() if ok]
+    add("engines", bool(available), True, ", ".join(available) + (" ok" if len(available) == 1 else " available")
+        if available else "no engine binary found")
     entry = None
     try:
         _data, entry = provider.read_models()
@@ -1330,7 +1331,7 @@ def parser():
         launch.add_argument("--engine", default=None)
         launch.add_argument("--role", choices=sorted(ROLES))
         launch.add_argument("--report", action="store_true", help="request a structured claive-report block")
-        launch.add_argument("--reasoning-effort", help="engine-specific effort; defaults to xhigh (Muse) or max (Pi)")
+        launch.add_argument("--reasoning-effort", help="engine-specific effort; defaults to xhigh (Muse), max (Pi), max (Claude) or max (Codex)")
         launch.add_argument("--max-model-steps", type=int, help="engine step cap, when supported")
         launch.add_argument("--read-only", action="store_true")
         isolation = launch.add_mutually_exclusive_group()

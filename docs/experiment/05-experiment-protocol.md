@@ -78,7 +78,7 @@ Fixed per batch (record them in the batch notes):
   wall-clock as the secondary unit. There is no dollar cost.
 - R and R' are capped structurally at 2 candidates. After B has been run on the
   task set, compute B's median tokens per task. H1 is only claimed where R's
-  median tokens are at least 0.8× B's (TBD: confirm the ratio). Otherwise report
+  median tokens are at least 0.8× B's (ratio 0.8 confirmed 2026-10-07). Otherwise report
   the comparison as "R under-budgeted" and do not count it as evidence.
 - Runs whose token usage is unknown are reported as unknown, not as zero.
 
@@ -104,16 +104,16 @@ A corpus this small supports exploratory conclusions only. Say so in every write
 ## Gates (fix before data)
 
 - **Gate 1 (baseline):** record A's verified rate and its variance across
-  repeats. If A verifies more than TBD (suggested 80%) of tasks, the corpus is
+  repeats. If A verifies more than 80% (fixed 2026-10-07) of tasks, the corpus is
   too easy: add harder tasks before continuing.
 - **Gate 2 (core thesis):** B must beat R in paired per-task comparisons at
-  matched compute, by at least TBD (suggested +10 points verified rate with a
+  matched compute, by at least +10 points (fixed 2026-10-07; suggested +10 points verified rate with a
   non-overlapping or nearly non-overlapping interval, or a clear majority of
   tasks where B ≥ R). **If B does not beat R, stop and report the null result.
   Do not add breadth.**
 - **H3:** B vs B0 is reported regardless of the outcome. It is an ablation, not a gate.
-- **Gate 4 (breadth):** among runs where B stalled, D must recover at least TBD
-  (suggested 1 in 4) at a median token cost no more than TBD (suggested 2× B).
+- **Gate 4 (breadth):** among runs where B stalled, D must recover at least 1 in 4 (fixed 2026-10-07)
+  at a median token cost no more than 2× B (fixed 2026-10-07).
   Compare D with R' (H6).
 
 ## Batch notes template

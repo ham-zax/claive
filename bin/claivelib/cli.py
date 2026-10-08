@@ -233,6 +233,9 @@ def identity(pid):
 
 
 def job_path(job_id):
+    if isinstance(job_id, str) and job_id.startswith("@"):
+        from claivelib import aliases
+        job_id = aliases.resolve(job_id)
     if not re.fullmatch(r"[0-9a-f]{12}", job_id):
         raise ValueError("invalid worker ID")
     path = root() / job_id
@@ -464,7 +467,7 @@ def supervise(job_id, control=None):
         fallback_raw = state.get("fallback_models")
         state["fallback_models"] = parse_fallback_models(fallback_raw) if fallback_raw else []
     state.update(supervisor_pid=os.getpid(), supervisor_identity=identity(os.getpid()),
-                 status="running", phase="launching worker")
+                 status="running", phase="launching worker", request_receipts=True)
     stopping = False
     child = None
     timed_out = False
@@ -676,6 +679,8 @@ def supervise(job_id, control=None):
     if control is None or stopping:
         release_worktree(state)
     save(path / "state.json", state)
+    from claivelib import turns
+    turns.complete(path, state)
     _write_turn_event(state)
     return outcome_code(state)
 
@@ -794,13 +799,44 @@ def reusable_worker(job_id):
         while not control["stopping"]:
             pending = sorted((path / "requests").glob("*.json"))
             if pending:
-                request = json.loads(pending[0].read_text())
+                from claivelib import turns
+                request = None
+                try:
+                    request = json.loads(pending[0].read_text())
+                    turns.validate(request)
+                except ValueError as error:
+                    state.update(last_turn_status="failed", error=str(error), failure_kind="rejected",
+                                 phase="invalid queued follow-up; ready for another assignment")
+                    save(path / "state.json", state)
+                    _write_turn_event(state)
+                    request_id = request.get("request_id") if isinstance(request, dict) else None
+                    turns.complete(path, state, request_id, str(error))
+                    pending[0].unlink()
+                    print(f"Worker {job_id}: follow-up rejected: {clean(error)}", flush=True)
+                    continue
+                if request.get("request_id") and (path / "responses" / f"{request['request_id']}.json").exists():
+                    pending[0].unlink()
+                    print(f"Worker {job_id}: already completed request {request['request_id']} ignored", flush=True)
+                    continue
+                if request.get("stop_file") and Path(request["stop_file"]).exists():
+                    turns.complete(path, state, request.get("request_id"), "conversation stopped before delivery")
+                    pending[0].unlink()
+                    continue
+                if request.get("requires_no_parent") and state.get("needs_parent"):
+                    turns.complete(path, state, request.get("request_id"), "worker is waiting for a parent decision", 3)
+                    pending[0].unlink()
+                    continue
+                if request.get("expires_at") is not None and time.time() >= request["expires_at"]:
+                    turns.complete(path, state, request.get("request_id"), "queued follow-up expired before delivery", 124)
+                    pending[0].unlink()
+                    continue
                 if not Path(request["prompt_file"]).is_file():
                     state["phase"] = "follow-up prompt missing; ready for another assignment"
                     state.update(last_turn_status="failed", error="queued follow-up prompt disappeared",
                                  failure_kind="rejected")
                     save(path / "state.json", state)
                     _write_turn_event(state)
+                    turns.complete(path, state, request.get("request_id"), "queued follow-up prompt disappeared")
                     pending[0].unlink()
                     print(f"Worker {job_id}: rejected missing prompt {clean(request['prompt_file'])}", flush=True)
                     continue
@@ -816,6 +852,7 @@ def reusable_worker(job_id):
                                      failure_kind="rejected")
                         save(path / "state.json", state)
                         _write_turn_event(state)
+                        turns.complete(path, state, request.get("request_id"), "actual worktree is unknown")
                         pending[0].unlink()
                         print(f"Worker {job_id}: follow-up rejected; actual worktree is unknown", flush=True)
                         continue
@@ -842,6 +879,7 @@ def reusable_worker(job_id):
                                  failure_kind="rejected")
                     save(path / "state.json", state)
                     _write_turn_event(state)
+                    turns.complete(path, state, request.get("request_id"), str(error))
                     pending[0].unlink()
                     print(f"Worker {job_id}: follow-up rejected: {clean(error)}", flush=True)
                     continue
@@ -849,6 +887,11 @@ def reusable_worker(job_id):
                              max_model_steps=steps, command=command,
                              label=request.get("label") or state["label"], turn=new_turn,
                              status="running", phase="starting related follow-up")
+                # Legacy queued requests have no ID; never carry a preceding ID
+                # into their outcome or overwrite an earlier delivery receipt.
+                state.pop("request_id", None)
+                if request.get("request_id"):
+                    state["request_id"] = request["request_id"]
                 if source:
                     state["source_prompt_file"] = source
                 save(path / "state.json", state)
@@ -1353,6 +1396,28 @@ def parser():
             launch.add_argument("--detach", action="store_true", help="run the reusable loop in the background")
     listing = commands.add_parser("list", help="list active workers and recent results")
     listing.add_argument("--json", action="store_true")
+    alias = commands.add_parser("alias", help="give workers persistent names, referenced as @name")
+    alias_sub = alias.add_subparsers(dest="alias_action", required=True)
+    alias_set = alias_sub.add_parser("set", help="bind a name to an existing worker")
+    alias_set.add_argument("name")
+    alias_set.add_argument("id")
+    alias_set.add_argument("--replace", action="store_true", help="explicitly replace an existing binding")
+    alias_list = alias_sub.add_parser("list", help="show bindings and current worker status")
+    alias_list.add_argument("--json", action="store_true")
+    alias_sub.add_parser("remove", help="remove a binding; keep its worker and history").add_argument("name")
+    conversation = commands.add_parser("conversation", help="bounded exchanges between existing workers")
+    conversation_sub = conversation.add_subparsers(dest="conversation_action", required=True)
+    conversation_start = conversation_sub.add_parser("start")
+    conversation_start.add_argument("workers", nargs="+")
+    topic = conversation_start.add_mutually_exclusive_group(required=True)
+    topic.add_argument("--message")
+    topic.add_argument("--message-file")
+    conversation_start.add_argument("--rounds", type=int, default=2, help="rounds of replies per participant (1..8; default 2)")
+    conversation_start.add_argument("--timeout", default="300", help="total scheduling/wait budget in seconds (default 300)")
+    conversation_start.add_argument("--json", action="store_true")
+    conversation_show = conversation_sub.add_parser("show")
+    conversation_show.add_argument("id")
+    conversation_show.add_argument("--json", action="store_true")
     for action in ("show", "logs", "cancel", "close", "usage"):
         command = commands.add_parser(action)
         command.add_argument("id")
@@ -1484,6 +1549,13 @@ def main(launcher=None):
         from claivelib import batch as batch_mod
         return batch_mod.runner(sys.argv[2])
     args = parser().parse_args()
+    # Resolve once per command so a concurrent rebind cannot redirect later reads
+    # or writes in the same operation. Persisted links and output keep canonical IDs.
+    worker_actions = {"show", "logs", "cancel", "close", "usage", "followup", "effort", "answer"}
+    if args.action in worker_actions and args.id.startswith("@"):
+        args.id = job_path(args.id).name
+    elif args.action == "wait":
+        args.id = [job_path(value).name if value.startswith("@") else value for value in args.id]
     if args.action in {"run", "start", "open"}:
         check_nested()
         path, state = create_job(args)
@@ -1500,7 +1572,20 @@ def main(launcher=None):
         spawn_supervisor(path, state, "_supervise")
         print(f"Inspect: claive show {state['id']}\nCancel:  claive cancel {state['id']}")
         return 0
-    if args.action == "list":
+    if args.action == "conversation":
+        from claivelib import conversation
+        if args.conversation_action == "start":
+            return conversation.start(args.workers, args.message, args.message_file,
+                                      args.rounds, args.timeout, args.json)
+        return conversation.show(args.id, args.json)
+    elif args.action == "alias":
+        from claivelib import aliases
+        if args.alias_action == "set":
+            return aliases.update(args.name, args.id, args.replace)
+        if args.alias_action == "remove":
+            return aliases.update(args.name)
+        return aliases.listing(args.json)
+    elif args.action == "list":
         records = jobs()
         print(json.dumps(records, indent=2) if args.json else render(records, sys.stdout.isatty()))
     elif args.action == "status-line":
@@ -1574,24 +1659,9 @@ def main(launcher=None):
             time.sleep(0.25)
     elif args.action == "followup":
         path = job_path(args.id)
-        state = load(path)
-        if not state.get("reusable") or state["status"] not in ACTIVE or (path / "close.request").exists():
-            raise ValueError("worker is not available for follow-up; reopen its retained --session-id if appropriate")
-        prompt = Path(args.prompt_file)
-        if not prompt.is_absolute() or not prompt.is_file() or not prompt.stat().st_size:
-            raise ValueError("--prompt-file must be an existing nonempty absolute file")
-        if args.max_model_steps is not None and args.max_model_steps < 1:
-            raise ValueError("--max-model-steps must be positive")
-        policy = json.loads((path / "policy.json").read_text())
-        get_engine(state.get("engine", DEFAULT_ENGINE)).validate_turn(turn_request(
-            state, prompt_file=str(prompt),
-            reasoning_effort=args.reasoning_effort or policy["reasoning_effort"],
-            max_model_steps=args.max_model_steps if args.max_model_steps is not None else policy["max_model_steps"],
-        ))
-        request = f"{time.time_ns():020}-{uuid.uuid4().hex}.json"
-        save(path / "requests" / request, dict(prompt_file=str(prompt), label=args.label,
-                                               reasoning_effort=args.reasoning_effort,
-                                               max_model_steps=args.max_model_steps))
+        from claivelib import turns
+        _request_id, state = turns.queue(path, args.prompt_file, args.label,
+                                         args.reasoning_effort, args.max_model_steps)
         print(f"Follow-up queued for {args.id} in session {worker_session_id(state)}")
     elif args.action == "effort":
         path = job_path(args.id)

@@ -83,6 +83,83 @@ claive status-line
 
 `cancel` stops the worker process group, escalating to a kill after three seconds if necessary. `wait` returns when assigned turns finish (the reusable worker can remain idle), with zero for a valid completed turn, nonzero on failure, or 130 on cancellation. `close` drains already assigned turns before ending the supervisor; `cancel` stops it immediately. Closing a dashboard stops only the view; workers keep running or waiting until explicitly closed or cancelled.
 
+### Named specialists
+
+Give a worker a persistent address so another parent session can return to the
+same specialist and retained context. This adapts the addressed-agent idea from
+[OpenRig](https://github.com/mvschwarz/openrig) to claive's reusable workers:
+
+```bash
+claive alias set backend WORKER_ID
+claive alias list --json
+claive show @backend --json
+claive followup @backend --prompt-file /abs/next-task.md
+claive wait @backend
+claive mission link MISSION_ID --worker @backend
+```
+
+`@name` works wherever a worker ID is accepted: `show`, `logs`, `usage`, `wait`,
+`followup`, `effort`, `answer`, `close`, `cancel`, and `mission link --worker`.
+Names start with a lowercase letter and contain up to 64 lowercase letters,
+digits, `_`, `.`, or `-`. Bindings live in `$CLAIVE_DIR/aliases.json`, shared by
+parents using that state directory; labels remain display text. Command output,
+inbox events, and mission links keep the canonical worker ID.
+
+Binding an existing name to a different worker requires
+`claive alias set backend NEW_WORKER_ID --replace`. Removing a name with
+`claive alias remove backend` keeps the worker and its history. A closed worker
+remains inspectable through its name, but follow-ups still require an available
+reusable worker. To resume a closed specialist, reopen its retained `--session-id`
+with the same workspace and policy, then explicitly rebind the name. Listing
+shows `missing` if a bound worker's state has been removed.
+
+### Conversations across engines and models
+
+Existing reusable workers can exchange replies in a bounded conversation:
+
+```bash
+claive conversation start @proposer @critic @reviewer \
+  --message-file /abs/question.md --rounds 2 --timeout 300
+claive conversation show CONVERSATION_ID --json
+```
+
+Each round visits participants in the supplied order and passes the previous
+participant's reply to the next. For example, open one Pi worker on
+`mimo-v2.6-flash-free`, another on `big-pickle`, and a Claude worker on its pinned
+`claude-haiku-5-5`, then give them the names above. Muse and Codex workers also
+use the same protocol. Open participants with their own role prompts and
+`--report` (or a role); use `--read-only` for discussion and review. Their
+engine, model, session, effort defaults, permissions, and file ownership remain
+the policies chosen at launch. Peer replies do not grant new permissions.
+
+Workers must be idle, reusable, distinct, and have no queued work or unresolved
+failure/question when the conversation starts. A conversation never opens
+workers or selects models. Workers opened before conversation support was
+installed must be closed and reopened with their retained `--session-id` first;
+their old supervisors cannot produce request receipts. Aliases resolve once at startup. Each reply has a
+request ID, sender, engine/model, session, turn number, and saved receipt, so an
+unrelated follow-up cannot substitute its result. `--rounds` is 1..8 (default
+2), with 2..8 participants; `--timeout` is a finite total scheduling/wait budget
+in seconds (default 300). Messages and composed prompts are capped at 128 KiB.
+
+The controller runs in the foreground; use the parent's managed shell with a
+short yield for visibility. It stops scheduling on failure, a required report
+that is missing/invalid, a parent question (exit 3), timeout (124), or a stop
+signal (130). A timeout or stop signal can leave a request already claimed;
+the transcript's `pending_request.response_file` identifies its eventual result.
+Requests still queued expire or observe the controller's stop marker before
+delivery. Inspect that receipt
+before sending again. To stop a worker's current turn, use `claive cancel ID`.
+Answer a parked question with `claive answer ID`, then start a new bounded
+conversation when participants are ready. The command does not restart or retry
+conversations automatically.
+
+Transcripts live in `$CLAIVE_DIR/conversations/<id>/state.json`, and worker
+receipts in `$CLAIVE_DIR/<worker>/responses/<request-id>.json`. Completion and
+questions also appear in `claive inbox`. `conversation start --json` returns
+one JSON object at completion; `conversation show --json` can inspect progress
+or a retained transcript, including an interrupted controller.
+
 ### Health, roles, reports, and parent questions
 
 ```bash

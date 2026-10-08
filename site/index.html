@@ -4,10 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>claive: a referee for AI coding agents</title>
-<meta name="description" content="claive lets one AI hand a coding job to cheaper ones, has a different AI critique the result, and keeps each change only if your tests say it got better. Experimental, MIT licensed.">
+<meta name="description" content="claive is a referee for AI coding agents. Workers write code, a different-model critic finds defects, and your tests decide what gets kept or rolled back. MIT licensed; experimental.">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='2' y='1' width='5' height='14' fill='%231d6a42'/%3E%3Crect x='9' y='1' width='5' height='14' fill='%231b1814'/%3E%3C/svg%3E">
-<script>document.documentElement.classList.add("js");if(matchMedia("(prefers-reduced-motion: reduce)").matches)document.documentElement.classList.add("rm")</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400..600;1,6..72,400&display=swap">
@@ -23,7 +22,10 @@ body{margin:0;background:var(--paper);color:var(--ink);font:400 1.125rem/1.6 var
 ::selection{background:var(--ink);color:var(--paper)}
 a{color:inherit;text-underline-offset:.2em;text-decoration-thickness:1px}
 a:hover{text-decoration-thickness:2px}
-:focus-visible{outline:2px solid var(--ink);outline-offset:3px;border-radius:1px}
+:focus-visible{outline:2px solid var(--pass);outline-offset:3px;border-radius:1px}
+.skip{position:absolute;top:-5rem;left:1rem;z-index:99;background:var(--ink);color:var(--paper);padding:.65rem 1rem;font:500 .85rem var(--mono)}
+.skip:focus{top:1rem}
+@media(prefers-reduced-motion:reduce){.poster,.film .step,.film .tape .te,.film .count span,.film .verdict span,.film .s4 .a2,.film .s4 .shelf,.film .s5 .lb{transition:none!important}}
 .wrap{max-width:68rem;margin-inline:auto;padding-inline:max(16px,env(safe-area-inset-left,0px),env(safe-area-inset-right,0px))}
 p,li,dd{max-width:65ch;text-wrap:pretty}
 h1,h2,h3{font-weight:500;text-wrap:balance;margin:0}
@@ -100,30 +102,59 @@ footer a{display:inline-block;padding-block:.4rem}
 .strip{display:flex;gap:var(--sg,3px)}
 .strip.big{--sw:clamp(1.1rem,3.4vw,2rem);--sh:clamp(2.4rem,7vw,4.4rem);--sb:2px;--sg:clamp(4px,.8vw,8px)}
 .strip.mid{--sw:clamp(.7rem,2vw,1rem);--sh:clamp(1.5rem,4vw,2.1rem);--sb:1.5px;--sg:3px}
-html.js:not(.rm) .record li{opacity:0}
+/* The run record is readable before, during and without enhancement. */
 
 /* ===== motion: the film ===== */
 .filmsec>p{margin-top:0}
+.film .stage{isolation:isolate}
+.film .hud,.film .capbar{position:relative;z-index:1}
+.film .hud .badge span{visibility:hidden}
+.film[data-chapter="0"] .hud .badge .ill,.film[data-chapter="1"] .hud .badge .ill,.film[data-chapter="2"] .hud .badge .real,.film[data-chapter="3"] .hud .badge .ill,.film[data-chapter="4"] .hud .badge .ill,.film[data-chapter="5"] .hud .badge .ill{visibility:visible}
+.film .step,.film .tape .te,.film .count span,.film .verdict span,.film .s4 .a2,.film .s4 .shelf,.film .s5 .lb{opacity:0}
+.film[data-chapter="2"] .step.active,.film[data-chapter="2"] .tape .te.active,.film[data-chapter="2"] .count span.active,.film[data-chapter="2"] .verdict span.active,.film[data-chapter="3"] .s4 .a2.active,.film[data-chapter="3"] .s4 .shelf.active,.film[data-chapter="4"] .s5 .lb.active{opacity:1}
+.film .step,.film .tape .te,.film .count span,.film .verdict span{pointer-events:none}
+.film .tape .te,.film .count span,.film .verdict span,.film .step{visibility:hidden}
+.film .tape .te.active,.film .count span.active,.film .verdict span.active,.film .step.active{visibility:visible}
+@media(prefers-reduced-motion:no-preference){.film .step,.film .tape .te,.film .count span,.film .verdict span,.film .s4 .a2,.film .s4 .shelf,.film .s5 .lb{transition:opacity .35s ease-out}}
+.film .rail .bar{transform:scaleX(0)}
+.film .rail li.active .bar{transform:scaleX(1)}
+@media(prefers-reduced-motion:no-preference){.film .rail .bar{transition:transform .45s ease-out}}
+.film .stamp{opacity:0}
+.film .stamp.active{opacity:1}
+@media(max-width:47.99rem){.s3{gap:.8rem}.s3 .l{gap:.65rem}.rail{gap:.2rem}.rail li{font-size:.6rem}.s3 .score{gap:.4rem}.s3 .count{font-size:2rem}.s3 .stamp{font-size:.7rem}.s4 .bf{gap:.5rem}.s4 .cp,.s5 .cp{padding:.45rem}.capbar{padding-block:.7rem}.s5 .lanes{gap:.65rem}}
+@media(max-width:47.99rem){
+  .s3{grid-template-columns:minmax(0,1fr)}
+  .s3 .l,.s3 .score,.s3 .tape,.s3 .tc{width:100%;min-width:0;max-width:100%}
+  .s3 .tape .te,.s3 .fine{overflow-wrap:anywhere}
+  .rail{grid-template-columns:repeat(5,minmax(0,1fr))}
+  .rail li{min-width:0;overflow-wrap:anywhere}
+  .hud .badge{width:46%;max-width:46%;min-width:0;font-size:.61rem}
+  .hud .badge span{min-width:0;overflow-wrap:anywhere;padding:.18rem .25rem}
+}
+@media(max-width:24rem){.hud{gap:.25rem}.s3 .tape{font-size:.61rem}.cast li{gap:.15rem}.screen{--pad:.85rem}}
 .film{margin:1.6rem 0 0}
 .film .screen,.film .ctrl,.film .cnav{display:none}
-html.js .film .screen{display:block}
-html.js .film .ctrl{display:flex}
-html.js .film .cnav{display:grid}
+html.film-ready .film .screen{display:block}
+html.film-ready .film .ctrl{display:flex}
+html.film-ready .film .cnav{display:grid}
 .screen{position:relative;overflow:hidden;background:var(--wash);border-block:2px solid var(--ink);--pad:clamp(1rem,3vw,2.25rem)}
-.stage{display:grid;grid-template-rows:auto 1fr auto;aspect-ratio:16/9;min-width:0}
-@media (max-width:47.99rem){.stage{aspect-ratio:3/4}}
+.stage{display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:auto 1fr auto;aspect-ratio:16/9;min-width:0;width:100%}
+@media (max-width:47.99rem){.stage{aspect-ratio:auto;min-height:clamp(34rem,155vw,40rem)}}
 .hud{display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;padding:var(--pad) var(--pad) 0;font:500 .72rem/1.3 var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
 .hud .chap,.hud .badge{display:grid}
 .hud .chap span,.hud .badge span{grid-area:1/1}
 .hud .badge{justify-items:end;text-align:right;max-width:58%}
 .hud .badge span{border:1px solid currentColor;padding:.2rem .5rem;color:var(--ink)}
 .hud .badge .ill{color:var(--bad)}
-.scenes{display:grid;position:relative;min-width:0}
-.sc{grid-area:1/1;display:grid;align-content:center;gap:clamp(1rem,2.4vw,1.8rem);padding:var(--pad);opacity:0;min-width:0}
+.scenes{display:grid;grid-template-columns:minmax(0,1fr);position:relative;min-width:0;width:100%}
+.sc{grid-area:1/1;display:grid;align-content:center;gap:clamp(1rem,2.4vw,1.8rem);padding:var(--pad);opacity:0;visibility:hidden;min-width:0;pointer-events:none}
+.film[data-chapter="0"] .s1,.film[data-chapter="1"] .s2,.film[data-chapter="2"] .s3,.film[data-chapter="3"] .s4,.film[data-chapter="4"] .s5,.film[data-chapter="5"] .s6{opacity:1;visibility:visible}
+@media (prefers-reduced-motion:no-preference){.sc{transition:opacity .45s ease-out,visibility .45s}}
+.film .capbar{min-height:5.5rem;align-content:center}
 .ttl{font:500 clamp(1.25rem,3vw,1.9rem)/1.15 var(--serif);letter-spacing:-.01em}
 .k{font:500 .72rem/1.3 var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
 .capbar{display:grid;padding:.9rem var(--pad) calc(var(--pad)*.85);border-top:1px solid var(--rule)}
-.capbar p{grid-area:1/1;margin:0;max-width:62ch;font-size:clamp(1.05rem,2.3vw,1.5rem);line-height:1.32;opacity:0}
+.capbar p{grid-area:1/1;margin:0;max-width:62ch;font-size:clamp(1.05rem,2.3vw,1.5rem);line-height:1.32;opacity:1}
 
 /* scene 1: the problem */
 .s1{grid-template-columns:1fr}
@@ -236,6 +267,7 @@ html.js .film .cnav{display:grid}
 </style>
 </head>
 <body>
+<a class="skip" href="#top">Skip to main content</a>
 <div class="wrap">
 <header>
   <a class="name" href="#top">claive</a>
@@ -245,7 +277,7 @@ html.js .film .cnav{display:grid}
 <div class="hero">
   <div>
     <h1>A referee for AI coding agents.</h1>
-    <p class="lede">claive lets one AI hand a coding job to cheaper ones, has a different AI critique the result, and keeps each change only if your tests say it got better.</p>
+    <p class="lede">One agent delegates the coding. A different-model critic finds defects. Your tests decide whether each attempt is kept or rolled back. Plain code—not another AI—runs the process.</p>
     <p class="chip">Experimental. No results yet.</p>
     <div class="acts"><a class="btn" href="#watch">Watch it work</a><a class="btn alt" href="#how">How it works</a><a class="btn alt" href="#try">Try it</a></div>
   </div>
@@ -518,12 +550,12 @@ html.js .film .cnav{display:grid}
 <section>
   <h2>Cheaper agents, same recipe</h2>
   <p><em>Give a cheap agent the recipe and a failing test. The loop does the checking.</em> That is the bet the experiment tests. It is not a result.</p>
-  <p>What the repo supports: critics and second attempts run on free-tier and flash-class models through Pi. The <code>stats</code> and <code>pick</code> commands were built by a worker running through claive's own ladder. What it does not claim: that a cheap agent beats a frontier one, any cost savings, or local models.</p>
+  <p>Pi can run reviewers or second attempts on free-tier and flash-class models when those providers are available. Free-tier models can rate-limit, change, or disappear. The <code>stats</code> and <code>pick</code> commands were built by a worker running through claive's own ladder. None of this demonstrates cost savings, better results than frontier models, or local-model support.</p>
 </section>
 
 <section id="try" class="try">
   <h2>Try it</h2>
-  <p><strong>You need</strong> Linux and Python 3 (standard library only). The default engine needs the Muse binary. The optional worker pane also needs tmux and Codex.</p>
+  <p><strong>You need</strong> Linux and Python 3 (standard library only). Muse is the default worker engine; Pi, Claude Code, and Codex are also supported with their own installation and model policies. The optional worker pane needs tmux and Codex.</p>
   <p><strong>New to this?</strong> All you need is a repo and one command that currently fails, such as a test. That command is your verifier.</p>
   <h3>Install</h3>
   <pre tabindex="0"><code>git clone https://github.com/ham-zax/claive.git &amp;&amp; cd claive
@@ -548,14 +580,212 @@ claive-orch integrate RUN  # apply the winner and re-verify in your checkout</co
     <li>Stuck detection inside a single turn.</li>
     <li>A test-author worker for hidden checks.</li>
     <li>Enforced token budgets.</li>
-    <li>Codex, OpenCode and Claude Code as workers. Here they are parents.</li>
+    <li>OpenCode as a direct worker engine (Pi uses the separate <code>opencode2api</code> route).</li>
   </ul>
 </section>
 </main>
 <footer>
   <p>claive by Hamza (<a href="https://github.com/ham-zax">ham-zax</a>). MIT licensed.</p>
-  <p><a href="https://github.com/ham-zax/claive">Source</a> · Last updated 2026-10-07</p>
+  <p><a href="https://github.com/ham-zax/claive">Source</a> · Last updated 2026-10-09</p>
 </footer>
 </div>
+
+<script>
+(() => {
+  const film = document.querySelector('#film');
+  if (!film) return;
+
+  const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+  const total = Number(film.dataset.total) || 96;
+  const poster = film.querySelector('.poster');
+  const playButton = film.querySelector('.pp');
+  const scrub = film.querySelector('.scrub');
+  const timer = film.querySelector('[data-now]');
+  const chapterDisplay = film.querySelector('.hud .chap');
+  const captionBar = film.querySelector('.capbar');
+  const chapterNav = film.querySelector('.cnav');
+  const chapters = [...film.querySelectorAll('.script section[data-ch]')];
+  const steps = [...film.querySelectorAll('.s3 .step')];
+  const tapeEntries = [...film.querySelectorAll('.s3 .tape .te')];
+  const rail = [...film.querySelectorAll('.s3 .rail li')];
+  const counts = [...film.querySelectorAll('.s3 .count span')];
+  const verdicts = [...film.querySelectorAll('.s3 .verdict span')];
+  const stamp = film.querySelector('.s3 .stamp');
+  const lateBackfire = film.querySelector('.s4 .a2');
+  const firstBackfire = film.querySelector('.s4 .a1');
+  const shelf = film.querySelector('.s4 .shelf');
+  const secondLane = film.querySelector('.s5 .lb');
+  if (!chapters.length || !poster || !playButton || !scrub || !chapterNav) return;
+
+  const cues = chapters.flatMap((section, chapter) =>
+    [...section.querySelectorAll('li[data-s]')].map(item => ({
+      chapter, start: Number(item.dataset.s), end: Number(item.dataset.e),
+      text: item.textContent.trim()
+    }))
+  );
+  const caption = document.createElement('p');
+  caption.setAttribute('aria-live', 'off');
+  captionBar.append(caption);
+
+  film.querySelectorAll('[data-strip]').forEach(strip => {
+    const pattern = strip.dataset.strip || '';
+    strip.replaceChildren(...[...pattern].map(mark => {
+      const box = document.createElement('span');
+      box.className = 'sq' + (mark === 'f' ? ' f' : mark === 'd' ? ' dash' : mark === 'x' ? ' gh' : '');
+      const ok = document.createElement('b');
+      ok.className = 'ok';
+      const no = document.createElement('b');
+      no.className = 'no';
+      box.append(ok, no);
+      return box;
+    }));
+  });
+
+  const chapterButtons = chapters.map((section, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = String(index + 1).padStart(2, '0') + '  ' + section.dataset.short;
+    button.setAttribute('aria-label', 'Go to chapter ' + (index + 1) + ': ' + section.dataset.title);
+    button.addEventListener('click', () => {
+      seek(Number(section.dataset.s));
+      if (!poster.classList.contains('gone')) poster.classList.add('gone');
+    });
+    chapterNav.append(button);
+    return button;
+  });
+
+  let elapsed = 0;
+  let playing = false;
+  let lastTick = 0;
+  let frame = 0;
+  let displayedCaption = '';
+  let displayedChapter = -1;
+
+  const format = seconds => {
+    const s = Math.max(0, Math.floor(seconds));
+    return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  };
+  const activate = (nodes, index) =>
+    nodes.forEach((node, i) => node.classList.toggle('active', i === index));
+
+  function render(time) {
+    elapsed = Math.max(0, Math.min(total, time));
+    const currentChapter = Math.max(0, chapters.findLastIndex(ch => elapsed >= Number(ch.dataset.s)));
+    film.dataset.chapter = String(currentChapter);
+
+    if (displayedChapter !== currentChapter) {
+      displayedChapter = currentChapter;
+      chapterDisplay.textContent = String(currentChapter + 1).padStart(2, '0') +
+        ' / ' + String(chapters.length).padStart(2, '0') + '   ' +
+        chapters[currentChapter].dataset.title;
+      chapterButtons.forEach((button, index) => {
+        if (index === currentChapter) button.setAttribute('aria-current', 'true');
+        else button.removeAttribute('aria-current');
+      });
+    }
+
+    const cue = cues.find(c => c.chapter === currentChapter && elapsed >= c.start && elapsed < c.end) ||
+      [...cues].reverse().find(c => c.chapter === currentChapter && elapsed >= c.start);
+    const nextCaption = cue ? cue.text : chapters[currentChapter].dataset.title;
+    if (nextCaption !== displayedCaption) {
+      caption.textContent = nextCaption;
+      displayedCaption = nextCaption;
+    }
+
+    const phaseTimes = [25.8, 32, 36.8, 41.8, 46];
+    const phase = Math.max(0, phaseTimes.findLastIndex(t => elapsed >= t));
+    activate(steps, phase);
+    activate(tapeEntries, phase);
+    rail.forEach((item, index) => item.classList.toggle('active', index <= phase));
+    const verified = elapsed >= 46;
+    activate(counts, verified ? 1 : 0);
+    activate(verdicts, verified ? 1 : 0);
+    stamp.classList.toggle('active', verified);
+    const scoreSquare = film.querySelector('.s3 .score .strip .sq:last-child');
+    if (scoreSquare) scoreSquare.classList.toggle('f', !verified);
+
+    const backfired = elapsed >= 62;
+    lateBackfire.classList.toggle('active', backfired);
+    firstBackfire.style.opacity = backfired ? '0' : '1';
+    shelf.classList.toggle('active', backfired);
+    secondLane.classList.toggle('active', elapsed >= 76.4);
+
+    scrub.value = String(elapsed);
+    scrub.style.setProperty('--pg', elapsed / total * 100 + '%');
+    timer.textContent = format(elapsed);
+  }
+
+  function stop() {
+    playing = false;
+    cancelAnimationFrame(frame);
+    playButton.dataset.s = 'paused';
+    playButton.setAttribute('aria-label', 'Play');
+    lastTick = 0;
+  }
+
+  function tick(now) {
+    if (!playing) return;
+    if (!lastTick) lastTick = now;
+    render(elapsed + Math.min((now - lastTick) / 1000, 0.1));
+    lastTick = now;
+    if (elapsed >= total) { stop(); return; }
+    frame = requestAnimationFrame(tick);
+  }
+
+  function play() {
+    if (playing) return;
+    if (elapsed >= total) render(0);
+    poster.classList.add('gone');
+    playing = true;
+    lastTick = 0;
+    playButton.dataset.s = 'playing';
+    playButton.setAttribute('aria-label', 'Pause');
+    frame = requestAnimationFrame(tick);
+  }
+
+  function seek(time) {
+    render(time);
+    lastTick = 0;
+    if (elapsed >= total && playing) stop();
+  }
+
+  poster.addEventListener('click', play);
+  playButton.addEventListener('click', () => playing ? stop() : play());
+  scrub.addEventListener('input', () => {
+    poster.classList.add('gone');
+    seek(Number(scrub.value));
+  });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) stop(); });
+  const motionLabel = film.querySelector('.rmnote');
+  if (motionLabel) {
+    function syncMotion() {
+      motionLabel.hidden = !reducedMotion.matches;
+      document.documentElement.classList.toggle('rm', reducedMotion.matches);
+    }
+    syncMotion();
+    reducedMotion.addEventListener?.('change', syncMotion);
+  }
+
+  render(0);
+  document.documentElement.classList.add('film-ready');
+
+  // The page must remain legible if an observer, animation or script is unavailable.
+  if (!reducedMotion.matches && 'IntersectionObserver' in window) {
+    const rows = [...document.querySelectorAll('.record li')];
+    const observer = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        observer.unobserve(entry.target);
+        const index = rows.indexOf(entry.target);
+        entry.target.animate([
+          { opacity: .5, transform: 'translateY(10px)' },
+          { opacity: 1, transform: 'translateY(0)' }
+        ], { duration: 540, delay: index * 110, easing: 'cubic-bezier(.16, 1, .3, 1)' });
+      }
+    }, { threshold: .16 });
+    rows.forEach(row => observer.observe(row));
+  }
+})();
+</script>
 </body>
 </html>

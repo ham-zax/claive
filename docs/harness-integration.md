@@ -66,6 +66,48 @@ A worker started with `--report` or `--role` may stop with `needs_decision` or
 `claive answer ID --message "..."`, then wait again. A single-turn worker cannot
 be answered; start a new one with the decision included.
 
+## Return to a named specialist
+
+After opening a reusable worker, bind it with `claive alias set backend ID`.
+Any parent using the same `$CLAIVE_DIR` can discover it with
+`claive alias list --json`, inspect it with `claive show @backend --json`, and
+queue related work with `claive followup @backend --prompt-file /abs/task.md`.
+Worker commands accept `@name` in place of an ID, including `answer` and
+`wait --any`. Names do not start workers or restore closed sessions.
+
+An operation resolves the address once; its output and persisted mission links
+use the worker ID, so rebinding a name cannot move an existing assignment.
+To move an address to a different worker, use
+`claive alias set backend NEW_ID --replace`. `claive alias remove backend`
+removes only the address. Always reuse the specialist's workspace and policy
+when reopening its retained session.
+
+## Coordinate a bounded conversation
+
+Open workers with individual role prompts, engines/models, and `--report`, wait
+for their initial turns to settle, and bind names. Then run:
+
+```bash
+claive conversation start @pi-builder @pi-critic @claude-reviewer \
+  --message-file /abs/topic.md --rounds 2 --timeout 300 --json
+```
+
+The controller forwards replies in order, preserving each participant's session
+and launch policy. With three workers and two rounds it queues at most six
+follow-ups. Each reply has an exact request receipt; it never reads another
+turn's mutable `result.txt` as the reply. Required-report errors and parent
+questions stop the flow. Peer content is framed as evidence rather than
+authority to alter the assignment. Workers cannot start conversations under
+the normal recursion guard.
+
+Use a managed shell with a short yield, retain its session ID, and collect its
+final exit code. On code 3, answer the worker named in `needs_parent`. On code
+124/130, inspect `pending_request.response_file` before retrying: an in-flight
+turn may still finish, while a queued request expires. The controller stops
+scheduling without cancelling unrelated worker activity. Inspect with
+`claive conversation show ID --json`; participants' ordinary `show`, `wait`,
+`answer`, `close`, and `cancel` commands continue to work.
+
 ## Run goals without a parent (`claive goal`, `claive serve`)
 
 On a server with no parent session, queue goals with

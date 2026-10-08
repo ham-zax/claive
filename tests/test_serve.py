@@ -72,7 +72,9 @@ class ServeChecks(unittest.TestCase):
     def test_goals_run_read_only_park_on_questions_and_resume_on_answer(self):
         done = self.add("plain")
         asking = self.add("asking", "ask")
-        goal = self.until(done, lambda g: g["status"] == "done", "first goal")
+        # A goal result is saved before its asynchronous close request is drained.
+        goal = self.until(done, lambda g: g["status"] == "done" and
+                          self.worker(g["worker"])["status"] == "completed", "first goal and worker closure")
         self.assertTrue(self.worker(goal["worker"])["launch"]["read_only"])
         self.assertEqual(self.worker(goal["worker"])["status"], "completed")  # closed after its turn
         parked = self.until(asking, lambda g: g["status"] == "parked", "question")

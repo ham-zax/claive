@@ -125,6 +125,10 @@ def format_text(events):
         label = event.get("label", "")
         if event.get("type") == "batch":
             line = f"batch {event.get('id')} {badge} code={event.get('code')} {label}"
+        elif event.get("type") == "conversation":
+            line = f"conversation {event.get('id')} {badge} code={event.get('code')}"
+            if event.get("needs_parent"):
+                line += f" question: {event['needs_parent'].get('question', '')}"
         elif event.get("type") == "goal":
             line = f"goal {event.get('id')} {badge} {label}"
             if event.get("needs_parent"):

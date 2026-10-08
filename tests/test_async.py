@@ -95,6 +95,117 @@ class AsyncChecks(unittest.TestCase):
         return found.group(1)
 
     # A. detach -----------------------------------------------------------------
+    def test_alias_routes_followups_and_keeps_the_same_session(self):
+        result, job = self.launch("open", "--detach")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.cli("wait", job).returncode, 0)
+        original = self.state(job)
+        bound = self.cli("alias", "set", "backend", job)
+        self.assertEqual(bound.returncode, 0, bound.stderr)
+        self.assertEqual(json.loads(self.cli("show", "@backend", "--json").stdout)["id"], job)
+        self.assertEqual(self.cli("logs", "@backend").returncode, 0)
+        # This engine has no usage exporter; addressing must preserve its error.
+        named_usage = self.cli("usage", "@backend", "--json")
+        id_usage = self.cli("usage", job, "--json")
+        self.assertEqual(named_usage.returncode, id_usage.returncode)
+        self.assertEqual(named_usage.stderr, id_usage.stderr)
+        self.assertEqual(self.cli("effort", "@backend", "--reasoning-effort", "max").returncode, 0)
+        follow = self.prompt_file("alias-follow", "NAMED FOLLOW UP")
+        queued = self.cli("followup", "@backend", "--prompt-file", str(follow))
+        self.assertEqual(queued.returncode, 0, queued.stderr)
+        self.assertIn(job, queued.stdout)
+        self.assertEqual(self.cli("wait", "@backend").returncode, 0)
+        self.assertEqual(self.state(job)["session_id"], original["session_id"])
+        self.assertEqual(self.state(job)["turn"], 2)
+        self.assertIn("NAMED FOLLOW UP", self.captured.read_text())
+        named = json.loads(self.cli("alias", "list", "--json").stdout)
+        self.assertEqual(named[0]["id"], job)
+        self.assertEqual(named[0]["status"], "idle")
+        self.assertEqual(named[0]["session_id"], original["session_id"])
+        self.assertEqual((self.registry / "aliases.json").stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.registry / "aliases.lock").stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.cli("close", "@backend").returncode, 0)
+        self.eventually(lambda: self.state(job)["status"] not in module.ACTIVE, "worker did not close")
+        self.assertEqual(self.cli("show", "@backend").returncode, 0)
+        unavailable = self.cli("followup", "@backend", "--prompt-file", str(follow))
+        self.assertEqual(unavailable.returncode, 1)
+        self.assertIn("not available for follow-up", unavailable.stderr)
+
+    def test_alias_requires_explicit_rebinding_and_remove_keeps_worker(self):
+        _, first = self.launch("run")
+        _, second = self.launch("run")
+        self.assertEqual(self.cli("alias", "set", "reviewer", first).returncode, 0)
+        self.assertEqual(self.cli("alias", "set", "reviewer", first).returncode, 0)
+        refused = self.cli("alias", "set", "reviewer", second)
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("--replace", refused.stderr)
+        self.assertEqual(json.loads(self.cli("show", "@reviewer", "--json").stdout)["id"], first)
+        self.assertEqual(self.cli("alias", "set", "reviewer", second, "--replace").returncode, 0)
+        self.assertEqual(json.loads(self.cli("show", "@reviewer", "--json").stdout)["id"], second)
+        # Alias-to-alias binding is flattened; later removal does not break it.
+        self.assertEqual(self.cli("alias", "set", "qa", "@reviewer").returncode, 0)
+        self.assertEqual(self.cli("alias", "remove", "reviewer").returncode, 0)
+        self.assertEqual(self.cli("show", "@reviewer").returncode, 1)
+        self.assertEqual(self.cli("show", second).returncode, 0)
+        self.assertEqual(json.loads(self.cli("show", "@qa", "--json").stdout)["id"], second)
+        self.assertEqual(self.cli("wait", "@qa", first, "--any").returncode, 0)
+
+    def test_alias_validation_and_missing_targets_fail_without_mutation(self):
+        _, job = self.launch("run")
+        for name in ("../outside", "@backend", "Bad", "", "a" * 65):
+            result = self.cli("alias", "set", name, job)
+            self.assertEqual(result.returncode, 1, name)
+        missing = "0123456789ab"
+        self.assertEqual(self.cli("alias", "set", "missing", missing).returncode, 1)
+        self.assertFalse((self.registry / "aliases.json").exists())
+        self.assertEqual(json.loads(self.cli("alias", "list", "--json").stdout), [])
+        self.assertEqual(self.cli("alias", "set", "backend", job).returncode, 0)
+        (self.registry / job / "state.json").unlink()
+        named = json.loads(self.cli("alias", "list", "--json").stdout)
+        self.assertEqual(named[0]["status"], "missing")
+        self.assertEqual(self.cli("cancel", "@backend").returncode, 1)
+        self.assertEqual(self.cli("alias", "remove", "backend").returncode, 0)
+        # Corruption fails closed and is never overwritten by a subsequent update.
+        registry = self.registry / "aliases.json"
+        registry.write_text('{"backend": "../outside"}')
+        self.assertEqual(self.cli("show", "@backend").returncode, 1)
+        self.assertEqual(self.cli("alias", "remove", "backend").returncode, 1)
+        self.assertEqual(registry.read_text(), '{"backend": "../outside"}')
+
+    def test_parallel_alias_updates_do_not_lose_bindings(self):
+        _, job = self.launch("run")
+        procs = [subprocess.Popen([FIXTURE_CLI, "alias", "set", f"worker-{n}", job],
+                                 env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                 for n in range(8)]
+        for proc in procs:
+            out, err = proc.communicate(timeout=10)
+            self.assertEqual(proc.returncode, 0, out + err)
+        records = json.loads(self.cli("alias", "list", "--json").stdout)
+        self.assertEqual({item["name"] for item in records}, {f"worker-{n}" for n in range(8)})
+
+    def test_alias_mission_links_record_ids_and_parent_answers_work(self):
+        ask = self.prompt_file("alias-ask", "FIXTURE_MODE=ask")
+        result, job = self.launch("open", "--detach", "--report", prompt=ask)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.cli("wait", job).returncode, 3)
+        self.assertEqual(self.cli("alias", "set", "reviewer", job).returncode, 0)
+        mission = self.cli("mission", "new", "--title", "Named worker", "--goal", "Review")
+        mission_id = re.search(r"Mission ([0-9a-f]{12})", mission.stdout).group(1)
+        self.assertEqual(self.cli("mission", "link", mission_id, "--worker", "@reviewer").returncode, 0)
+        self.assertEqual(self.cli("mission", "link", mission_id, "--worker", job).returncode, 0)
+        linked = json.loads(self.cli("mission", "show", mission_id, "--json").stdout)
+        self.assertEqual(len(linked["links"]), 1)
+        self.assertEqual(linked["links"][0]["id"], job)
+        self.assertEqual(self.cli("answer", "@reviewer", "--message", "Use B").returncode, 0)
+        self.assertEqual(self.cli("wait", "@reviewer").returncode, 0)
+        self.assertIn("Use B", self.captured.read_text())
+        self.assertEqual(self.cli("alias", "remove", "reviewer").returncode, 0)
+        linked = json.loads(self.cli("mission", "show", mission_id, "--json").stdout)
+        self.assertEqual(linked["links"][0]["id"], job)
+        self.assertEqual(self.cli("alias", "set", "reviewer", job).returncode, 0)
+        self.assertEqual(self.cli("cancel", "@reviewer").returncode, 0)
+        self.eventually(lambda: self.state(job)["status"] == "cancelled", "worker did not cancel")
+
     def test_open_detach_returns_and_stays_reusable(self):
         began = time.time()
         result, job = self.launch("open", "--detach", FIXTURE_MODE="brief")

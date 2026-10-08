@@ -196,8 +196,7 @@ def cmd_link(mission_id, worker=None, batch=None, run=None):
     if sum(kinds) != 1:
         raise ValueError("link needs exactly one of --worker, --batch, --run")
     if worker:
-        cli_mod.job_path(worker)
-        kind, target = "worker", worker
+        kind, target = "worker", cli_mod.job_path(worker).name
     elif batch:
         from claivelib import batch as batch_mod
         batch_mod.batch_path(batch)

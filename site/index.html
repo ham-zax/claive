@@ -233,6 +233,42 @@ html.film-ready .film .cnav{display:grid}
 .s6 .end{margin:0;font:500 clamp(2rem,6.4vw,4.2rem)/1.04 var(--serif);letter-spacing:-.025em;text-wrap:balance}
 .s6 .fine{margin:0;font:400 .85rem var(--mono);color:var(--muted)}
 
+/* ===== polish: timed states, landing squares, scene entrances ===== */
+.sq{transform-origin:50% 100%}
+.film [data-at],.film .head{opacity:0}
+.film [data-at].active,.film .head.active{opacity:1}
+.film[data-chapter="3"] .s4 .tape .te.active{opacity:1}
+.tape .te b{justify-self:start}
+@media(prefers-reduced-motion:no-preference){
+@keyframes stamp{from{transform:scaleY(0)}}
+@keyframes rise{from{opacity:0;transform:translateY(10px)}}
+@keyframes draw-x{from{transform:scaleX(0)}}
+@keyframes draw-y{from{transform:scaleY(0)}}
+@keyframes print{from{clip-path:inset(0 100% 0 0)}to{clip-path:inset(0 0 0 0)}}
+.film [data-at],.film .head{transition:opacity .35s ease-out}
+.sq .ok{transition:transform .5s cubic-bezier(.2,.9,.3,1.3),opacity .2s}
+.sq.f .ok{transform:scaleY(0)}
+.sq .no{transition:opacity .2s}
+.film .stamp{scale:1.4;transition:opacity .12s,scale .3s cubic-bezier(.2,.9,.3,1.15) .18s}
+.film .stamp.active{scale:1}
+.film.started[data-chapter="0"] .s1 .sq,.film.started[data-chapter="2"] .s3 .sq,.film.started[data-chapter="3"] .s4 .sq,.film.started[data-chapter="4"] .s5 .sq,.film.started[data-chapter="5"] .s6 .sq{animation:stamp .42s cubic-bezier(.2,.9,.3,1.25) backwards;animation-delay:calc(var(--i,0)*65ms + .35s)}
+.film.started[data-chapter="0"] .s1 .node{animation:rise .55s cubic-bezier(.16,1,.3,1) backwards}
+.film.started[data-chapter="0"] .s1 .ar .ln{animation:draw-y .4s ease-out backwards}
+.film.started[data-chapter="0"] .s1 .unk .big{animation:rise .6s cubic-bezier(.16,1,.3,1) 1.45s backwards}
+.s1 .flow>.node:nth-child(1){animation-delay:.2s}.s1 .flow>.node:nth-child(3){animation-delay:.7s}.s1 .flow>.node:nth-child(5){animation-delay:1.2s}
+.s1 .flow>.ar:nth-child(2) .ln{animation-delay:.5s}.s1 .flow>.ar:nth-child(4) .ln{animation-delay:1s}
+.film.started[data-chapter="1"] .s2 .cast li{animation:rise .5s cubic-bezier(.16,1,.3,1) var(--d) backwards}
+.film.started[data-chapter="1"] .s2 .cast .ln{animation:draw-x .7s cubic-bezier(.16,1,.3,1) var(--d) backwards}
+.cast li:nth-child(1){--d:.25s}.cast li:nth-child(2){--d:.45s}.cast li:nth-child(3){--d:.65s}.cast li:nth-child(4){--d:.85s}.cast li:nth-child(5){--d:1.05s}
+.film.started[data-chapter="1"] .s2 .ttl,.film.started[data-chapter="2"] .s3 .ttl,.film.started[data-chapter="3"] .s4 .ttl,.film.started[data-chapter="4"] .s5 .ttl{animation:rise .45s cubic-bezier(.16,1,.3,1) .1s backwards}
+.film.started[data-chapter="3"] .s4 .best{animation:rise .5s cubic-bezier(.16,1,.3,1) .25s backwards}
+.film.started[data-chapter="3"] .s4 .col2{animation:rise .5s cubic-bezier(.16,1,.3,1) .5s backwards}
+.film.started[data-chapter="5"] .s6 .end{animation:rise .7s cubic-bezier(.16,1,.3,1) .9s backwards}
+.film.started[data-chapter="5"] .s6 .chip,.film.started[data-chapter="5"] .s6 .fine{animation:rise .6s cubic-bezier(.16,1,.3,1) 1.4s backwards}
+.film[data-chapter="2"] .s3 .tape .te.active b,.film[data-chapter="3"] .s4 .te.l1.active b{animation:print .5s steps(28,end) backwards}
+.film[data-chapter="2"] .s3 .tape .te.active span{animation:rise .4s ease-out .4s backwards}
+.film.seeking *{animation-duration:.01s!important;animation-delay:0s!important}
+}
 /* poster, controls, chapters, script */
 .poster{position:absolute;inset:0;z-index:2;display:grid;place-content:center;justify-items:center;gap:1.2rem;border:0;background:var(--wash);color:var(--ink);cursor:pointer;font:inherit;padding:1rem;transition:opacity .6s,visibility .6s}
 .poster.gone{opacity:0;visibility:hidden;pointer-events:none}
@@ -254,9 +290,9 @@ html.film-ready .film .cnav{display:grid}
 .tm{flex:none;min-width:8.4ch;text-align:right;font:500 .8rem var(--mono);color:var(--muted);font-variant-numeric:tabular-nums}
 .cnav{grid-template-columns:repeat(3,1fr)}
 @media (min-width:44rem){.cnav{grid-template-columns:repeat(6,1fr)}}
-.cnav button{display:flex;align-items:center;gap:.5rem;min-height:2.75rem;padding:.3rem .5rem;background:none;border:0;border-bottom:1px solid var(--rule);font:500 .78rem var(--mono);color:var(--muted);text-align:left;cursor:pointer}
+.cnav button{display:flex;align-items:center;gap:.5rem;min-height:2.75rem;padding:.3rem .5rem;background:linear-gradient(var(--bar,var(--muted)),var(--bar,var(--muted))) 0 100%/var(--cp,0%) 3px no-repeat;border:0;border-bottom:1px solid var(--rule);font:500 .78rem var(--mono);color:var(--muted);text-align:left;cursor:pointer}
 .cnav button:hover{color:var(--ink)}
-.cnav button[aria-current=true]{color:var(--ink);box-shadow:inset 0 -3px 0 var(--ink)}
+.cnav button[aria-current=true]{color:var(--ink);--bar:var(--ink);box-shadow:inset 0 -3px 0 var(--rule)}
 .rmnote{margin:.6rem 0 0;font:400 .85rem/1.5 var(--mono);color:var(--muted)}
 .script{margin-top:1.2rem}
 .script summary{cursor:pointer;display:inline-flex;align-items:center;min-height:2.75rem;font:500 .9rem var(--mono)}
@@ -370,9 +406,9 @@ html.film-ready .film .cnav{display:grid}
             </div>
             <div class="tape">
               <div class="tc">
-                <div class="te l1"><b>Lane a round 1: worse than the best checkpoint.</b></div>
+                <div class="te l1" data-at="62"><b>Lane a round 1: worse than the best checkpoint.</b></div>
               </div>
-              <span class="l2">Reverted to the best commit. The attempt is kept on the shelf.</span>
+              <span class="l2" data-at="64.4">Reverted to the best commit. The attempt is kept on the shelf.</span>
             </div>
           </div>
 
@@ -381,14 +417,14 @@ html.film-ready .film .cnav{display:grid}
             <div class="lanes">
               <div class="lane la">
                 <span class="ll">Lane a</span>
-                <div class="cp r1"><span class="k">Round 1</span><div class="strip" data-strip="oooooff"></div><span class="sts"><span>Same score</span></span></div>
-                <div class="cp r2"><span class="k">Round 2</span><div class="strip" data-strip="oooooff"></div><span class="sts"><span>Same score</span></span></div>
-                <span class="tag stalled">Stalled</span>
+                <div class="cp r1" data-at="69.4"><span class="k">Round 1</span><div class="strip" data-strip="oooooff"></div><span class="sts"><span>Same score</span></span></div>
+                <div class="cp r2" data-at="72"><span class="k">Round 2</span><div class="strip" data-strip="oooooff"></div><span class="sts"><span>Same score</span></span></div>
+                <span class="tag stalled" data-at="75">Stalled</span>
               </div>
               <div class="lane lb">
                 <span class="ll">Lane b</span>
-                <div class="cp rb"><span class="ring"></span><span class="k">A different approach</span><div class="strip" data-strip="ooooooo"></div><span class="sts"><span>Separate git worktree</span></span></div>
-                <span class="tag win">The tests pick lane b</span>
+                <div class="cp rb"><span class="ring" data-at="80.4"></span><span class="k">A different approach</span><div class="strip" data-strip="ooooooo"></div><span class="sts"><span>Separate git worktree</span></span></div>
+                <span class="tag win" data-at="80.4">The tests pick lane b</span>
               </div>
             </div>
             <p class="fine">Breadth runs only after refining stalls. In the experiment this is arm D.</p>
@@ -615,6 +651,9 @@ claive-orch integrate RUN  # apply the winner and re-verify in your checkout</co
   const firstBackfire = film.querySelector('.s4 .a1');
   const shelf = film.querySelector('.s4 .shelf');
   const secondLane = film.querySelector('.s5 .lb');
+  const bestHead = film.querySelector('.s4 .best .head');
+  const attHead = film.querySelector('.s4 .att .head');
+  const timed = [...film.querySelectorAll('[data-at]')];
   if (!chapters.length || !poster || !playButton || !scrub || !chapterNav) return;
 
   const cues = chapters.flatMap((section, chapter) =>
@@ -629,9 +668,10 @@ claive-orch integrate RUN  # apply the winner and re-verify in your checkout</co
 
   film.querySelectorAll('[data-strip]').forEach(strip => {
     const pattern = strip.dataset.strip || '';
-    strip.replaceChildren(...[...pattern].map(mark => {
+    strip.replaceChildren(...[...pattern].map((mark, index) => {
       const box = document.createElement('span');
       box.className = 'sq' + (mark === 'f' ? ' f' : mark === 'd' ? ' dash' : mark === 'x' ? ' gh' : '');
+      box.style.setProperty('--i', index);
       const ok = document.createElement('b');
       ok.className = 'ok';
       const no = document.createElement('b');
@@ -647,8 +687,8 @@ claive-orch integrate RUN  # apply the winner and re-verify in your checkout</co
     button.textContent = String(index + 1).padStart(2, '0') + '  ' + section.dataset.short;
     button.setAttribute('aria-label', 'Go to chapter ' + (index + 1) + ': ' + section.dataset.title);
     button.addEventListener('click', () => {
+      begin();
       seek(Number(section.dataset.s));
-      if (!poster.classList.contains('gone')) poster.classList.add('gone');
     });
     chapterNav.append(button);
     return button;
@@ -705,14 +745,30 @@ claive-orch integrate RUN  # apply the winner and re-verify in your checkout</co
     if (scoreSquare) scoreSquare.classList.toggle('f', !verified);
 
     const backfired = elapsed >= 62;
+    const reverted = elapsed >= 64.4;
+    const applied = elapsed >= 56.4 && !reverted;
     lateBackfire.classList.toggle('active', backfired);
     firstBackfire.style.opacity = backfired ? '0' : '1';
-    shelf.classList.toggle('active', backfired);
+    shelf.classList.toggle('active', reverted);
+    bestHead.classList.toggle('active', !applied);
+    attHead.classList.toggle('active', applied);
+    timed.forEach(node => node.classList.toggle('active', elapsed >= Number(node.dataset.at)));
     secondLane.classList.toggle('active', elapsed >= 76.4);
 
     scrub.value = String(elapsed);
     scrub.style.setProperty('--pg', elapsed / total * 100 + '%');
     timer.textContent = format(elapsed);
+    scrub.setAttribute('aria-valuetext', format(elapsed) + ' of ' + format(total) + ', chapter ' + (currentChapter + 1) + ': ' + chapters[currentChapter].dataset.title);
+    chapterButtons.forEach((button, index) => {
+      const from = Number(chapters[index].dataset.s);
+      const to = index + 1 < chapters.length ? Number(chapters[index + 1].dataset.s) : total;
+      button.style.setProperty('--cp', (Math.max(0, Math.min(1, (elapsed - from) / (to - from))) * 100).toFixed(1) + '%');
+    });
+  }
+
+  function begin() {
+    poster.classList.add('gone');
+    film.classList.add('started');
   }
 
   function stop() {
@@ -735,7 +791,7 @@ claive-orch integrate RUN  # apply the winner and re-verify in your checkout</co
   function play() {
     if (playing) return;
     if (elapsed >= total) render(0);
-    poster.classList.add('gone');
+    begin();
     playing = true;
     lastTick = 0;
     playButton.dataset.s = 'playing';
@@ -751,11 +807,18 @@ claive-orch integrate RUN  # apply the winner and re-verify in your checkout</co
 
   poster.addEventListener('click', play);
   playButton.addEventListener('click', () => playing ? stop() : play());
+  let seekTimer = 0;
   scrub.addEventListener('input', () => {
-    poster.classList.add('gone');
+    begin();
+    film.classList.add('seeking');
+    clearTimeout(seekTimer);
+    seekTimer = setTimeout(() => film.classList.remove('seeking'), 400);
     seek(Number(scrub.value));
   });
   document.addEventListener('visibilitychange', () => { if (document.hidden) stop(); });
+  if ('IntersectionObserver' in window) {
+    new IntersectionObserver(([entry]) => { if (!entry.isIntersecting && playing) stop(); }).observe(film);
+  }
   const motionLabel = film.querySelector('.rmnote');
   if (motionLabel) {
     function syncMotion() {
@@ -781,6 +844,10 @@ claive-orch integrate RUN  # apply the winner and re-verify in your checkout</co
           { opacity: .5, transform: 'translateY(10px)' },
           { opacity: 1, transform: 'translateY(0)' }
         ], { duration: 540, delay: index * 110, easing: 'cubic-bezier(.16, 1, .3, 1)' });
+        entry.target.querySelectorAll('.sq').forEach((sq, n) => sq.animate(
+          [{ transform: 'scaleY(0)' }, { transform: 'scaleY(1)' }],
+          { duration: 420, delay: index * 110 + 260 + n * 70, easing: 'cubic-bezier(.2, .9, .3, 1.25)', fill: 'backwards' }
+        ));
       }
     }, { threshold: .16 });
     rows.forEach(row => observer.observe(row));

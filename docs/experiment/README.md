@@ -43,3 +43,4 @@ the original layout; in this directory those files are `rules.md`, `04-...`, and
 
 Live shakedown results and the fixes they triggered: [`07-trial-runs.md`](07-trial-runs.md).
 The hard sqlglot corpus (experiment x3): [`hard/README.md`](hard/README.md).
+Why the next measurement uses a public benchmark, and how: [`08-public-benchmark.md`](08-public-benchmark.md).

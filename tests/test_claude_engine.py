@@ -77,7 +77,7 @@ class ClaudeChecks(unittest.TestCase):
         self.assertEqual(command[command.index("--model") + 1], CLAUDE_MODEL)
         self.assertEqual(command[command.index("--tools") + 1], "Read,Edit,Write,Bash,Grep,Glob")
         self.assertEqual(command[command.index("--autocompact") + 1], "100k")
-        self.assertEqual(self.engine.default_reasoning_effort, "max")
+        self.assertEqual(self.engine.default_reasoning_effort, "xhigh")
         self.assertIn("--session-id", command)
         self.assertEqual(command[-2:], ["--", "--do the thing\n"])
         read_only = self.engine.build_command(self.request(read_only=True))

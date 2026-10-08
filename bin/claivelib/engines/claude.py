@@ -27,7 +27,7 @@ def _config_dir():
 class ClaudeEngine(WorkerEngine):
     name = "claude"
     default_model = CLAUDE_MODEL
-    default_reasoning_effort = "max"
+    default_reasoning_effort = "xhigh"
     efforts = {"low", "medium", "high", "xhigh", "max"}
 
     def __init__(self):

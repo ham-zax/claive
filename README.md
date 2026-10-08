@@ -9,7 +9,7 @@ Muse remains the default engine. Use `claive-worker --engine pi` to select Pi.
 
 Claude Code is available with `--engine claude` (headless `claude -p`, binary `~/.local/bin/claude` or
 `CLAUDE_WORKER_BINARY`). It is strictly locked to `claude-haiku-5-5`: any other `--model`, role model or
-timeout fallback is refused. Efforts are `low` to `max` (default `max`), auto-compacting at 100k tokens; `--max-model-steps`,
+timeout fallback is refused. Efforts are `low` to `max` (default `xhigh`), auto-compacting at 100k tokens; `--max-model-steps`,
 `--output-schema` and worktree isolation are unsupported. Settings, hooks, MCP servers and skills are not loaded;
 read-only workers get `Read,Grep,Glob`.
 

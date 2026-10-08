@@ -1,32 +1,202 @@
 [
-  {"id": "qap-enum-metadata", "commit": "05ed428c", "category": "bug-fix", "difficulty": "easy",
-   "tests": ["tests/unit/relationship/test_ratio.py"],
-   "task": "RelationshipSeries.from_values (src/qap/relationship) accepts plain strings for its enum-typed metadata arguments evidence_kind, fit_reciprocity and evidence_reciprocity. It must reject any value that is not an instance of the matching enum with a TypeError whose message names the offending argument. Valid enum members keep working. Make tests/unit/relationship/test_ratio.py pass. Do not change any tests."},
-  {"id": "qap-basket-catalog", "commit": "aade4186", "category": "bug-fix", "difficulty": "easy",
-   "tests": ["tests/unit/scanner/test_basket.py"],
-   "task": "build_basket_definition_from_scan (src/qap/scanner/basket.py) builds a basket definition from a frozen source scan and a scanner catalog, but it does not check that the catalog passed in is the one the scan was frozen against. A catalog whose source specs differ must be refused with BasketDefinitionError (message contains \"catalog does not match\"). An unchanged catalog keeps working. Make tests/unit/scanner/test_basket.py pass. Do not change any tests."},
-  {"id": "qap-bridge-boundary", "commit": "04a5e891", "category": "bug-fix", "difficulty": "medium",
-   "tests": ["tests/unit/experiment/test_baselines.py"],
-   "task": "BandPartialPolicy (src/qap/experiment/controls.py) has no way to declare an execution-only bridge asset such as USDT, so a bridge holding is treated as an unexpected holding or distorts the weights it computes. Add an optional execution_only_bridge (AssetId or None, default None) to the policy: it must be an AssetId when given and must not be one of the target basket assets, and when set the bridge holding is ignored when computing current basket weights. Then pass the bridge through where the experiment runner builds this policy: no bridge for direct execution mode, the manifest's bridge_asset otherwise. Make tests/unit/experiment/test_baselines.py pass. Do not change any tests."},
-  {"id": "qap-decimal-context", "commit": "66075c28", "category": "bug-fix", "difficulty": "medium",
-   "tests": ["tests/unit/portfolio/test_state.py"],
-   "task": "Portfolio arithmetic in src/qap/portfolio (PortfolioState.apply_deltas and the allocation helpers) uses plain Decimal operations, so its results depend on the caller's ambient decimal context (precision, Emax, Emin). Make the arithmetic exact and independent of the ambient context, for example 0.985 + 0.001 == 0.986 even when the caller set prec=2, and huge exponents such as 9.85e999 must work under restricted Emax/Emin. Keep all existing behaviour. Make tests/unit/portfolio/test_state.py pass. Do not change any tests."},
-  {"id": "qap-storage-neutral", "commit": "4e850446", "category": "change", "difficulty": "easy",
-   "tests": ["tests/scenarios/test_market_dataset_roundtrip.py"],
-   "task": "Parquet market data written by src/qap/market/storage.py is stamped with the metadata key qap_evidence_role = \"development\", which wrongly ties stored market data to a research role. New files must be stamped \"role_neutral_market_data\". Files already stamped \"development\" (older fixtures) must still read correctly, and any other role is still rejected. Make tests/scenarios/test_market_dataset_roundtrip.py pass. Do not change any tests or fixtures."},
-  {"id": "qap-attempt-rename", "commit": "5253de8b", "category": "refactor", "difficulty": "easy",
-   "tests": ["tests/contract/api/test_experiments.py"],
-   "task": "In the Python API (src/qap/api) the experiment fields named sibling_trial_count are misleading: they count attempts in a research family, including failed ones. Rename them to family_attempt_count everywhere in the Python backend (schemas, readers, and any local variable or helper names that say sibling), with no behaviour change. The web client under web/ is out of scope. Make tests/contract/api/test_experiments.py pass. Do not change any tests."},
-  {"id": "qap-resolver-contract", "commit": "0ece585d", "category": "feature", "difficulty": "medium",
-   "tests": ["tests/unit/policy/test_graph_basket.py"],
-   "task": "resolve_graph_target (src/qap/policy/graph_basket.py) must take the neutral AllocationTarget as a new first argument instead of building the equal-weight start itself, so callers own it. Tighten its contract: neutral_target must be an AllocationTarget (TypeError otherwise); it must be equal weight over exactly the economic assets (ValueError containing \"equal weight\" otherwise); the number of economic assets must be 2 to 6 and unique; the weights it returns stay long-only and sum to 1 for every supported size. The tests describe the exact errors. Make tests/unit/policy/test_graph_basket.py pass. Do not change any tests."},
-  {"id": "qap-oos-seal", "commit": "1961b03a", "category": "debugging", "difficulty": "medium",
-   "tests": ["tests/unit/experiment/test_runner.py", "tests/scenarios/test_market_dataset_roundtrip.py"],
-   "task": "A development experiment manifest that lists the reserved final out-of-sample dataset (dataset id binance-btcusdt-1d-2024, semantic fingerprint b3069c70fb61f1e7fb6a8b1d338194817ba8896dfd2618b96091c8c46686f2a5) is accepted: load_experiment_data (src/qap/experiment/data.py) reads the dataset bytes and runs. Reserved final-OOS data must be sealed: loading must fail with ExperimentSetupError (message contains \"reserved final-OOS\") before any dataset bytes are read. Decide where the list of sealed datasets lives, keep it small and testable, and keep every other manifest loading as before. Make the two test files above pass. Do not change any tests."},
-  {"id": "qap-observation-invariants", "commit": "bf9a7ed7", "category": "feature", "difficulty": "hard",
-   "tests": ["tests/unit/relationship/test_observation_invariants.py"],
-   "task": "Relationship observations (src/qap/relationship/observation.py and the cross-sectional relative model under src/qap/relationship/models) can be constructed with forged or inconsistent fields. Enforce their invariants at construction: integer counts must be real ints (bool and other types rejected with TypeError), and the observation status must agree with its coverage and, for cross-sectional observations, with its payload. The exact exceptions and message patterns are in tests/unit/relationship/test_observation_invariants.py. Valid observations used elsewhere in the test suite under tests/unit/relationship must keep working. Make that file pass. Do not change any tests."},
-  {"id": "qap-plan-authority", "commit": "6e206f43", "category": "refactor", "difficulty": "hard",
-   "tests": ["tests/scenarios/test_multi_asset_rebalance.py", "tests/scenarios/test_paper_operator_workflow.py", "tests/unit/policy/test_rebalance.py"],
-   "task": "Multi-asset rebalancing plans its own targets inside src/qap/execution/multi_asset.py, duplicating the policy layer (src/qap/policy/rebalance.py). Make the policy's RebalancePlan the single authority: execute_multi_asset_rebalance must consume a RebalancePlan built by build_rebalance_plan(current_state, target, prices, execution_only_bridge) instead of recomputing the state, target and valuation itself, and the paper operator in src/qap/experiment/paper_operation.py must use the same path. build_rebalance_plan must refuse a target that omits a held non-bridge asset unless the omission is declared by an explicit zero weight (ValueError matching \"explicit zero.*ASSET\"). Remove the duplicated planning code. Make the three test files above pass. Do not change any tests."}
+  {
+    "id": "qap-enum-metadata",
+    "commit": "05ed428c",
+    "category": "bug-fix",
+    "difficulty": "easy",
+    "tests": [
+      "tests/unit/relationship/test_ratio.py"
+    ],
+    "task": "RelationshipSeries.from_values (src/qap/relationship) accepts plain strings for its enum-typed metadata arguments evidence_kind, fit_reciprocity and evidence_reciprocity. It must reject any value that is not an instance of the matching enum with a TypeError whose message names the offending argument. Valid enum members keep working. Make tests/unit/relationship/test_ratio.py pass. Do not change any tests."
+  },
+  {
+    "id": "qap-basket-catalog",
+    "commit": "aade4186",
+    "category": "bug-fix",
+    "difficulty": "easy",
+    "tests": [
+      "tests/unit/scanner/test_basket.py"
+    ],
+    "task": "build_basket_definition_from_scan (src/qap/scanner/basket.py) builds a basket definition from a frozen source scan and a scanner catalog, but it does not check that the catalog passed in is the one the scan was frozen against. A catalog whose source specs differ must be refused with BasketDefinitionError (message contains \"catalog does not match\"). An unchanged catalog keeps working. Make tests/unit/scanner/test_basket.py pass. Do not change any tests."
+  },
+  {
+    "id": "qap-bridge-boundary",
+    "commit": "04a5e891",
+    "category": "bug-fix",
+    "difficulty": "medium",
+    "tests": [
+      "tests/unit/experiment/test_baselines.py"
+    ],
+    "task": "BandPartialPolicy (src/qap/experiment/controls.py) has no way to declare an execution-only bridge asset such as USDT, so a bridge holding is treated as an unexpected holding or distorts the weights it computes. Add an optional execution_only_bridge (AssetId or None, default None) to the policy: it must be an AssetId when given and must not be one of the target basket assets, and when set the bridge holding is ignored when computing current basket weights. Then pass the bridge through where the experiment runner builds this policy: no bridge for direct execution mode, the manifest's bridge_asset otherwise. Make tests/unit/experiment/test_baselines.py pass. Do not change any tests."
+  },
+  {
+    "id": "qap-decimal-context",
+    "commit": "66075c28",
+    "category": "bug-fix",
+    "difficulty": "medium",
+    "tests": [
+      "tests/unit/portfolio/test_state.py"
+    ],
+    "task": "Portfolio arithmetic in src/qap/portfolio (PortfolioState.apply_deltas and the allocation helpers) uses plain Decimal operations, so its results depend on the caller's ambient decimal context (precision, Emax, Emin). Make the arithmetic exact and independent of the ambient context, for example 0.985 + 0.001 == 0.986 even when the caller set prec=2, and huge exponents such as 9.85e999 must work under restricted Emax/Emin. Keep all existing behaviour. Make tests/unit/portfolio/test_state.py pass. Do not change any tests."
+  },
+  {
+    "id": "qap-storage-neutral",
+    "commit": "4e850446",
+    "category": "change",
+    "difficulty": "easy",
+    "tests": [
+      "tests/scenarios/test_market_dataset_roundtrip.py"
+    ],
+    "task": "Parquet market data written by src/qap/market/storage.py is stamped with the metadata key qap_evidence_role = \"development\", which wrongly ties stored market data to a research role. New files must be stamped \"role_neutral_market_data\". Files already stamped \"development\" (older fixtures) must still read correctly, and any other role is still rejected. Make tests/scenarios/test_market_dataset_roundtrip.py pass. Do not change any tests or fixtures."
+  },
+  {
+    "id": "qap-attempt-rename",
+    "commit": "5253de8b",
+    "category": "refactor",
+    "difficulty": "easy",
+    "tests": [
+      "tests/contract/api/test_experiments.py"
+    ],
+    "task": "In the Python API (src/qap/api) the experiment fields named sibling_trial_count are misleading: they count attempts in a research family, including failed ones. Rename them to family_attempt_count everywhere in the Python backend (schemas, readers, and any local variable or helper names that say sibling), with no behaviour change. The web client under web/ is out of scope. Make tests/contract/api/test_experiments.py pass. Do not change any tests."
+  },
+  {
+    "id": "qap-resolver-contract",
+    "commit": "0ece585d",
+    "category": "feature",
+    "difficulty": "medium",
+    "tests": [
+      "tests/unit/policy/test_graph_basket.py"
+    ],
+    "task": "resolve_graph_target (src/qap/policy/graph_basket.py) must take the neutral AllocationTarget as a new first argument instead of building the equal-weight start itself, so callers own it. Tighten its contract: neutral_target must be an AllocationTarget (TypeError otherwise); it must be equal weight over exactly the economic assets (ValueError containing \"equal weight\" otherwise); the number of economic assets must be 2 to 6 and unique; the weights it returns stay long-only and sum to 1 for every supported size. The tests describe the exact errors. Make tests/unit/policy/test_graph_basket.py pass. Do not change any tests."
+  },
+  {
+    "id": "qap-oos-seal",
+    "commit": "1961b03a",
+    "category": "debugging",
+    "difficulty": "medium",
+    "tests": [
+      "tests/unit/experiment/test_runner.py",
+      "tests/scenarios/test_market_dataset_roundtrip.py"
+    ],
+    "task": "A development experiment manifest that lists the reserved final out-of-sample dataset (dataset id binance-btcusdt-1d-2024, semantic fingerprint b3069c70fb61f1e7fb6a8b1d338194817ba8896dfd2618b96091c8c46686f2a5) is accepted: load_experiment_data (src/qap/experiment/data.py) reads the dataset bytes and runs. Reserved final-OOS data must be sealed: loading must fail with ExperimentSetupError (message contains \"reserved final-OOS\") before any dataset bytes are read. Decide where the list of sealed datasets lives, keep it small and testable, and keep every other manifest loading as before. Make the two test files above pass. Do not change any tests."
+  },
+  {
+    "id": "qap-observation-invariants",
+    "commit": "bf9a7ed7",
+    "category": "feature",
+    "difficulty": "hard",
+    "tests": [
+      "tests/unit/relationship/test_observation_invariants.py"
+    ],
+    "task": "Relationship observations (src/qap/relationship/observation.py and the cross-sectional relative model under src/qap/relationship/models) can be constructed with forged or inconsistent fields. Enforce their invariants at construction: integer counts must be real ints (bool and other types rejected with TypeError), and the observation status must agree with its coverage and, for cross-sectional observations, with its payload. The exact exceptions and message patterns are in tests/unit/relationship/test_observation_invariants.py. Valid observations used elsewhere in the test suite under tests/unit/relationship must keep working. Make that file pass. Do not change any tests."
+  },
+  {
+    "id": "qap-plan-authority",
+    "commit": "6e206f43",
+    "category": "refactor",
+    "difficulty": "hard",
+    "tests": [
+      "tests/scenarios/test_multi_asset_rebalance.py",
+      "tests/scenarios/test_paper_operator_workflow.py",
+      "tests/unit/policy/test_rebalance.py"
+    ],
+    "task": "Multi-asset rebalancing plans its own targets inside src/qap/execution/multi_asset.py, duplicating the policy layer (src/qap/policy/rebalance.py). Make the policy's RebalancePlan the single authority: execute_multi_asset_rebalance must consume a RebalancePlan built by build_rebalance_plan(current_state, target, prices, execution_only_bridge) instead of recomputing the state, target and valuation itself, and the paper operator in src/qap/experiment/paper_operation.py must use the same path. build_rebalance_plan must refuse a target that omits a held non-bridge asset unless the omission is declared by an explicit zero weight (ValueError matching \"explicit zero.*ASSET\"). Remove the duplicated planning code. Make the three test files above pass. Do not change any tests."
+  },
+  {
+    "id": "qap-oos-recovery",
+    "commit": "227a8384",
+    "category": "bug-fix",
+    "difficulty": "hard",
+    "tests": [
+      "tests/unit/experiment/test_final_oos_reservation_recovery.py"
+    ],
+    "task": "When run_experiment_to_artifacts (src/qap/experiment/artifacts.py) reserves the final out-of-sample holdout and the registry publication then fails, the attempt is left half-reserved: the holdout looks consumed and a retry cannot run. Make the final-OOS reservation recoverable. A failed reservation must leave a non-consumed attempt (commitment execution_status \"reservation_failed\", consumed false, a failure.json in the failed run directory) with no stale entry under .final-oos-commitments, the original OSError must propagate, and a retry must then complete normally (execution_status \"completed\", consumed true). The expected files and fields are in tests/unit/experiment/test_final_oos_reservation_recovery.py. Keep existing experiment behaviour and the rest of tests/unit/experiment passing. Make that file pass. Do not change any tests."
+  },
+  {
+    "id": "qap-paper-revalidate",
+    "commit": "9deb4039",
+    "category": "bug-fix",
+    "difficulty": "hard",
+    "tests": [
+      "tests/contract/api/test_paper_operations.py",
+      "tests/unit/experiment/test_paper_operation_integrity.py"
+    ],
+    "task": "Paper-operation artifacts are trusted as read. The reader in src/qap/experiment/paper_operation.py must reject tampered content (integrity digest mismatch: ValueError mentioning integrity) and content whose digests were recomputed but whose economics are inconsistent, such as reconciliation totals that do not match the fills (ValueError mentioning semantic). The API (src/qap/api/paper_operation_views.py and paper_operation_schemas.py) must refuse operation ids that escape the operations directory (404, code paper_operation_not_found), list a corrupt operation as artifact_status \"invalid\" with error code corrupt_paper_operation without hiding the valid ones, and expose the extra detail fields the contract test expects (fee_bps, slippage_bps, code_fingerprint, market_notional_reference_prices, artifact_status). Details are in tests/contract/api/test_paper_operations.py and tests/unit/experiment/test_paper_operation_integrity.py. Make both pass. Do not change any tests. Ignore the web/ frontend."
+  },
+  {
+    "id": "qap-artifact-seal",
+    "commit": "e78fae04",
+    "category": "feature",
+    "difficulty": "hard",
+    "tests": [
+      "tests/unit/experiment/test_artifact_integrity.py",
+      "tests/unit/experiment/test_artifacts.py"
+    ],
+    "task": "Experiment artifacts written by src/qap/experiment/artifacts.py are not sealed: a reader accepts a result or performance file whose content was edited. Add a module qap.experiment.integrity providing ArtifactIntegrity and build_integrity_record, record content digests when artifacts are written, and make the artifact reader reject tampered result or performance content (ArtifactError mentioning integrity) and content that has fresh digests but is semantically inconsistent with the rest of the run (ArtifactError mentioning semantic). The required API and behaviour are in tests/unit/experiment/test_artifact_integrity.py and tests/unit/experiment/test_artifacts.py. Make both pass. Do not change any tests."
+  },
+  {
+    "id": "qap-paper-execution",
+    "commit": "70a6295c",
+    "category": "bug-fix",
+    "difficulty": "hard",
+    "tests": [
+      "tests/contract/api/test_paper_operations.py",
+      "tests/integration/market/test_binance_public_adapter.py",
+      "tests/scenarios/test_multi_asset_rebalance.py",
+      "tests/scenarios/test_paper_operator_workflow.py",
+      "tests/unit/execution/test_precision.py",
+      "tests/unit/experiment/test_reconciliation.py"
+    ],
+    "task": "Harden paper execution evidence across market metadata, precision, multi-asset execution and reconciliation. Exchange info must keep stable asset ids independent of venue codes and keep the recorded MARKET_LOT_SIZE filter separately from LOT_SIZE (src/qap/market/metadata.py, src/qap/market/adapters/binance_public.py). Market orders must enforce MARKET_LOT_SIZE in addition to LOT_SIZE and honour the applyToMarket flags of the notional filters (MarketPrecisionError codes above_maximum_quantity, below_minimum_notional, above_maximum_notional; src/qap/execution/precision.py). Multi-asset execution (src/qap/execution/multi_asset.py) must allow an execution-only bridge asset that is not an economic target, order trades by descending target value change then asset key, and report authoritative tracking and the unfilled remainder. Reconciliation (src/qap/experiment/reconciliation.py) must detect tampered fill economics, and the paper-operation API must carry the new evidence. The tests listed in this task's verify command define the exact behaviour (tests/unit/execution/test_precision.py, tests/unit/experiment/test_reconciliation.py, tests/scenarios/test_multi_asset_rebalance.py, tests/scenarios/test_paper_operator_workflow.py, tests/integration/market/test_binance_public_adapter.py, tests/contract/api/test_paper_operations.py). Make them pass. Do not change any tests or fixtures."
+  },
+  {
+    "id": "qap-protocol-integrity",
+    "commit": "8063ea80",
+    "category": "bug-fix",
+    "difficulty": "hard",
+    "tests": [
+      "tests/contract/api/test_experiments.py",
+      "tests/contract/api/test_portfolios.py",
+      "tests/unit/experiment/test_artifacts.py",
+      "tests/unit/experiment/test_manifest.py",
+      "tests/unit/experiment/test_runner.py"
+    ],
+    "task": "Enforce research protocol integrity in src/qap/experiment and its API readers. The family trial count must include failed attempts that have recoverable lineage. A portfolio's starting snapshot must be taken before flows and fills. A completed run without its initial_state event must be rejected (ArtifactError mentioning initial_state). The final-OOS identity must use the exact evaluated slice, not the full source, so a second family cannot reuse a committed holdout (HoldoutAlreadyCommittedError naming the family). A point-in-time universe must fail closed until an eligibility-aware replay exists (ValidationError). An actionable unsupported direct route must invalidate the experiment (ExperimentSetupError unsupported_direct_route), and the low-level executor must refuse final OOS without a reservation permit (ExperimentSetupError mentioning reservation permit). The exact expectations are in tests/contract/api/test_experiments.py, tests/contract/api/test_portfolios.py and tests/unit/experiment/test_artifacts.py, test_manifest.py and test_runner.py. Make them pass. Do not change any tests."
+  },
+  {
+    "id": "qap-relationship-integrity",
+    "commit": "b3167bd7",
+    "category": "bug-fix",
+    "difficulty": "hard",
+    "tests": [
+      "tests/contract/api/test_pairs.py",
+      "tests/unit/relationship/test_anchor.py",
+      "tests/unit/relationship/test_normalized.py"
+    ],
+    "task": "Relationship evidence can be forged or misoriented. AnchorLens (src/qap/relationship/anchor.py) and the normalized path (src/qap/relationship/normalized.py) must only be constructible through their validated builders build_anchor_lens and build_normalized_path (direct construction raises TypeError naming the builder); the anchor lens must fail closed when its decomposition exceeds tolerance (RelationshipDataError mentioning decomposition tolerance) and record anchor_source_fingerprint via identity_source_fingerprint. The pair API (src/qap/api/relationship_views.py, evidence_views.py) must reorient exactly reciprocal model scores when a pair is requested in reverse (same status; value negated, or None), place series chart points at the observation availability time, and expose anchor_source_fingerprint. Details are in tests/contract/api/test_pairs.py, tests/unit/relationship/test_anchor.py and tests/unit/relationship/test_normalized.py. Make them pass. Do not change any tests."
+  },
+  {
+    "id": "qap-replay-valuation",
+    "commit": "69439d60",
+    "category": "bug-fix",
+    "difficulty": "hard",
+    "tests": [
+      "tests/scenarios/test_deterministic_replay.py",
+      "tests/unit/experiment/test_artifacts.py",
+      "tests/unit/experiment/test_manifest.py",
+      "tests/unit/experiment/test_runner.py"
+    ],
+    "task": "Harden replay valuation and final-OOS integrity. A zero-cost rebalance in replay (src/qap/execution/replay.py) must conserve wealth across open gaps in the price data. The artifact reader must require a completed final-OOS commitment (ArtifactError mentioning commitment). A manifest with a relationship-alpha claim must classify success against the primary control (ValidationError mentioning relationship-alpha claim). Public in-memory execution must refuse a final OOS that was not precommitted (ExperimentSetupError mentioning precommit). The exact expectations are in tests/scenarios/test_deterministic_replay.py and tests/unit/experiment/test_artifacts.py, test_manifest.py and test_runner.py. Make them pass. Do not change any tests."
+  },
+  {
+    "id": "qap-preflight-bypass",
+    "commit": "0a9df528",
+    "category": "bug-fix",
+    "difficulty": "medium",
+    "tests": [
+      "tests/scenarios/test_multi_asset_rebalance.py",
+      "tests/unit/experiment/test_runner.py"
+    ],
+    "task": "Close two execution preflight bypasses. Multi-asset execution (src/qap/execution/multi_asset.py) must dry-preflight the precision outcome of every planned order before executing any of them, so a later order that fails precision cannot leave earlier orders executed. Final-OOS execution (src/qap/experiment/final_oos.py) must not let a fake or self-made commitment mint an execution permit: only the authoritative holdout registry may (ExperimentSetupError mentioning authoritative holdout registry). The exact expectations are in tests/scenarios/test_multi_asset_rebalance.py and tests/unit/experiment/test_runner.py. Make them pass. Do not change any tests."
+  }
 ]

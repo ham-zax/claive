@@ -17,7 +17,7 @@ Codex is available with `--engine codex` (`codex exec --json`, binary from `CODE
 It is strictly locked to `gpt-6-luna` at reasoning effort `max`; any other `--model` or `--reasoning-effort` is refused.
 Compaction is left at Codex's own behaviour. Codex chooses its own thread ID,
 so the job's session ID is replaced by it once the thread starts. User config and rules are ignored; read-only workers
-use the read-only sandbox, writers `workspace-write` with approvals off. `--max-model-steps`, `--output-schema` and
+use the read-only sandbox, writers `workspace-write` with approvals off (`CLAIVE_CODEX_YOLO=1` replaces writers' sandbox with `--dangerously-bypass-approvals-and-sandbox`; read-only workers are unaffected). `--max-model-steps`, `--output-schema` and
 worktree isolation are unsupported.
 
 ## Native Codex progress

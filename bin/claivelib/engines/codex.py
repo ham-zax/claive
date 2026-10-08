@@ -20,6 +20,11 @@ def _home():
     return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
 
 
+def _yolo(request):
+    """CLAIVE_CODEX_YOLO=1 lets write turns skip Codex's sandbox and approvals; read-only turns never do."""
+    return not request.read_only and os.environ.get("CLAIVE_CODEX_YOLO", "").lower() in {"1", "true", "yes"}
+
+
 class CodexEngine(WorkerEngine):
     name = "codex"
     default_model = CODEX_MODEL
@@ -79,11 +84,15 @@ class CodexEngine(WorkerEngine):
     def build_command(self, request):
         self.validate_turn(request)
         sandbox = "read-only" if request.read_only else "workspace-write"
+        if _yolo(request):
+            guard = ["--dangerously-bypass-approvals-and-sandbox"]
+        else:
+            guard = ["-c", f'sandbox_mode="{sandbox}"', "-c", 'approval_policy="never"']
         shared = [
             "--json", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules",
             "-m", request.model,
             "-c", f'model_reasoning_effort="{CODEX_EFFORT}"',
-            "-c", f'sandbox_mode="{sandbox}"', "-c", 'approval_policy="never"',
+            *guard,
             "-c", f'web_search="{"live" if request.web else "disabled"}"',
         ]
         if not request.session_logging:

@@ -13,6 +13,7 @@ from claivelib.engines import get_engine
 from claivelib.engines.codex import CODEX_MODEL, CodexEngine
 
 THREAD = "01a1184e-d220-7891-95de-8dee4b56367e"
+YOLO = "--dangerously-bypass-approvals-and-sandbox"
 
 
 class CodexChecks(unittest.TestCase):
@@ -26,6 +27,7 @@ class CodexChecks(unittest.TestCase):
         self.binary.chmod(0o755)
         self.previous = os.environ.get("CODEX_HOME")
         os.environ["CODEX_HOME"] = str(self.root / "home")
+        self.previous_yolo = os.environ.pop("CLAIVE_CODEX_YOLO", None)
         self.engine = CodexEngine()
 
     def tearDown(self):
@@ -33,7 +35,16 @@ class CodexChecks(unittest.TestCase):
             os.environ.pop("CODEX_HOME")
         else:
             os.environ["CODEX_HOME"] = self.previous
+        if self.previous_yolo is None:
+            os.environ.pop("CLAIVE_CODEX_YOLO", None)
+        else:
+            os.environ["CLAIVE_CODEX_YOLO"] = self.previous_yolo
         self.temp.cleanup()
+
+    def write_rollout(self):
+        rollout = self.root / f"home/sessions/2026/10/08/rollout-2026-10-08T00-00-00-{THREAD}.jsonl"
+        rollout.parent.mkdir(parents=True, exist_ok=True)
+        rollout.write_text("")
 
     def request(self, **overrides):
         values = dict(binary=str(self.binary), workspace=str(self.root), prompt_file=str(self.prompt),
@@ -92,6 +103,47 @@ class CodexChecks(unittest.TestCase):
         self.assertEqual(resumed[resumed.index(THREAD) - 1], 'web_search="disabled"')
         self.assertIn("--ephemeral", self.engine.build_command(
             self.request(session_id=None, session_logging=False)))
+
+    def test_unset_yolo_keeps_the_sandboxed_command(self):
+        expected = [str(self.binary), "exec", "--json", "--skip-git-repo-check", "--ignore-user-config",
+                    "--ignore-rules", "-m", CODEX_MODEL, "-c", 'model_reasoning_effort="max"',
+                    "-c", 'sandbox_mode="workspace-write"', "-c", 'approval_policy="never"',
+                    "-c", 'web_search="disabled"', "--cd", str(self.root), "--", "--do the thing\n"]
+        self.assertEqual(self.engine.build_command(self.request()), expected)
+        for value in ("", "0", "no", "on"):
+            with self.subTest(value=value):
+                os.environ["CLAIVE_CODEX_YOLO"] = value
+                self.assertEqual(self.engine.build_command(self.request()), expected)
+
+    def assert_yolo_swaps_the_sandbox_overrides(self, shape):
+        plain = self.engine.build_command(self.request())
+        start = plain.index('sandbox_mode="workspace-write"') - 1
+        self.assertEqual(plain[1:1 + len(shape)], shape)
+        self.assertEqual(plain[start:start + 4],
+                         ["-c", 'sandbox_mode="workspace-write"', "-c", 'approval_policy="never"'])
+        os.environ["CLAIVE_CODEX_YOLO"] = "YES"
+        yolo = self.engine.build_command(self.request())
+        self.assertEqual(yolo[1:1 + len(shape)], shape)
+        self.assertEqual(yolo, plain[:start] + [YOLO] + plain[start + 4:])
+        self.assertFalse([part for part in yolo if "sandbox_mode" in part or "approval_policy" in part])
+
+    def test_yolo_write_turn_bypasses_sandbox_on_exec(self):
+        self.assert_yolo_swaps_the_sandbox_overrides(["exec"])
+
+    def test_yolo_write_turn_bypasses_sandbox_on_resume(self):
+        self.write_rollout()
+        self.assert_yolo_swaps_the_sandbox_overrides(["exec", "resume"])
+
+    def test_yolo_read_only_turn_stays_sandboxed(self):
+        os.environ["CLAIVE_CODEX_YOLO"] = "1"
+        for resumable in (False, True):
+            with self.subTest(resume=resumable):
+                if resumable:
+                    self.write_rollout()
+                command = self.engine.build_command(self.request(read_only=True))
+                self.assertIn('sandbox_mode="read-only"', command)
+                self.assertIn('approval_policy="never"', command)
+                self.assertNotIn(YOLO, command)
 
     def test_events_normalize_and_bind_the_thread(self):
         events = [

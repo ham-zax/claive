@@ -167,6 +167,10 @@ stages that did not finish, use `claive batch retry ID`. A batch whose
 runner process died is reported as `failed`; retry keeps any stage whose
 worker is still running and waits for it.
 
+## Optional Codex user MCP configuration
+
+Claive Codex workers default to `--ignore-user-config` so user-level tools cannot unexpectedly enter an isolated worker. To authorize a specific deployment's pre-registered Codex MCP servers and installed user skills, set `CLAIVE_CODEX_USE_USER_CONFIG=1` **only** for that worker's environment. It omits `--ignore-user-config` while retaining `--ignore-rules` and all other engine/model/sandbox controls. Register external tools explicitly with `codex mcp add`; enabling the flag alone does not install or start a browser. Disable the flag to restore the default hermetic config behavior. Neither Claive nor Codex assumes a particular browser implementation.
+
 ## Safety
 
 - Workers get `CLAIVE_WORKER_ID` and cannot launch workers or batches (this

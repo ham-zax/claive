@@ -88,8 +88,13 @@ class CodexEngine(WorkerEngine):
             guard = ["--dangerously-bypass-approvals-and-sandbox"]
         else:
             guard = ["-c", f'sandbox_mode="{sandbox}"', "-c", 'approval_policy="never"']
+        # Default remains hermetic. Explicitly opt in for deployments that register
+        # a narrow MCP browser server with `codex mcp add` and user-installed skills.
+        # Keep this independent of the growth project and the browser provider.
+        ignore_user_config = os.environ.get("CLAIVE_CODEX_USE_USER_CONFIG", "").lower() not in {"1", "true", "yes"}
         shared = [
-            "--json", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules",
+            "--json", "--skip-git-repo-check",
+            *(["--ignore-user-config"] if ignore_user_config else []), "--ignore-rules",
             "-m", request.model,
             "-c", f'model_reasoning_effort="{CODEX_EFFORT}"',
             *guard,

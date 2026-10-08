@@ -150,6 +150,19 @@ class AsyncChecks(unittest.TestCase):
         self.assertEqual(json.loads(self.cli("show", "@qa", "--json").stdout)["id"], second)
         self.assertEqual(self.cli("wait", "@qa", first, "--any").returncode, 0)
 
+    def test_one_corrupt_alias_entry_does_not_disable_the_registry(self):
+        _, job = self.launch("run")
+        (self.registry / "aliases.json").write_text(json.dumps({"ok": job, "Bad": "x", "short": "abc"}))
+        self.assertEqual(json.loads(self.cli("show", "@ok", "--json").stdout)["id"], job)
+        self.assertEqual(self.cli("show", "@short").returncode, 1)
+        listed = self.cli("alias", "list", "--json")
+        self.assertEqual([item["name"] for item in json.loads(listed.stdout)], ["ok"])
+        self.assertIn("Bad", listed.stderr)
+        repaired = self.cli("alias", "set", "other", job)
+        self.assertEqual(repaired.returncode, 0, repaired.stderr)
+        self.assertIn("dropped invalid alias entries", repaired.stderr)
+        self.assertEqual(json.loads((self.registry / "aliases.json").read_text()), {"ok": job, "other": job})
+
     def test_alias_validation_and_missing_targets_fail_without_mutation(self):
         _, job = self.launch("run")
         for name in ("../outside", "@backend", "Bad", "", "a" * 65):

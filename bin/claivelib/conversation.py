@@ -1,4 +1,5 @@
 """Bounded, parent-controlled exchanges between existing reusable workers."""
+import fcntl
 import json
 from pathlib import Path
 import re
@@ -7,7 +8,7 @@ import time
 import uuid
 import os
 
-from claivelib import cli, turns
+from claivelib import cli, mission, turns
 from claivelib.state import launch_config
 
 MAX_MESSAGE_BYTES = 128 * 1024
@@ -49,12 +50,26 @@ def _message(message, message_file):
     return message
 
 
-def _participants(references):
+def _claim(path, reference, claims):
+    """Hold a non-blocking lock for the controller's lifetime; the OS frees it on a crash."""
+    handle = open(path / "conversation.lock", "a")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        raise ValueError(f"{reference}: worker is already in a running conversation") from None
+    claims.append(handle)
+
+
+def _participants(references, claims):
     if not 2 <= len(references) <= 8:
         raise ValueError("a conversation needs 2..8 distinct reusable workers")
     participants = []
     for reference in references:
         path = cli.job_path(reference)
+        if any(item["id"] == path.name for item in participants):
+            raise ValueError("conversation participants must be distinct workers")
+        _claim(path, reference, claims)
         state = cli.load(path)
         if not state.get("reusable") or state["status"] != "idle" or (path / "close.request").exists():
             raise ValueError(f"{reference}: conversation participants must be idle reusable workers")
@@ -68,8 +83,6 @@ def _participants(references):
                                  model=state.get("model"), session_id=cli.worker_session_id(state),
                                  workspace=state["workspace"],
                                  read_only=bool(launch_config(state).get("read_only"))))
-    if len({item["id"] for item in participants}) != len(participants):
-        raise ValueError("conversation participants must be distinct workers")
     return participants
 
 
@@ -107,6 +120,8 @@ def _wait(path, request_id, deadline, stopped):
         # The supervisor publishes terminal state just before the receipt, then
         # returns to idle. That brief window must not become a false failure.
         if not alive:
+            if response.exists():
+                continue  # the receipt landed between the check above and this one
             raise ValueError("worker stopped without a receipt; delivery is unconfirmed")
         time.sleep(0.1)
 
@@ -131,11 +146,24 @@ def start(references, message=None, message_file=None, rounds=2, timeout=300, js
     cli.check_nested()
     if not isinstance(rounds, int) or isinstance(rounds, bool) or not 1 <= rounds <= 8:
         raise ValueError("--rounds must be between 1 and 8")
-    timeout = cli.parse_turn_timeout(timeout)
+    try:
+        timeout = cli.parse_turn_timeout(timeout)
+    except ValueError:
+        timeout = None
     if timeout is None:
         raise ValueError("--timeout must be a positive number")
     message = _message(message, message_file)
-    participants = _participants(references)
+    mission_id = os.environ.get("CLAIVE_MISSION") or None
+    claims = []
+    try:
+        return _run(references, message, rounds, timeout, json_output, mission_id, claims)
+    finally:
+        for handle in claims:
+            handle.close()
+
+
+def _run(references, message, rounds, timeout, json_output, mission_id, claims):
+    participants = _participants(references, claims)
     identifier = uuid.uuid4().hex[:12]
     path = directory() / identifier
     path.mkdir(mode=0o700)
@@ -143,7 +171,11 @@ def start(references, message=None, message_file=None, rounds=2, timeout=300, js
                  participants=participants, rounds=rounds, timeout=timeout,
                  created_at=time.time(), runner_pid=os.getpid(), runner_identity=cli.identity(os.getpid()),
                  transcript=[], pending_request=None)
+    if mission_id:
+        state["mission"] = mission_id
     cli.save(path / "state.json", state)
+    if mission_id:
+        mission.link_auto(mission_id, "conversation", identifier)
     if not json_output:
         print(f"Conversation {identifier} | {path}", flush=True)
     deadline = time.monotonic() + timeout

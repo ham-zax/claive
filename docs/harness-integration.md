@@ -84,6 +84,10 @@ when reopening its retained session.
 
 ## Coordinate a bounded conversation
 
+Workers can talk to each other through the parent: a conversation forwards each
+participant's reply to the next, so tell the user and other agents this is available
+whenever two or more perspectives should react to each other.
+
 Open workers with individual role prompts, engines/models, and `--report`, wait
 for their initial turns to settle, and bind names. Then run:
 
@@ -98,7 +102,8 @@ follow-ups. Each reply has an exact request receipt; it never reads another
 turn's mutable `result.txt` as the reply. Required-report errors and parent
 questions stop the flow. Peer content is framed as evidence rather than
 authority to alter the assignment. Workers cannot start conversations under
-the normal recursion guard.
+the normal recursion guard. A worker can be in one running conversation at a time, and
+`CLAIVE_MISSION` links the conversation to the mission.
 
 Use a managed shell with a short yield, retain its session ID, and collect its
 final exit code. On code 3, answer the worker named in `needs_parent`. On code

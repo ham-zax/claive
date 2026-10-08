@@ -1,6 +1,6 @@
 # claive
 
-Harness-neutral coding-worker orchestration: any parent agent (Claude Code, Codex, or another harness that can run shell commands) can drive it. Muse Code is the default production engine and Pi the second engine. The generic worker core handles supervision, reusable turns, state, cancellation, logs, and the live terminal dashboard; Muse-specific command/event/usage behavior lives behind an engine adapter. Maintained source for Hamza's installation in `~/.local/bin`, `~/.codex/skills` and `~/.claude/skills`. Commands: `claive` (worker manager), `claive-worker` (reusable-worker launcher), `claive-orch` (arbiter), and `claive-codex` (opens Codex beside the worker dashboard).
+Harness-neutral coding-worker orchestration: any parent agent (Claude Code, Codex, or another harness that can run shell commands) can drive it. Muse Code is the default production engine and Pi the second engine. The generic worker core handles supervision, reusable turns, state, cancellation, logs, and the live terminal dashboard; Muse-specific command/event/usage behavior lives behind an engine adapter. Maintained source for Hamza's installation in `~/.local/bin`, `~/.codex/skills` and `~/.claude/skills`. Workers can also talk to each other: name reusable workers (`claive alias set NAME ID`) and run `claive conversation start @a @b --message-file F` to pass replies between them across engines and models (see [Conversations](#conversations-across-engines-and-models)). Commands: `claive` (worker manager), `claive-worker` (reusable-worker launcher), `claive-orch` (arbiter), and `claive-codex` (opens Codex beside the worker dashboard).
 
 Pi is available explicitly with `--engine pi`, using only `opencode2api`. Its initial model is
 `muse-spark-1.3-contributor-free`; new Pi workers inherit the last explicitly selected
@@ -111,7 +111,10 @@ Binding an existing name to a different worker requires
 remains inspectable through its name, but follow-ups still require an available
 reusable worker. To resume a closed specialist, reopen its retained `--session-id`
 with the same workspace and policy, then explicitly rebind the name. Listing
-shows `missing` if a bound worker's state has been removed.
+shows `missing` if a bound worker's state has been removed. An invalid entry in
+`aliases.json` (for example after a manual edit) is ignored with a warning rather than
+breaking other names; the next `alias set` or `alias remove` rewrites the registry
+without it.
 
 ### Conversations across engines and models
 
@@ -132,6 +135,9 @@ use the same protocol. Open participants with their own role prompts and
 engine, model, session, effort defaults, permissions, and file ownership remain
 the policies chosen at launch. Peer replies do not grant new permissions.
 
+A worker can belong to only one running conversation at a time (the claim is
+released automatically if the controller dies). With `CLAIVE_MISSION` set, the
+conversation is linked to that mission and appears in `claive mission show`.
 Workers must be idle, reusable, distinct, and have no queued work or unresolved
 failure/question when the conversation starts. A conversation never opens
 workers or selects models. Workers opened before conversation support was

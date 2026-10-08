@@ -26,6 +26,19 @@ Background and evidence: `/home/hamza/repo/claive/docs/experiment/`
 - **No verifier?** Write one first: a small test or check script that fails now.
   If that is impossible, use a plain `claive` fan-out (below) and review
   the result yourself. Do not pretend a model review is verification.
+- **Measure before you fan out.** For performance, profiling, or debugging, get the
+  baseline or the reproduced mismatch first, then launch lanes only at that measured
+  hot spot. A lane report written before a baseline is a set of estimates; it cannot
+  rank costs.
+- **Performance verifier.** An equivalence test must pass after the change, with
+  expected output captured from base. A timing or call-count gate must fail at base
+  and pass after; a gate that already passes at base does not measure the change.
+- **Check before measuring.** Check a new driver's parsing against one real response,
+  and check the precondition (an index that is not ready, a missing fixture). A run
+  that stops there gives no result, so do not count it.
+- **Keep fixtures.** A harness that deletes its state at exit throws away an
+  expensive build. Keep the state, and say so in the brief. Never let a probe's
+  mutating flag (for example `--edit`) touch the user's checkout.
 - Respect the host's rules on delegation. Hamza's Claude Code setup grants
   standing permission for Muse and Pi workers, so no per-task ask is needed
   there; elsewhere, ask first if the host requires it.
@@ -80,19 +93,25 @@ line: `Worker <id> | label | path`. Exit codes everywhere: 0 completed, 1 failed
   `nohup`, or `sleep` polling loops.
 - **Wait:** `claive wait ID [ID ...] --any --timeout S` returns the first worker
   to settle (with its report and code); on 124 do other work and wait again.
+  Several IDs need `--any`: without it the wait exits 1 at once and waits for nothing.
+  To check whether a worker still runs, read `claive show ID --json` status, not a
+  `pgrep` pattern (your own shell's command line contains the pattern).
 - **After a context reset or between turns:** `claive inbox --consumer <host>`
   lists every finished turn since your last read (`ASK` lines carry the
   question). Use one consumer name per parent.
 - **Long tasks:** `claive mission new --title T --goal-file F`, then
   `export CLAIVE_MISSION=<id>` (or `--mission`) so launches link themselves;
-  `mission note` decisions; `claive mission show ID` prints `Next:`.
+  `mission note` decisions; `claive mission show ID` prints `Next:`. Close it with
+  `claive mission close ID` when the effort ends.
 - Workers cannot launch workers (`CLAIVE_WORKER_ID` guard).
 
 Host specifics:
 - **Claude Code:** plain Bash for launches. Wait either in the foreground
   (`wait ... --any --timeout 540`, Bash `timeout: 600000`) or with
   `run_in_background: true` and no `--timeout` to be notified. Inbox consumer
-  `claude`.
+  `claude`. Output of a `run_in_background` call goes to its task file; read that file,
+  since a later foreground command will not show it. Foreground `sleep` is blocked by
+  the harness: wait with the command above, or use Monitor, not a sleep loop.
 - **Codex:** plain `exec_command`; prefer `open --detach` plus
   `wait --any --timeout` under the tool's time limit over holding shell
   sessions. Consumer `codex`. Codex caching and quota notes are in the
@@ -103,6 +122,46 @@ Host specifics:
 
 Common commands: `claive show ID --json`, `logs ID [--stderr]`,
 `usage ID --json`, `followup ID --prompt-file F`, `close ID`, `cancel ID`.
+Read output in bounded pieces. `logs` prints raw JSONL, and one event can be several
+KB: use `claive logs ID --lines 40 | cut -c1-300`. `show --json` has `status` and
+`exit_code` but no report; read a report with `claive show ID | head -n 80 | cut -c1-300`.
+
+### Let workers talk to each other (aliases and conversations)
+
+Workers can exchange replies, so a critic can answer a proposer without the parent
+copying text between them. Use it when two or more perspectives (different models or
+roles) should react to each other's reasoning: design debate, proposer/critic/reviewer
+rounds, cross-checking a diagnosis. Do not use it for independent subtasks (use a batch)
+or for anything with an executable check (use the `claive-orch` ladder).
+
+```bash
+# 1. Open reusable workers with their own role, engine/model and --report; wait for turn 1.
+claive open --detach --engine pi --model mimo-v2.6-flash-free --role reviewer \
+  --workspace /abs/repo --prompt-file /abs/role-critic.md        # -> Worker ID
+# 2. Name them (any parent sharing $CLAIVE_DIR can reuse the names).
+claive alias set critic ID1 ; claive alias set builder ID2 ; claive alias list --json
+# 3. Run the bounded exchange in the foreground (use a short yield / run_in_background).
+claive conversation start @builder @critic --message-file /abs/topic.md --rounds 2 --timeout 300 --json
+claive conversation show CONVERSATION_ID --json
+```
+
+- `@name` works wherever a worker ID does (`show`, `wait`, `followup`, `answer`...). A
+  name is resolved once per command and everything stored keeps the real worker ID, so
+  rebinding (`alias set NAME NEW --replace`) never moves an existing assignment. Names
+  never launch or resume anything.
+- A conversation uses 2..8 distinct idle reusable workers (no queued work, no unresolved
+  failure or question; workers started before conversation support must be reopened with
+  their retained `--session-id`). It visits them in order, `--rounds` 1..8 times, and hands
+  each the previous participant's reply as evidence, not as an instruction. Each worker
+  keeps its session, model, permissions and role; peer text never grants permissions.
+  A worker can be in only one running conversation. `CLAIVE_MISSION` links it to a mission.
+- Exit codes: 0 completed; 3 a worker asked a parent question (see `needs_parent`, reply
+  with `claive answer`, then start a new conversation); 124 timeout; 130 stopped; 1 failure
+  or a missing/invalid required `--report`. On 124/130 read `pending_request.response_file`
+  before sending anything again: an in-flight turn may still finish.
+- Replies come from per-request receipts (`<worker>/responses/<request-id>.json`), never
+  from a worker's mutable `result.txt`. The parent still verifies the outcome and owns
+  integration.
 
 Health and structured reports: `claive doctor [--json]` is a read-only
 check (binaries, config, Pi `models.json` coverage as `pi_provider`, provider
@@ -124,12 +183,17 @@ controls the stop switch.
 ## The verified ladder (default: arm D, rounds 2)
 
 Everything starts from the repository's **committed** `HEAD` (or `--base REV`).
-Uncommitted parent edits are not in the lanes, so commit them or ask the user
-first. Worker writes go only into lane worktrees, never into the user's checkout.
+Uncommitted parent edits are not in the lanes. Do not commit them just so lanes can see
+them; commits are the user's call. Run from committed HEAD (or `--base REV`), and check
+the checkout's risk at integration (below). Worker writes go only into lane worktrees, never into the user's checkout.
 
 ```bash
 # 0. Task text: goal, constraints, files and symbols, acceptance criteria.
-#    Do not include the solution. Write it to an absolute file.
+#    Do not include the solution. Write it to an absolute file. Check every path, symbol,
+#    and shell variable against the repo before running (a brief once named a file that
+#    did not exist, and an unset variable broke a launch). Label what you have not checked
+#    as unverified, and treat handoff notes as hypotheses until `git log` or the code
+#    confirms them.
 claive-orch init --repo /abs/repo --task-file /abs/task.md \
   --verify 'python3 -m pytest -q tests/test_x.py' --arm D --rounds 2 \
   --category bug-fix   # change|bug-fix|feature|debugging|refactor|docs|other
@@ -211,13 +275,15 @@ After `finish`, the winning checkpoint is on branch `orch/RUN/LANE`.
 
 1. Read `git -C REPO diff BASE COMMIT` (both printed by `finish` and `report`).
    Check that it is in scope, has no test deletions or tampering, and no
-   unrelated churn. The verifier passing is necessary, not sufficient.
+   unrelated churn. The verifier passing is necessary, not sufficient: check the diff against the mechanism
+   you reproduced, and run `git -C REPO status --short` before integrating.
 2. `claive-orch integrate RUN`: applies the diff to the checkout **unstaged**
    (the user's staged changes stay staged), re-runs the verifier there, and
    closes the run's idle reusable workers. Exit 1 means a `Conflict: <path>`
    (resolve it by hand) or a failing verifier in the checkout. `--no-verify`
    skips the re-run. `--paths P ...` / `--exclude P ...` apply only part of the
-   diff. It never commits; commit only if the user asked.
+   diff. It never commits; commit only if the user asked. The re-run includes the user's
+   uncommitted work, so its pass covers the combined tree, not the lane alone.
 3. `claive-orch cleanup RUN --branches` removes the worktrees and lane
    branches (an unintegrated winner is kept unless `--force`).
    `claive-orch prune --repo REPO` lists stale `orch/*` branches from old runs;
@@ -235,9 +301,13 @@ for unverifiable chores, use plain `claive open` workers, each in its own
 worktree. Rules:
 
 - One writer per worktree. Read-only workers may share.
-- No fixed cap on concurrent workers (the models run remotely), but keep
-  **one verifier, test or build at a time**: the machine has about 7 GB RAM,
-  shared. Back off if memory gets tight.
+- No fixed cap on concurrent workers (the models run remotely), but heavy runs (tests,
+  builds, verifiers) share a **9 GB** budget (the user's memory note). The caps of heavy
+  runs active at once must sum to at most 9G. Cap every heavy run with `claive-memcap <N>G -- CMD`
+  or `systemd-run --user --scope -q -p MemoryMax=<N>G -p MemorySwapMax=0 -- CMD`. CLAUDE.md
+  still says avoid parallel heavy jobs, and the memory note allows them within the budget.
+  Until the user settles that, run **one heavy job at a time**, capped at 9G. Check `uptime`
+  first, re-run timings taken under load, and kill only processes you started.
 - Give each worker its scope, the files it owns, "do not commit, do not delegate,
   others are editing nearby", and the report format: outcome, files, checks run,
   doubts, blockers.

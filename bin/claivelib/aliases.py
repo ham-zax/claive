@@ -3,6 +3,7 @@ import fcntl
 import json
 import os
 import re
+import sys
 
 
 def validate_name(name):
@@ -11,23 +12,29 @@ def validate_name(name):
     return name
 
 
+def _valid(name, worker):
+    try:
+        validate_name(name)
+    except ValueError:
+        return False
+    return isinstance(worker, str) and re.fullmatch(r"[0-9a-f]{12}", worker) is not None
+
+
 def _read(path):
+    """Return (valid entries, invalid names); one bad entry never hides the rest."""
     if not path.exists():
-        return {}
+        return {}, []
     data = json.loads(path.read_text())
     if not isinstance(data, dict):
-        raise ValueError("invalid worker aliases registry")
-    for name, worker in data.items():
-        validate_name(name)
-        if not isinstance(worker, str) or not re.fullmatch(r"[0-9a-f]{12}", worker):
-            raise ValueError("invalid worker aliases registry")
-    return data
+        raise ValueError("invalid worker aliases registry: expected a JSON object")
+    good = {name: worker for name, worker in data.items() if _valid(name, worker)}
+    return good, sorted(set(data) - set(good))
 
 
 def resolve(reference):
     from claivelib import cli
     name = validate_name(reference[1:])
-    worker = _read(cli.root() / "aliases.json").get(name)
+    worker = _read(cli.root() / "aliases.json")[0].get(name)
     if worker is None:
         raise ValueError(f"unknown worker alias: @{name}")
     return worker
@@ -42,7 +49,9 @@ def update(name, worker=None, replace=False):
     fd = os.open(path.with_suffix(".lock"), os.O_WRONLY | os.O_CREAT, 0o600)
     with os.fdopen(fd, "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        data = _read(path)
+        data, dropped = _read(path)
+        if dropped:
+            print(f"warning: dropped invalid alias entries: {', '.join(dropped)}", file=sys.stderr)
         if target is None:
             if name not in data:
                 raise ValueError(f"unknown worker alias: @{name}")
@@ -60,7 +69,11 @@ def update(name, worker=None, replace=False):
 def listing(json_output=False):
     from claivelib import cli
     records = []
-    for name, worker in sorted(_read(cli.root() / "aliases.json").items()):
+    valid, dropped = _read(cli.root() / "aliases.json")
+    if dropped:
+        print(f"warning: ignoring invalid alias entries: {', '.join(dropped)}; "
+              "any alias set or remove rewrites the registry without them", file=sys.stderr)
+    for name, worker in sorted(valid.items()):
         item = dict(name=name, reference=f"@{name}", id=worker, status="missing")
         try:
             state = cli.load(cli.job_path(worker))

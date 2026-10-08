@@ -90,6 +90,15 @@ def _batch_live(batch_id):
     return dict(status=state.get("status"), code=state.get("code"))
 
 
+def _conversation_live(conversation_id):
+    from claivelib import conversation
+    try:
+        state = conversation.load(conversation_id)
+    except (ValueError, OSError, KeyError):
+        return dict(status="missing")
+    return dict(status=state["status"], code=state.get("code"))
+
+
 def _worker_running(worker_id):
     try:
         path = cli_mod.job_path(worker_id)
@@ -146,6 +155,8 @@ def compute_next(data):
             running.append(link["id"])
         elif link.get("kind") == "batch" and _batch_live(link["id"]).get("status") == "running":
             running.append(link["id"])
+        elif link.get("kind") == "conversation" and _conversation_live(link["id"]).get("status") == "running":
+            running.append(link["id"])
     if running:
         return f"wait for {' '.join(running)}"
     return "review results, then close the mission"
@@ -159,6 +170,8 @@ def _links_live(data):
             item.update(_worker_live(link["id"]))
         elif link.get("kind") == "batch":
             item.update(_batch_live(link["id"]))
+        elif link.get("kind") == "conversation":
+            item.update(_conversation_live(link["id"]))
         else:
             item["status"] = f"see claive-orch report {link.get('id')}"
         result.append(item)
@@ -235,6 +248,8 @@ def cmd_show(mission_id, json_output=False):
                     print(f"  question: {link.get('question', '')}")
             elif kind == "batch":
                 print(f"batch {target} {str(link.get('status', '')).upper()} code={link.get('code')}")
+            elif kind == "conversation":
+                print(f"conversation {target} {str(link.get('status', '')).upper()} code={link.get('code')}")
             else:
                 print(f"run {target} see claive-orch report {target}")
     print(f"Next: {nxt}")

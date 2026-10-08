@@ -349,6 +349,45 @@ print(json.dumps({"type":"result", "subtype":"success", "result":answer}))
         self.assertEqual(self.state(second)["turn"], 1)
         self.assertFalse(list((self.registry / second / "requests").glob("*.json")))
 
+    def test_timeout_error_names_the_conversation_flag(self):
+        first, second = self.open(), self.open()
+        result = self.cli("conversation", "start", first, second, "--message", "Topic", "--timeout", "0")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("--timeout must be a positive number", result.stderr)
+        self.assertNotIn("--turn-timeout", result.stderr)
+
+    def test_a_worker_cannot_join_two_running_conversations(self):
+        first, second, third = self.open(), self.open(), self.open()
+        process = subprocess.Popen([FIXTURE_CLI, "conversation", "start", first, second,
+                                    "--message", "FIXTURE_MODE=brief", "--json"],
+                                   env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.processes.append(process)
+        self.eventually(lambda: list((self.registry / "conversations").glob("*/state.json")))
+        result = self.cli("conversation", "start", second, third, "--message", "Topic")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("already in a running conversation", result.stderr)
+        process.send_signal(signal.SIGTERM)
+        process.communicate(timeout=5)
+        # The OS releases the claim with the controller, so the worker is reusable again.
+        self.assertEqual(self.state(third)["turn"], 1)
+
+    def test_conversation_is_linked_to_the_open_mission(self):
+        first, second = self.open(), self.open()
+        made = self.cli("mission", "new", "--title", "T", "--goal", "G")
+        mission = re.search(r"([0-9a-f]{12})", made.stdout).group(1)
+        result, conversation = self.discuss(first, second, rounds=1, **{})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        linked = self.cli("conversation", "start", first, second, "--message", "Topic",
+                          "--rounds", "1", "--json", CLAIVE_MISSION=mission)
+        self.assertEqual(linked.returncode, 0, linked.stderr)
+        identifier = json.loads(linked.stdout)["id"]
+        shown = json.loads(self.cli("mission", "show", mission, "--json").stdout)
+        self.assertIn(dict(kind="conversation", id=identifier, status="completed", code=0),
+                      [{k: v for k, v in link.items() if k != "at"} for link in shown["links"]])
+        self.assertEqual(json.loads((self.registry / "conversations" / identifier / "state.json").read_text())["mission"],
+                         mission)
+        self.assertNotIn("mission", json.loads((self.registry / "conversations" / conversation["id"] / "state.json").read_text()))
+
 
 if __name__ == "__main__":
     unittest.main()

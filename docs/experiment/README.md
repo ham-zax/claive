@@ -42,3 +42,4 @@ the original layout; in this directory those files are `rules.md`, `04-...`, and
 | Corpus manifest example | `docs/experiment/corpus.example.json` |
 
 Live shakedown results and the fixes they triggered: [`07-trial-runs.md`](07-trial-runs.md).
+The hard sqlglot corpus (experiment x3): [`hard/README.md`](hard/README.md).

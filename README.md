@@ -223,7 +223,7 @@ Meta [prompt caching](https://dev.meta.ai/docs/prompt-caching) automatically reu
 
 ## Verified orchestration (`claive-orch`)
 
-`claive-orch` is a deterministic arbiter that sits on top of the worker manager. It implements the depth-first escalation ladder from [Refining Over Resampling](docs/experiment/paper-notes.md) (arXiv 2608.05643), adapted to coding agents. Muse implements. A Pi critic from a different model family reviews the diff and the verifier output. The same Muse session then corrects the work. The verifier decides each round: a better or equal score is checkpointed as a commit on `orch/<run>/<lane>`, and a worse score is reverted. Only after a stall does arm D add one deliberately diverse second lane. The parent (Claude Code or Codex) asks `claive-orch next RUN` and performs exactly the one action it names. Models propose; deterministic code disposes.
+`claive-orch` is a deterministic arbiter that sits on top of the worker manager. It implements a depth-first escalation ladder for verifier-gated coding work. Muse implements. A Pi critic from a different model family reviews the diff and the verifier output. The same Muse session then corrects the work. The verifier decides each round: a better or equal score is checkpointed as a commit on `orch/<run>/<lane>`, and a worse score is reverted. Only after a stall does arm D add one deliberately diverse second lane. The parent (Claude Code or Codex) asks `claive-orch next RUN` and performs exactly the one action it names. Models propose; deterministic code disposes.
 
 ```bash
 claive-orch init --repo /abs/repo --task-file /abs/task.md --verify 'python3 -m pytest -q' --arm D
@@ -236,21 +236,23 @@ claive-orch reject RUN a --defect 2 --reason 'relaxes a gate'  # drop a wrong cr
 claive-orch cleanup RUN --branches   # remove worktrees and lane branches
 claive-orch prune --repo /abs/repo   # list stale orch/* branches (--apply deletes)
 claive-memcap 2G -- npm test        # memory cap without systemd-run (init --verify-memory 2G uses it)
-claive-orch compare --experiment NAME
 claive-orch arms
 ```
 
-Two skills drive it, and both work with either host:
+Active skills are centrally managed by Skillshare. Claive maintains matching source files:
 
-- `skills/worker-orchestration`: everyday verified delegation and parallel fan-out.
-- `skills/ttc-experiment`: the controlled refine-vs-resample experiment (arms A, R, R', B, B0, D; repeats; gates).
+- `skills/claive-orchestration`: verified Muse/Pi runs and general delegation for Claude Code, Codex, and shell parents.
+- `skills/claive-routing-codex`: Codex-specific managed-terminal worker launch and recovery.
+- TTC experiment: deferred and removed from the active repository for now; see [`docs/experiment/README.md`](docs/experiment/README.md).
+
+Claude Code uses `claive-orchestration` and its global CLAUDE.md delegation policy; the separate Claude routing skill was removed.
 
 ### Quick start from Claude Code or Codex
 
 After `./install.sh`, start a new session and ask, for example:
 
 ```text
-Use the worker-orchestration skill. You have my permission to delegate to Muse/Pi workers.
+Use the claive-orchestration skill. You have my permission to delegate to Muse/Pi workers.
 Repo: /abs/repo. Task: <goal>. Verifier: <command that fails now>. Arm D. Don't commit.
 ```
 
@@ -260,12 +262,12 @@ Where everything lives:
 |---|---|---|
 | Arbiter CLI | `bin/claive-orch`, `bin/claivelib/orchestration.py` | `~/.local/bin/claive-orch`, `~/.local/bin/claivelib/` |
 | Worker manager CLI | `bin/claive`, `bin/claivelib/` | `~/.local/bin/claive` |
-| Skills (both hosts) | `skills/worker-orchestration/`, `skills/ttc-experiment/` | `~/.claude/skills/…` and `~/.codex/skills/…` |
-| Claude delegation policy | `skills/claude-subagent-routing/` | `~/.claude/skills/subagent-routing/` |
-| Codex delegation policy | `skills/subagent-routing/` | `~/.codex/skills/subagent-routing/` |
+| Shared orchestration skill | `skills/claive-orchestration/` | Skillshare source `~/.config/skillshare/skills/claive-orchestration/` |
+| Codex routing skill | `skills/claive-routing-codex/` | Skillshare source `~/.config/skillshare/skills/claive-routing-codex/` |
+| Deferred TTC experiment | `docs/experiment/README.md` | Repository note only; no active skill is installed |
 | Worker and run state | n/a | `~/.local/state/claive/<worker-id>/`, `…/runs/<run-id>/` |
 
-The paper, design, plan, protocol, environment facts, and implementation mapping are in [`docs/experiment/`](docs/experiment/README.md). Run state lives under `${CLAIVE_DIR:-~/.local/state/claive}/runs/<id>/`.
+The TTC experiment is deferred; its repository note is [`docs/experiment/README.md`](docs/experiment/README.md). Run state lives under `${CLAIVE_DIR:-~/.local/state/claive}/runs/<id>/`.
 
 ## Five-hour quota
 
@@ -280,12 +282,10 @@ On an explicit Muse subscription-quota exhaustion, the manager records the failu
 | `bin/claive-worker` | Reusable worker launcher in a managed terminal |
 | `bin/claive-codex` | Codex with the tmux worker view |
 | `bin/claive-orch` | Launcher for the orchestration arbiter (`claivelib/orchestration.py`) |
-| `skills/subagent-routing/SKILL.md` | Codex delegation and verification guidance |
-| `skills/worker-orchestration/SKILL.md` | Host-neutral (Claude Code or Codex) Muse + Pi verified orchestration |
-| `skills/ttc-experiment/SKILL.md` | Running the refine-vs-resample experiment |
-| `skills/claude-subagent-routing/SKILL.md` | Claude Code's delegation policy, installed as `~/.claude/skills/subagent-routing` |
+| `skills/claive-routing-codex/SKILL.md` | Codex delegation and verification guidance |
+| `skills/claive-orchestration/SKILL.md` | Shared worker delegation and Muse/Pi verifier-driven orchestration |
+| `docs/experiment/README.md` | Deferred TTC experiment note; no experiment materials are active |
 | `docs/harness-integration.md` | Host-neutral protocol for Claude Code, Codex, Pi agents, and shells |
-| `docs/experiment/` | Paper notes, design, plan, protocol, environment, implementation mapping |
 | `reference/global-AGENTS.md` | Snapshot of the configured global instructions |
 | `reference/agy-relay.sh` | Historical relay; not an active model route |
 | `reference/opencode-relay.sh` | Existing incompatible OpenCode relay, for reference |
@@ -296,7 +296,7 @@ On an explicit Muse subscription-quota exhaustion, the manager records the failu
 
 Requirements: Linux with Python 3. The default production engine requires Muse at `~/.local/bin/muse`; `MUSE_WORKER_BINARY` can select another absolute Muse executable. The combined terminal view also requires tmux and Codex on PATH. No third-party Python packages are required by the tools or their checks.
 
-Edit this repository, then refresh the installed copies:
+Edit this repository, copy the two active `SKILL.md` files into the matching Skillshare source directories, and run `skillshare sync`. For CLI binaries, use:
 
 ```bash
 ./install.sh --dry-run
@@ -304,7 +304,7 @@ Edit this repository, then refresh the installed copies:
 ./install.sh --pi   # also install host-neutral skills for a Pi parent agent
 ```
 
-Changed destination files are backed up under `~/.local/state/claive-install/backups`. Identical files are skipped. Symlink and incompatible destination types are rejected. The installer copies the four tools, the `claivelib` package, the routing skill (Codex only), and the `worker-orchestration` and `ttc-experiment` skills into both `${CODEX_HOME:-~/.codex}/skills/` and `${CLAUDE_HOME:-~/.claude}/skills/`. Claude Code's `subagent-routing` is replaced by `skills/claude-subagent-routing` (Muse and Pi through this tooling; Sonnet 5.5 only on request), with the previous copy backed up. The installer it does not overwrite global instructions or install the reference relays. Custom absolute destinations can be supplied through `CLAIVE_BIN_DIR`, `CODEX_HOME`, `CLAUDE_HOME`, and `XDG_STATE_HOME`.
+Changed CLI destination files are backed up under `~/.local/state/claive-install/backups`. The installer refreshes CLI tools and `claivelib`, installs `claive-orchestration` for Claude Code/Codex (and optionally Pi), and installs `claive-routing-codex` for Codex only. It does not install the removed Claude routing or deferred TTC experiment. Skillshare-managed symlinks are left intact if their content matches the repo source; divergent or broken symlinks are refused with an instruction to sync Skillshare. Existing user-installed skill directories are preserved; remove obsolete Claive-owned entries through the Skillshare migration when you are ready. In this machine's setup Skillshare, not this installer, owns skill distribution. The installer does not overwrite global instructions or install reference relays. Custom destinations can be set with `CLAIVE_BIN_DIR`, `CODEX_HOME`, `CLAUDE_HOME`, and `XDG_STATE_HOME`.
 
 Hamza's Muse settings (`~/.config/muse/settings.json`) also select `muse-spark-1.3-contributor` with `high` reasoning. The installer preserves those settings; the launcher pins its own model and effort independently.
 

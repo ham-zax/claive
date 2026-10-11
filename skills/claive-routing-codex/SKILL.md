@@ -1,15 +1,43 @@
 ---
-name: subagent-routing
-description: Delegate bounded coding, investigation, or review tasks from Codex to Muse or Pi workers through claive-worker. Use when delegation is warranted or the user requests subagents; supports reusable sessions and provider usage checks.
+name: claive-routing-codex
+description: Codex-specific delegation through Claive. Launch, supervise, and reuse Muse, Pi, Claude, or Codex workers when authorized; use Codex managed terminals, worktree/read-only controls, and verification without changing task scope.
 ---
 
-# Subagent routing
+# Claive routing — Codex host
 
 Muse Code is the default engine; Pi is available explicitly with `--engine pi` through `opencode2api`. Follow the global AGENTS.md delegation criteria; complete small or tightly coupled tasks directly when delegation would add overhead. The parent owns synthesis, integration, and final verification.
 
-The maintained source is `/home/hamza/repo/claive`. Edit its `bin/` scripts or `skills/subagent-routing/SKILL.md`, then run `install.sh` to refresh the installed copies. Its `reference/global-AGENTS.md` is a snapshot, not a file to install over current global instructions.
+The maintained source is `/home/hamza/repo/claive/skills/claive-routing-codex/SKILL.md`. Skillshare owns the live copy at `~/.config/skillshare/skills/claive-routing-codex/`; update both, then `skillshare sync`. Do not run the legacy skill installer over Skillshare links. `reference/global-AGENTS.md` is a snapshot, not a replacement for global instructions.
 
-For a task with an executable check, prefer the verifier-gated ladder in the `worker-orchestration` skill (`claive-orch`: Muse implements, a cross-family Pi critic reviews, and the arbiter accepts or reverts each round). This skill still governs the Codex launch mechanics. For the refine-vs-resample experiment itself, use `ttc-experiment`.
+For a task with an executable check, prefer the verifier-gated ladder in the `claive-orchestration` skill (`claive-orch`: Muse implements, a cross-family Pi critic reviews, and the arbiter accepts or reverts each round). This skill governs Codex launch mechanics. The TTC experiment is deferred and has no active skill; do not auto-load or reinstall its former materials.
+
+## Current engine boundaries (Claive main, October 2026)
+
+The general `claive` worker manager supports **four engines**; the optional
+`claive-orch` verifier-driven arbiter currently selects **Muse/Pi** candidates.
+Do not confuse the arbiter's model policy with a limitation of the worker manager.
+Select an engine deliberately and follow the parent's current authorization policy.
+
+| Engine | Runtime contract |
+| --- | --- |
+| `muse` (default) | Pinned `muse-spark-1.3-contributor`; usual substantive effort `xhigh`; supports managed worktrees and read-only isolation |
+| `pi` | `--engine pi --provider opencode2api`; models selected explicitly or inherited; no managed worktree, `--web`, or model-step cap |
+| `claude` | `--engine claude`; pinned `claude-haiku-5-5`; headless and isolated from user settings, hooks, MCP, and skills; no managed worktree, output schema, or model-step cap |
+| `codex` | `--engine codex`; pinned `gpt-6-luna`, effort `max`; writer defaults to workspace-write sandbox, read-only uses the read-only sandbox; no managed worktree, output schema, or model-step cap |
+
+Claude/Codex workers are **available**, not automatically authorized as a
+fallback or as critics for the Muse/Pi arbiter. Do not silently switch engines,
+relax sandboxing, or assume another model's worker permissions carry over.
+For a Codex worker, `CLAIVE_CODEX_USE_USER_CONFIG=1` explicitly opts into that
+worker's existing Codex user MCP/skill configuration; the default is isolated.
+`CLAIVE_CODEX_YOLO=1` explicitly bypasses the sandbox for a writing worker:
+**do not set it without task-specific authorization**. Neither setting installs
+new MCP servers. Consult `docs/harness-integration.md` for the runtime protocol.
+
+For routine work from the Codex parent, favor `claive-worker` in Codex's managed
+shell so its session remains visible in `/ps`; use `claive start` or
+`claive open --detach` only when genuinely detached execution is needed.
+Keep the terminal session ID, Claive worker ID, and engine session UUID distinct.
 
 ## Model and reasoning
 
@@ -56,7 +84,7 @@ For Pi, use the same launcher with `--engine pi --provider opencode2api` and omi
 
 The shell session ID and the 12-character worker ID printed by `claive-worker` identify different objects; the retained worker `session_id` (a Muse session UUID for this engine) is a third identifier. Report both when a session is yielded. Keep ownership through the related task chain and final closure. Do not append `&`, use `nohup`/`disown`, or replace the default with `claive start`: those detach the worker from Codex's managed terminal. `start` is available for deliberately detached jobs and returns immediately; such jobs remain visible in the registry dashboard but not in Codex's terminal indicator.
 
-Async options (host-neutral; full protocol in `/home/hamza/repo/claive/docs/harness-integration.md`). When several workers run at once, or a worker would outlive the shell session, use `claive open --detach` (reusable, returns at once) or `claive start`, then `claive wait ID1 ID2 --any --timeout S` (first worker to settle; exit 124 means still running), with `S` below the tool's time limit. At the start of each turn, and after context compaction, run `claive inbox --consumer codex` to see finished turns since the last read; `ASK` lines carry a worker's question (answer with `claive answer ID --message ...`; exit 3 means the same). Parallel staged work: `claive batch start /abs/plan.json`, then `claive batch wait ID`. Multi-turn efforts: `claive mission new --title T --goal-file F`, `export CLAIVE_MISSION=<id>`, record decisions with `claive mission note`, and resume with `claive mission show ID` (its `Next:` line). Unattended server queue: `claive goal add` plus `claive serve`; answer parked goals with `claive goal answer ID --message ...`. Name a reusable worker with `claive alias set NAME ID` (`@NAME` then replaces the ID in worker commands). Workers can talk to each other: `claive conversation start @a @b --message-file /abs/topic.md --rounds 2 --timeout 300 --json` runs a bounded exchange between existing idle reusable workers and forwards each reply to the next (exit 3 = a question, 124/130 = inspect `pending_request.response_file` first; see `worker-orchestration`). Workers cannot launch workers or start conversations.
+Async options (host-neutral; full protocol in `/home/hamza/repo/claive/docs/harness-integration.md`). When several workers run at once, or a worker would outlive the shell session, use `claive open --detach` (reusable, returns at once) or `claive start`, then `claive wait ID1 ID2 --any --timeout S` (first worker to settle; exit 124 means still running), with `S` below the tool's time limit. At the start of each turn, and after context compaction, run `claive inbox --consumer codex` to see finished turns since the last read; `ASK` lines carry a worker's question (answer with `claive answer ID --message ...`; exit 3 means the same). Parallel staged work: `claive batch start /abs/plan.json`, then `claive batch wait ID`. Multi-turn efforts: `claive mission new --title T --goal-file F`, `export CLAIVE_MISSION=<id>`, record decisions with `claive mission note`, and resume with `claive mission show ID` (its `Next:` line). Unattended server queue: `claive goal add` plus `claive serve`; answer parked goals with `claive goal answer ID --message ...`. Name a reusable worker with `claive alias set NAME ID` (`@NAME` then replaces the ID in worker commands). Workers can talk to each other: `claive conversation start @a @b --message-file /abs/topic.md --rounds 2 --timeout 300 --json` runs a bounded exchange between existing idle reusable workers and forwards each reply to the next (exit 3 = a question, 124/130 = inspect `pending_request.response_file` first; see `claive-orchestration`). Workers cannot launch workers or start conversations.
 
 For cancellation use `claive cancel WORKER_ID`, then collect the managed session's final output. Forcibly killing a terminal can bypass supervisor cleanup; if interrupted, inspect the registry and stop any surviving worker. Use:
 

@@ -1,20 +1,20 @@
 ---
-name: worker-orchestration
-description: Orchestrate Muse and Pi worker agents from Claude Code or Codex using the claive-orch arbiter. A Muse implementer, a cross-family Pi critic, and verifier-gated refinement with checkpoint revert, escalating to one diverse second candidate only after a stall. Use when the user asks to orchestrate, delegate to workers or subagents, "use Muse/Pi", refine with a critic, or run several workers on different models; also for parallel fan-out of independent subtasks.
+name: claive-orchestration
+description: Operate Claive workers across Claude Code, Codex, and shell parents. Use plain claive for bounded delegation or fan-out; use claive-orch for authorized, verifier-gated Muse/Pi refinement. Covers worker lifecycle, engine selection, evidence, and integration.
 ---
 
-# Worker orchestration (Muse + Pi, arbiter-driven)
+# Claive orchestration — delegation and verified runs
 
-You are the **parent**: you plan, write task text, launch workers, and integrate.
-You do **not** decide acceptance, reverts, round limits, escalation, or selection.
-The deterministic arbiter `claive-orch` decides those. Ask it `claive-orch next RUN`,
-do exactly the one action it names, and report the result back. The tests decide
-correctness; no model opinion overrules them.
+You are the **parent**: own the task scope, worker assignment, final verification, and integration.
+For a verifier-gated `claive-orch` run, its deterministic arbiter decides round progression,
+reverts, escalation, and candidate selection. Follow `claive-orch next RUN`.
+For plain `claive` delegation, these arbiter rules **do not apply**: the parent judges
+the evidence and makes authorized decisions. A worker report alone is not proof.
 
-Background and evidence: `/home/hamza/repo/claive/docs/experiment/`
-(the paper *Refining Over Resampling*, arXiv 2608.05643, plus the design and
-`06-skill-driven-implementation.md`). Source and tests:
-`/home/hamza/repo/claive` (`bin/claive-orch`, `bin/claive`).
+Source and tests: `/home/hamza/repo/claive` (`bin/claive-orch`, `bin/claive`).
+The TTC experiment is deferred; its status note is
+`/home/hamza/repo/claive/docs/experiment/README.md` and is not part of the
+active workflow.
 
 ## When to use it, and when not
 
@@ -23,9 +23,9 @@ Background and evidence: `/home/hamza/repo/claive/docs/experiment/`
   costly.
 - **Do it yourself** when the task is small or tightly coupled to what you are
   doing, or when delegation overhead exceeds the work.
-- **No verifier?** Write one first: a small test or check script that fails now.
-  If that is impossible, use a plain `claive` fan-out (below) and review
-  the result yourself. Do not pretend a model review is verification.
+- **No suitable authorized verifier?** Use direct work or plain `claive` delegation
+  with focused evidence review. Do not introduce tests, scripts, or extra scope solely
+  to force a task through the arbiter. A model review is not executable verification.
 - **Measure before you fan out.** For performance, profiling, or debugging, get the
   baseline or the reproduced mismatch first, then launch lanes only at that measured
   hot spot. A lane report written before a baseline is a set of estimates; it cannot
@@ -43,6 +43,26 @@ Background and evidence: `/home/hamza/repo/claive/docs/experiment/`
   standing permission for Muse and Pi workers, so no per-task ask is needed
   there; elsewhere, ask first if the host requires it.
 
+## Worker manager versus verifier-driven arbiter
+
+`claive` supports `--engine muse`, `--engine pi`, `--engine claude`, and
+`--engine codex` for ordinary bounded worker tasks. The installed runtime pins
+Muse to `muse-spark-1.3-contributor`, Claude to `claude-haiku-5-5`, and Codex to
+`gpt-6-luna`; Pi uses `opencode2api` and its selected model. Claude and Codex
+worker engines were added after the original Muse/Pi skill workflow.
+
+`claive-orch` **still uses Muse/Pi** for its default implementer/critic ladder;
+its model choices and verifier protocol below do not automatically authorize
+Claude/Codex workers or change the general worker manager's engine limits.
+Choose ordinary delegation when the full verifier ladder adds no value.
+Engine-specific sandbox, settings, and option restrictions are documented in
+`~/repo/claive/README.md` and `docs/harness-integration.md`.
+
+Use `claive-routing-codex` for Codex's managed-terminal integration. Claude Code
+can follow this shared orchestration skill and its existing global CLAUDE.md
+policy directly; there is no separate Claude routing skill. The TTC experiment
+is deferred and has no active skill or protocol in this repository.
+
 ## Roles and roster
 
 | Role | Default | Why |
@@ -50,7 +70,7 @@ Background and evidence: `/home/hamza/repo/claive/docs/experiment/`
 | Implementer (lane a) | Muse `muse-spark-1.3-contributor` (engine `muse`, model pinned, effort `xhigh`; `max` for very complicated tasks) | Workhorse: follows instructions precisely |
 | Implementer fallback (Muse quota exhausted only) | Pi `muse-spark-1.3-contributor-free`, effort `max` | Same model family through the free gateway; pre-approved by the user |
 | Critic (read-only) | Pi, in this order: `mimo-v2.6-flash-free`, `big-pickle`, `space-bunny-free`; rarely `longcat-2.5-preview-free` | A different family sees different blind spots; Muse is a weak critic of itself |
-| Second candidate (lane b, arm D) | Pi, from the same preferred list, a family different from lane a and the last critic, **plus a different strategy** | Diversity must be deliberate (paper: resampling saturates) |
+| Second candidate (lane b, arm D) | Pi, from the same preferred list, a family different from lane a and the last critic, **plus a different strategy** | Diversity must be deliberate |
 | Reviewer (tie only) | Pi read-only, a different family from both lanes if possible | Called at most once |
 | Verifier | The verify command | Final judge |
 
@@ -115,7 +135,7 @@ Host specifics:
 - **Codex:** plain `exec_command`; prefer `open --detach` plus
   `wait --any --timeout` under the tool's time limit over holding shell
   sessions. Consumer `codex`. Codex caching and quota notes are in the
-  `subagent-routing` skill.
+  `claive-routing-codex` skill.
 - **Pi agent or shell:** the same commands through bash. Consumer
   `pi-<name>` or `shell`. Optional push: `CLAIVE_NOTIFY_CMD`, which gets the event JSON
   on stdin.
@@ -201,8 +221,7 @@ claive-orch init --repo /abs/repo --task-file /abs/task.md \
 #       passes, the run is invalid: fix the check.
 #    --category feeds `claive-orch stats` (how often each kind needs the ladder).
 #    Options: --post-pass-critic (arms B/D) adds one critic pass after the
-#    tests pass, looking for behaviour changes beyond the task (not allowed
-#    with --experiment).
+#    tests pass, looking for behaviour changes beyond the task.
 #    --setup 'ln -s "$CLAIVE_ORCH_REPO/node_modules" node_modules' runs in the
 #    base check and in every new lane worktree. Files it creates are lane-local:
 #    never committed into checkpoints and kept on revert (nor are __pycache__,
@@ -253,7 +272,8 @@ recovered. `claive-orch pick` uses it: each critic gets 3 scored uses first
 (cold start), then the best smoothed helpful rate wins with 20 % seeded
 exploration; breadth models rank by lane pass rate. Picks are recorded in the
 run (`pick.made`). They are suggestions inside the rules above: the arbiter
-still refuses a same-family critic. `pick` is refused in experiment runs.
+still refuses a same-family critic. The deferred TTC experiment mode is outside
+this active workflow.
 
 ### Rules the arbiter enforces (so you know why)
 

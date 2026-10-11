@@ -6,6 +6,11 @@ Written 2026-10-07 (IST) by Claude, in a cloud session that reached this machine
 
 Not to be confused with `.claude/HANDOFF.md`, which belongs to the earlier `stats`/`pick` feature work. I did not touch it.
 
+> **Historical handoff:** this file predates the current skill migration. The TTC
+> experiment materials described below were removed and deferred; the authoritative
+> status is [`docs/experiment/README.md`](../docs/experiment/README.md). Recheck
+> repository state before following any older path or staging instruction in this file.
+
 ---
 
 ## 0. Build session update (2026-10-07, after the build)
@@ -52,7 +57,9 @@ Instrument printout on warm paper (D8). Ink plus two data colours only: green fo
 2. Confirm the copyright holder name on `LICENSE`.
 3. **Public-readiness audit of the repo** (last bullet of section 10) is still not done, on purpose. Nothing was edited outside `site/`.
 4. **`site/HANDOFF.md` itself names `/home/hamza/...` paths, the sslip.io gateway, the FMGE/LMS site and the private calibration project.** Delete it or scrub it before the repo goes public. `index.html` and `PRODUCT.md` are clean.
-5. Nothing is committed. `docs/experiment/*` is another agent's work in progress; do not stage it together with the site.
+5. Nothing was committed by that build session. The TTC experiment materials it
+   described were later removed and deferred; do not restore them as part of a
+   site-only change.
 6. When the gates settle, "The experiment" can gain thresholds and counts. The page currently says the bars are not published yet; change that sentence then. The footer's "Last updated 2026-10-07" is hard-coded.
 7. Ledger row 20 (free-tier models can rate-limit or disappear) is not on the page. It is an honesty point worth adding to "Cheaper agents, same recipe". Rows 16 and 19 are also unused.
 8. Optional: publish the file as an Artifact for a private preview link, install impeccable under `~/.claude/skills/` and run `document` and the finish review, or let impeccable's `detect` run once.

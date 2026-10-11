@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Install the worker tools, Python package, and skills, backing up changed destinations.
-# Claude Code gets its own subagent-routing variant (skills/claude-subagent-routing).
+# Claude Code uses the shared claive-orchestration skill; Codex has a separate routing adapter.
+# TTC experiments are deferred and are not installed by this script.
 set -euo pipefail
 
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 bin_dir=${CLAIVE_BIN_DIR:-$HOME/.local/bin}
 codex_skills=${CODEX_HOME:-$HOME/.codex}/skills
 claude_skills=${CLAUDE_HOME:-$HOME/.claude}/skills
-skill_dir=$codex_skills/subagent-routing
+skill_dir=$codex_skills/claive-routing-codex
 backup_base=${XDG_STATE_HOME:-$HOME/.local/state}/claive-install/backups
 package_source=$source_dir/bin/claivelib
 package_target=$bin_dir/claivelib
@@ -27,7 +28,7 @@ done
 
 sources=("$source_dir/bin/claive" "$source_dir/bin/claive-worker"
          "$source_dir/bin/claive-codex" "$source_dir/bin/claive-orch"
-         "$source_dir/bin/claive-memcap" "$source_dir/skills/subagent-routing/SKILL.md")
+         "$source_dir/bin/claive-memcap" "$source_dir/skills/claive-routing-codex/SKILL.md")
 targets=("$bin_dir/claive" "$bin_dir/claive-worker"
          "$bin_dir/claive-codex" "$bin_dir/claive-orch"
          "$bin_dir/claive-memcap" "$skill_dir/SKILL.md")
@@ -36,16 +37,13 @@ modes=(755 755 755 755 755 644)
 # Pi workers read the same directory; claive's recursion guard stops them launching workers.
 skill_roots=("$codex_skills" "$claude_skills")
 ! "$with_pi" || skill_roots+=("$pi_skills")
-for skill in worker-orchestration ttc-experiment; do
+for skill in claive-orchestration; do
   for skills_root in "${skill_roots[@]}"; do
     sources+=("$source_dir/skills/$skill/SKILL.md")
     targets+=("$skills_root/$skill/SKILL.md")
     modes+=(644)
   done
 done
-sources+=("$source_dir/skills/claude-subagent-routing/SKILL.md")
-targets+=("$claude_skills/subagent-routing/SKILL.md")
-modes+=(644)
 
 [[ -d $package_source ]] || { echo "Missing source package: $package_source" >&2; exit 1; }
 if [[ -L $package_target || ( -e $package_target && ! -d $package_target ) ]]; then
@@ -54,9 +52,17 @@ if [[ -L $package_target || ( -e $package_target && ! -d $package_target ) ]]; t
 fi
 for index in "${!sources[@]}"; do
   [[ -f ${sources[index]} ]] || { echo "Missing source: ${sources[index]}" >&2; exit 1; }
+  source_file=${sources[index]}
   target=${targets[index]}
-  if [[ -L $target || ( -e $target && ! -f $target ) ]]; then
-    echo "Refusing to replace a symlink or non-file: $target" >&2
+  if [[ -L $target || -L $(dirname -- "$target") ]]; then
+    # Skillshare links the SKILL DIRECTORY, not SKILL.md. Never write through it.
+    # The repo and managed source must match before the rest of the installer runs.
+    if [[ ! -f $target ]] || ! cmp -s -- "$source_file" "$target"; then
+      echo "Managed skill link differs or is broken: $target (update Skillshare source and sync)" >&2
+      exit 1
+    fi
+  elif [[ -e $target && ! -f $target ]]; then
+    echo "Refusing to replace a non-file: $target" >&2
     exit 1
   fi
 done
@@ -96,6 +102,10 @@ fi
 for index in "${!sources[@]}"; do
   source_file=${sources[index]}
   target=${targets[index]}
+  if [[ -L $target || -L $(dirname -- "$target") ]]; then
+    echo "Already current (Skillshare-managed link): $target"
+    continue
+  fi
   if [[ -f $target ]] && cmp -s -- "$source_file" "$target" &&
      [[ $(stat -c '%a' -- "$target") == "${modes[index]}" ]]; then
     echo "Already current: $target"

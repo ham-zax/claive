@@ -753,14 +753,16 @@ class WorkerChecks(unittest.TestCase):
         self.assertEqual(launcher.returncode, 0, launcher.stderr)
         self.assertIn("--engine", launcher.stdout)
         self.assertEqual(global_file.read_text(), "Existing personal instructions.\n")
-        self.assertEqual(claude_routing.read_bytes(),
-                         (REPO_ROOT / "skills/claude-subagent-routing/SKILL.md").read_bytes())
-        saved = list((state_home / "claive-install/backups").glob("*/*subagent-routing.SKILL.md"))
-        self.assertEqual([path.read_text() for path in saved], ["Claude's own routing skill.\n"])
+        # A user's former Claude routing skill is not overwritten or reintroduced.
+        self.assertEqual(claude_routing.read_text(), "Claude's own routing skill.\n")
+        self.assertEqual(list((state_home / "claive-install/backups").glob("*/*subagent-routing.SKILL.md")), [])
         for home in (codex_home, claude_home):
-            for skill in ("worker-orchestration", "ttc-experiment"):
-                self.assertEqual((home / "skills" / skill / "SKILL.md").read_bytes(),
-                                 (REPO_ROOT / "skills" / skill / "SKILL.md").read_bytes())
+            skill = "claive-orchestration"
+            self.assertEqual((home / "skills" / skill / "SKILL.md").read_bytes(),
+                             (REPO_ROOT / "skills" / skill / "SKILL.md").read_bytes())
+            self.assertFalse((home / "skills/ttc-experiment").exists())
+        self.assertEqual((codex_home / "skills/claive-routing-codex/SKILL.md").read_bytes(),
+                         (REPO_ROOT / "skills/claive-routing-codex/SKILL.md").read_bytes())
         arms = subprocess.run([str(bin_dir / "claive-orch"), "arms"], env=env, cwd=outside,
                               capture_output=True, text=True, timeout=12)
         self.assertEqual(arms.returncode, 0, arms.stderr)

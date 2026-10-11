@@ -3,7 +3,7 @@
 Models propose; this code decides. A frontier parent (Claude Code or Codex) launches
 workers through claive and reports their results here. This module owns the run
 history, verification, checkpoints, budgets, and the single legal next action.
-See docs/experiment/06-skill-driven-implementation.md.
+See README.md and skills/claive-orchestration/SKILL.md for the active workflow.
 """
 
 import argparse

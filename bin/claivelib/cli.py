@@ -1154,8 +1154,10 @@ def report(state):
         print(f"Provider override: {clean(state['provider_base_url'])} (claive config providers.opencode2api)")
     if state.get("error"):
         print(clean(state["error"]))
-    evidence = acceptance.view(path, state)
+    evidence = state.get("evidence") or acceptance.view(path, state)
     print(f"Verification: {evidence['verification']['status']} | Acceptance: {evidence['acceptance']['status']}")
+    if evidence.get("freshness"):
+        print(f"Evidence freshness: {evidence['freshness']['status']} ({clean(evidence['freshness']['reason'])})")
     outside = evidence.get("execution", {}).get("ownership_violations", [])
     if evidence.get("execution", {}).get("ownership_validation") == "blocked":
         print("Ownership validation blocked: " + clean(evidence["execution"].get("reason", "unknown")))
@@ -1747,6 +1749,8 @@ def main(launcher=None):
             time.sleep(args.interval)
     elif args.action == "show":
         state = load(job_path(args.id))
+        if state["evidence"]["acceptance"]["status"] == "accepted":
+            state["evidence"]["freshness"] = acceptance.check_freshness(job_path(args.id), state, state["evidence"])
         if state.get("reusable"):
             state["next_turn_defaults"] = json.loads((job_path(args.id) / "policy.json").read_text())
         print(json.dumps(state, indent=2)) if args.json else report(state)

@@ -20,6 +20,10 @@ so the job's session ID is replaced by it once the thread starts. Workers defaul
 use the read-only sandbox, writers `workspace-write` with approvals off (`CLAIVE_CODEX_YOLO=1` replaces writers' sandbox with `--dangerously-bypass-approvals-and-sandbox`; read-only workers are unaffected). `--max-model-steps`, `--output-schema` and
 worktree isolation are unsupported.
 
+Codex workers with `--enable-steering` use a separate App Server transport for
+turn-bound in-flight instructions; see [steering.md](docs/steering.md). Ordinary
+Codex exec launches are unchanged.
+
 ## Native Codex progress
 
 The default integration uses Codex's existing background-terminal indicator and `/ps`. The agent runs `claive-worker` through its managed shell tool with a short yield, retains the returned terminal session ID, and collects the final output. The launcher stays alive between related turns until explicitly closed, so Codex can track it while the parent continues working. The worker also appears in the optional registry dashboard.

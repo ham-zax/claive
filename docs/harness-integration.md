@@ -219,7 +219,13 @@ claive open --workspace /abs/repo --prompt-file /abs/task.md \
 The checks file is an array of objects such as
 `{"name":"analyzer","command":["systemd-analyze","verify","service.timer"],"required":true,"timeout":60}`.
 Commands use argv arrays, run from fresh scratch copies, and record output,
-exit code, environment, and `passed`, `failed`, or `blocked` outcomes. The initial
+exit code, environment, and `passed`, `failed`, or `blocked` outcomes.
+For pytest checks, add `"pytest":{"min_passed":1,"max_skipped":0}` to require
+a real passing summary and reject silent skips even when pytest exits zero.
+Verifier scratch copies omit dependency/cache/build directories, reject symlinks
+that escape the copy, and capture bounded output tails. Checks requiring Git
+metadata must use an explicit external verification environment, since scratch
+copies do not include `.git`. The initial
 state and checks not executed are `not_run`. The Git workspace snapshot includes
 tracked files, deletions, and all untracked files, including ignored build output.
 It compares content against the dirty baseline rather than trusting a file list
@@ -249,6 +255,8 @@ stale. Parent-only commands reject recursive worker invocation. Evidence is
 retained under `evidence/turn-NNNN/`; execution status and normal worker exit
 codes are unchanged.
 
+`show --json` performs an on-demand workspace freshness check, exposing `fresh`,
+`stale`, or `unknown` independently of the historical acceptance record.
 `show --json` exposes queue depth and pending request identifiers separately from
 current phase and last observed activity. Cumulative warnings remain available;
 current-turn/previous-turn counts and structured details preserve turn meaning.
@@ -265,7 +273,7 @@ project's `install.sh`, which backs up changed destinations and copies the whole
 package. User config opt-in for Codex does not enable rules: `--ignore-rules`
 remains supplied. Missing provenance/source is reported explicitly.
 
-For genuine steering at the next Pi model boundary, see [steering.md](steering.md).
+For genuine steering at the next Pi/Codex model boundary, see [steering.md](steering.md).
 Use `install.sh --runtime-only` when syncing just the runtime; Skillshare owns skills.
 
 The installer backs up and migrates symlinks to this checkout's own command

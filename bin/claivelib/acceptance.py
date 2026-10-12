@@ -5,6 +5,7 @@ from functools import wraps
 import hashlib
 import json
 import os
+import re
 from pathlib import Path, PurePosixPath
 import shutil
 import signal
@@ -54,6 +55,13 @@ def manifest(filename):
             raise ValueError("check command must be a nonempty argv list")
         if not isinstance(check.get("required", True), bool):
             raise ValueError("check required must be boolean")
+        pytest = check.get("pytest")
+        if pytest is not None:
+            if not isinstance(pytest, dict) or set(pytest) - {"min_passed", "max_skipped"}:
+                raise ValueError("pytest check settings must contain only min_passed/max_skipped")
+            for key, number in pytest.items():
+                if isinstance(number, bool) or not isinstance(number, int) or number < 0:
+                    raise ValueError(f"pytest {key} must be a nonnegative integer")
         timeout = check.get("timeout", 300)
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 3600:
             raise ValueError("check timeout must be between 0 and 3600 seconds")
@@ -141,6 +149,41 @@ def finish(path, state):
     atomic(target / "execution.json", record)
 
 
+def check_freshness(path, state, evidence=None):
+    """Explicit on-demand freshness check; never hash the workspace for watch/list."""
+    data = evidence if evidence is not None else view(path, state)
+    execution = data.get("execution") or {}
+    after = directory(path, state) / "after.json"
+    if not after.exists():
+        return {"status": "unknown", "reason": "no workspace snapshot was retained"}
+    try:
+        expected = json.loads(after.read_text())
+        actual = snapshot(execution.get("workspace") or state.get("actual_workspace") or state["workspace"])
+        return {"status": "fresh" if actual == expected else "stale",
+                "reason": "workspace matches completed turn" if actual == expected else "workspace changed since completion"}
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        return {"status": "unknown", "reason": str(error)}
+
+
+def pytest_outcome(check, output):
+    """A zero exit code alone does not establish skipped-test acceptance."""
+    settings = check.get("pytest")
+    if settings is None:
+        return None
+    # Parse the terminal summary rather than relying on a green process return.
+    summaries = [line for line in output.splitlines() if re.search(r"\b\d+ passed\b", line)]
+    if not summaries:
+        return ("blocked", "pytest pass summary unavailable")
+    summary = summaries[-1]
+    passed = re.search(r"(\d+) passed", summary)
+    skipped = re.search(r"(\d+) skipped", summary)
+    count = int(passed.group(1)) if passed else 0
+    ignored = int(skipped.group(1)) if skipped else 0
+    if count < settings.get("min_passed", 1) or ignored > settings.get("max_skipped", 0):
+        return ("failed", f"pytest passed {count}, skipped {ignored}; expected >= {settings.get('min_passed', 1)} passed, <= {settings.get('max_skipped', 0)} skipped")
+    return None
+
+
 def view(path, state):
     target = directory(path, state)
     data = {}
@@ -206,23 +249,40 @@ def verify(path, state, name=None, status=None, reason=None, environment=None):
             try:
                 with tempfile.TemporaryDirectory(prefix="claive-verify-") as scratch:
                     copy = Path(scratch) / "workspace"
-                    shutil.copytree(workspace, copy, symlinks=False, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+                    ignored = shutil.ignore_patterns(".git", "__pycache__", ".venv", "venv", "node_modules",
+                                                     ".tox", ".nox", ".pytest_cache", ".mypy_cache",
+                                                     ".ruff_cache", "build", "dist")
+                    shutil.copytree(workspace, copy, symlinks=True, ignore=ignored)
+                    # Never dereference a source symlink into the original checkout or an external path.
+                    # Relative links internal to the scratch copy remain functional.
+                    for link in copy.rglob("*"):
+                        if link.is_symlink() and not (link.parent / os.readlink(link)).resolve().is_relative_to(copy.resolve()):
+                            raise ValueError(f"unsafe verification symlink: {link.relative_to(copy)}")
                     record["environment"] = {"workspace": workspace, "scratch": str(copy), "platform": os.uname().sysname}
-                    child = subprocess.Popen(check["command"], cwd=copy, stdout=subprocess.PIPE,
-                                             stderr=subprocess.PIPE, text=True, start_new_session=True,
-                                             stdin=subprocess.DEVNULL)
-                    try:
-                        output, errors = child.communicate(timeout=check.get("timeout", 300))
-                    except subprocess.TimeoutExpired:
+                    with tempfile.TemporaryFile() as output_log, tempfile.TemporaryFile() as error_log:
+                        child = subprocess.Popen(check["command"], cwd=copy, stdout=output_log,
+                                                 stderr=error_log, start_new_session=True, stdin=subprocess.DEVNULL)
                         try:
-                            os.killpg(child.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                        child.communicate()
-                        raise
+                            child.wait(timeout=check.get("timeout", 300))
+                        except subprocess.TimeoutExpired:
+                            try:
+                                os.killpg(child.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                            child.wait()
+                            raise
+                        def tail(stream):
+                            stream.seek(0, os.SEEK_END)
+                            stream.seek(max(0, stream.tell() - 8000))
+                            return stream.read().decode("utf-8", errors="replace")
+                        output, errors = tail(output_log), tail(error_log)
                     record.update(status="passed" if child.returncode == 0 else "failed", exit_code=child.returncode,
-                                  stdout=output[-8000:], stderr=errors[-8000:], reason=f"exit {child.returncode}")
-            except (OSError, subprocess.TimeoutExpired) as error:
+                                  stdout=output, stderr=errors, reason=f"exit {child.returncode}")
+                    if child.returncode == 0:
+                        verdict = pytest_outcome(check, output + "\n" + errors)
+                        if verdict:
+                            record.update(status=verdict[0], reason=verdict[1])
+            except (OSError, ValueError, subprocess.TimeoutExpired) as error:
                 record.update(status="blocked", reason=str(error), environment=record.get("environment", {"workspace": workspace}))
             records[check["name"]] = record
     if after_file.exists() and snapshot(workspace) != json.loads(after_file.read_text()):

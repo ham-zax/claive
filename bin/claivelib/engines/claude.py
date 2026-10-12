@@ -116,25 +116,34 @@ class ClaudeEngine(WorkerEngine):
             message = event.get("message")
             blocks = message.get("content") if isinstance(message, dict) else None
             if isinstance(blocks, list):
+                result = []
                 for block in blocks:
                     if not isinstance(block, dict):
                         continue
                     if block.get("type") == "tool_use":
-                        return [{"type": "tool_started", "native_kind": kind, "tool": block.get("name", "tool")}]
-                    if block.get("type") == "text":
+                        result.append({"type": "tool_started", "native_kind": kind,
+                                       "tool": block.get("name", "tool"), "tool_id": block.get("id")})
+                    elif block.get("type") == "text":
                         self._last_text = block.get("text", "")
-                        return [{"type": "output_delta", "native_kind": kind}]
-                return [{"type": "model_step", "native_kind": kind}]
+                        result.append({"type": "output_delta", "native_kind": kind})
+                return result or [{"type": "model_step", "native_kind": kind}]
         elif kind == "user":
             message = event.get("message")
             blocks = message.get("content") if isinstance(message, dict) else None
+            result = []
             for block in blocks if isinstance(blocks, list) else []:
-                if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error"):
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                result.append({"type": "tool_completed", "native_kind": kind, "tool_id": block.get("tool_use_id")})
+                if block.get("is_error"):
                     content = block.get("content")
                     reason = content if isinstance(content, str) else " ".join(
                         part.get("text", "") for part in content or []
                         if isinstance(part, dict) and part.get("type") == "text")
-                    return [{"type": "task_warning", "native_kind": kind, "reason": reason}]
+                    result.append({"type": "task_warning", "native_kind": kind, "reason": reason,
+                                   "tool_id": block.get("tool_use_id")})
+            if result:
+                return result
         elif kind == "rate_limit_event":
             info = event.get("rate_limit_info")
             if isinstance(info, dict) and info.get("status") == "rejected":

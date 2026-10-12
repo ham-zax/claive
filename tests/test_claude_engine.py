@@ -103,7 +103,7 @@ class ClaudeChecks(unittest.TestCase):
         ]
         normalized = [item for event in events for item in self.engine.normalize_event(event)]
         self.assertEqual([item["type"] for item in normalized],
-                         ["activity", "tool_started", "task_warning", "output_delta", "terminal_completed"])
+                         ["activity", "tool_started", "tool_completed", "task_warning", "output_delta", "terminal_completed"])
         self.assertEqual(normalized[-1]["text"], "done")
         failed = self.engine.normalize_event({"type": "result", "subtype": "error_max_turns", "is_error": True})
         self.assertEqual(failed[0]["type"], "terminal_failed")

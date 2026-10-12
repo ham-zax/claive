@@ -104,5 +104,8 @@ def complete(path, state, request_id=None, error=None, rejection_code=1):
                         report_state=state.get("report_state"), report=state.get("report"),
                         report_contract=bool(state.get("report_contract")),
                         needs_parent=state.get("needs_parent"), failure_kind=state.get("failure_kind"),
-                        error=state.get("error"))
+                        error=state.get("error"),
+                        execution_status=state["status"], evidence=cli.acceptance.view(path, state),
+                        turn_task_failures=state.get("turn_task_failures"),
+                        cumulative_task_failures=state.get("task_failures"))
     cli.save(response_file, response)

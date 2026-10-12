@@ -201,3 +201,73 @@ Claive Codex workers default to `--ignore-user-config` so user-level tools canno
   `CLAIVE_WORKER_ID` set.
 - **Shell or CI**: `claive batch start plan.json && claive batch wait ID`, and
   branch on the exit code.
+
+## Execution, verification, and parent acceptance
+
+A `completed` worker executed normally. Each new turn starts with verification
+`not_run` and acceptance `pending`. A worker's `claive-report` remains its own
+claim; it cannot create parent verification or acceptance evidence.
+
+Declare checks and ownership before launching:
+
+```sh
+claive open --workspace /abs/repo --prompt-file /abs/task.md \
+  --worktree --owned-path 'src/*' --owned-path 'tests/*' \
+  --checks-file /abs/checks.json
+```
+
+The checks file is an array of objects such as
+`{"name":"analyzer","command":["systemd-analyze","verify","service.timer"],"required":true,"timeout":60}`.
+Commands use argv arrays, run from fresh scratch copies, and record output,
+exit code, environment, and `passed`, `failed`, or `blocked` outcomes. The initial
+state and checks not executed are `not_run`. The Git workspace snapshot includes
+tracked files, deletions, and all untracked files, including ignored build output.
+It compares content against the dirty baseline rather than trusting a file list
+in the worker's report. Ownership validation is retrospective; use isolated
+worktrees for writers and the engine sandbox for filesystem restrictions.
+Concurrent writers with declared ownership must use separate worktrees.
+Managed worktrees with a verification/ownership contract are retained for the
+parent to verify and integrate; remove them after that workflow ends.
+
+```sh
+claive verify ID
+claive verify ID --check analyzer --status blocked \
+  --reason 'systemd analyzer unavailable' --environment 'ARM test host'
+claive accept ID
+claive accept ID --exception 'Parent approved alternate analyzer evidence'
+claive accept ID --reject --reason 'Required regression failed'
+claive scope ID --owned-path 'src/*' --owned-path MANIFEST.in \
+  --reason 'Packaging needs the manifest'
+```
+
+A blocked/unrun mandatory check prevents acceptance unless the parent records
+an explicit exception. Failed mandatory checks and ownership violations cannot
+be bypassed with that exception; ownership requires an explicit scope change.
+Acceptance is bound to the settled turn. New turns start pending, verification
+changes clear prior acceptance, and later workspace edits make the evidence
+stale. Parent-only commands reject recursive worker invocation. Evidence is
+retained under `evidence/turn-NNNN/`; execution status and normal worker exit
+codes are unchanged.
+
+`show --json` exposes queue depth and pending request identifiers separately from
+current phase and last observed activity. Cumulative warnings remain available;
+current-turn/previous-turn counts and structured details preserve turn meaning.
+`usage --json` includes recent per-call input/cache counters and input growth.
+Those measurements describe provider requests, not the current context-window
+size; cache reuse alone does not establish efficiency.
+
+## Runtime installation checks
+
+`claive runtime --source-dir /abs/claive --json` reports installation provenance,
+content drift, and smoke checks; detected drift exits nonzero. `doctor` also
+shows these checks as advisory warnings. Synchronize a stale runtime with this
+project's `install.sh`, which backs up changed destinations and copies the whole
+package. User config opt-in for Codex does not enable rules: `--ignore-rules`
+remains supplied. Missing provenance/source is reported explicitly.
+
+For genuine steering at the next Pi model boundary, see [steering.md](steering.md).
+Use `install.sh --runtime-only` when syncing just the runtime; Skillshare owns skills.
+
+The installer backs up and migrates symlinks to this checkout's own command
+launchers into installed launchers, so their imports use the deployed package.
+Skillshare links and unrelated launcher links are preserved.

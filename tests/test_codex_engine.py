@@ -115,6 +115,31 @@ class CodexChecks(unittest.TestCase):
                 os.environ["CLAIVE_CODEX_YOLO"] = value
                 self.assertEqual(self.engine.build_command(self.request()), expected)
 
+    def test_user_config_opt_in_keeps_ignore_rules(self):
+        previous = os.environ.get("CLAIVE_CODEX_USE_USER_CONFIG")
+        try:
+            os.environ.pop("CLAIVE_CODEX_USE_USER_CONFIG", None)
+            default = self.engine.build_command(self.request())
+            self.assertIn("--ignore-user-config", default)
+            self.assertIn("--ignore-rules", default)
+            for value in ("1", "true", "yes", "YES", "True"):
+                with self.subTest(value=value):
+                    os.environ["CLAIVE_CODEX_USE_USER_CONFIG"] = value
+                    command = self.engine.build_command(self.request())
+                    self.assertNotIn("--ignore-user-config", command)
+                    self.assertIn("--ignore-rules", command)
+            for value in ("", "0", "no", "off"):
+                with self.subTest(value=value):
+                    os.environ["CLAIVE_CODEX_USE_USER_CONFIG"] = value
+                    command = self.engine.build_command(self.request())
+                    self.assertIn("--ignore-user-config", command)
+                    self.assertIn("--ignore-rules", command)
+        finally:
+            if previous is None:
+                os.environ.pop("CLAIVE_CODEX_USE_USER_CONFIG", None)
+            else:
+                os.environ["CLAIVE_CODEX_USE_USER_CONFIG"] = previous
+
     def assert_yolo_swaps_the_sandbox_overrides(self, shape):
         plain = self.engine.build_command(self.request())
         start = plain.index('sandbox_mode="workspace-write"') - 1

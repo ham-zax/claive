@@ -7,7 +7,7 @@ import tempfile
 import time
 
 from claivelib import provider
-from claivelib.engine import WorkerEngine
+from claivelib.engine import SteeringCapability, WorkerEngine
 from claivelib.state import launch_config, session_id
 
 STALE_LOCK_SECONDS = 10
@@ -21,6 +21,16 @@ class PiEngine(WorkerEngine):
     name = "pi"
     default_reasoning_effort = "max"  # free models; Pi clamps to each model's highest level
     efforts = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+    def steering_capability(self):
+        return SteeringCapability(True, "pi-rpc", notes=(
+            "Requires --enable-steering; input is queued at the next model boundary.",
+            "Provider acknowledgement does not prove the model consumed the input.",))
+
+    def initial_input(self, request):
+        if not request.steering:
+            return None
+        return json.dumps({"type": "prompt", "id": "claive-initial", "message": Path(request.prompt_file).read_text()}) + "\n"
 
     def __init__(self):
         self._last_assistant = None
@@ -88,6 +98,7 @@ class PiEngine(WorkerEngine):
         self._selected_model = options.get("model") if options.get("remember_model") else None
         launch = {
             "binary": default_binary(),
+            "steering": bool(options.get("steering")),
             "provider": options.get("provider") or "opencode2api",
             "model": options.get("model") or remembered or "muse-spark-1.3-contributor-free",
             "read_only": bool(options.get("read_only")),
@@ -146,7 +157,7 @@ class PiEngine(WorkerEngine):
     def build_command(self, request):
         self.validate_turn(request)
         command = [
-            request.binary, "--mode", "json", "--print", "--offline",
+            request.binary, "--mode", "rpc" if request.steering else "json", *([] if request.steering else ["--print"]), "--offline",
             "--no-extensions", "--no-approve", "--provider", request.provider,
             "--model", request.model, "--thinking", request.reasoning_effort,
             "--tools", "read,grep,find,ls" if request.read_only else "read,bash,edit,write,grep,find,ls",
@@ -160,7 +171,8 @@ class PiEngine(WorkerEngine):
         else:
             command += ["--no-session"]
         # Pi expands @files after '--'; no shell interpolation or prompt argv copying.
-        command += ["--", "@" + request.prompt_file]
+        if not request.steering:
+            command += ["--", "@" + request.prompt_file]
         # Remember only an explicit selection after all command checks pass.
         # Follow-ups keep their original launch model without resetting the default.
         if self._selected_model is not None:
@@ -173,6 +185,13 @@ class PiEngine(WorkerEngine):
         if not isinstance(kind, str):
             raise ValueError("Pi event has no string type")
         activity = {"type": "activity", "native_kind": kind}
+        if kind == "response":
+            if event.get("id") == "claive-initial" and event.get("success") is False:
+                return [{"type": "terminal_failed", "native_kind": kind, "terminal": "failed",
+                         "reason": event.get("error", "Pi prompt rejected"), "text": ""}]
+            return [{"type": "control_response", "native_kind": kind, "id": event.get("id"),
+                     "command": event.get("command"), "success": event.get("success"),
+                     "data": event.get("data"), "error": event.get("error")}]
         if kind in {"session", "agent_start"}:
             self._last_assistant = None
         elif kind == "message_start":
@@ -188,13 +207,16 @@ class PiEngine(WorkerEngine):
             if isinstance(message, dict) and message.get("role") == "assistant":
                 self._last_assistant = message
         elif kind == "tool_execution_start":
-            return [{"type": "tool_started", "native_kind": kind, "tool": event.get("toolName", "tool")}]
+            return [{"type": "tool_started", "native_kind": kind, "tool": event.get("toolName", "tool"), "tool_id": event.get("toolCallId")}]
         elif kind == "tool_execution_end" and event.get("isError"):
             result = event.get("result") if isinstance(event.get("result"), dict) else {}
             reason = " ".join(part.get("text", "") for part in result.get("content", [])
                               if isinstance(part, dict) and part.get("type") == "text")
             return [{"type": "task_warning", "native_kind": kind,
-                     "tool": event.get("toolName", "tool"), "reason": reason}]
+                     "tool": event.get("toolName", "tool"), "tool_id": event.get("toolCallId"), "reason": reason,
+                     "command": (event.get("args") or {}).get("command") if isinstance(event.get("args"), dict) else None}]
+        elif kind == "tool_execution_end":
+            return [{"type": "tool_completed", "native_kind": kind, "tool": event.get("toolName", "tool"), "tool_id": event.get("toolCallId")}]
         elif kind == "agent_settled":
             message = self._last_assistant or {}
             stop = message.get("stopReason")

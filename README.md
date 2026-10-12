@@ -16,7 +16,7 @@ read-only workers get `Read,Grep,Glob`.
 Codex is available with `--engine codex` (`codex exec --json`, binary from `CODEX_WORKER_BINARY` or the nvm install).
 It is strictly locked to `gpt-6-luna` at reasoning effort `max`; any other `--model` or `--reasoning-effort` is refused.
 Compaction is left at Codex's own behaviour. Codex chooses its own thread ID,
-so the job's session ID is replaced by it once the thread starts. User config and rules are ignored; read-only workers
+so the job's session ID is replaced by it once the thread starts. Workers default to `--ignore-user-config` so user-level tools cannot unexpectedly enter an isolated worker; set `CLAIVE_CODEX_USE_USER_CONFIG=1` only for a deployment with pre-registered Codex MCP servers and installed user skills to omit that flag while retaining `--ignore-rules`. Read-only workers
 use the read-only sandbox, writers `workspace-write` with approvals off (`CLAIVE_CODEX_YOLO=1` replaces writers' sandbox with `--dangerously-bypass-approvals-and-sandbox`; read-only workers are unaffected). `--max-model-steps`, `--output-schema` and
 worktree isolation are unsupported.
 
@@ -302,9 +302,10 @@ Edit this repository, copy the two active `SKILL.md` files into the matching Ski
 ./install.sh --dry-run
 ./install.sh
 ./install.sh --pi   # also install host-neutral skills for a Pi parent agent
+./install.sh --runtime-only   # only package, launchers, and provenance; skips every skill check/write
 ```
 
-Changed CLI destination files are backed up under `~/.local/state/claive-install/backups`. The installer refreshes CLI tools and `claivelib`, installs `claive-orchestration` for Claude Code/Codex (and optionally Pi), and installs `claive-routing-codex` for Codex only. It does not install the removed Claude routing or deferred TTC experiment. Skillshare-managed symlinks are left intact if their content matches the repo source; divergent or broken symlinks are refused with an instruction to sync Skillshare. Existing user-installed skill directories are preserved; remove obsolete Claive-owned entries through the Skillshare migration when you are ready. In this machine's setup Skillshare, not this installer, owns skill distribution. The installer does not overwrite global instructions or install reference relays. Custom destinations can be set with `CLAIVE_BIN_DIR`, `CODEX_HOME`, `CLAUDE_HOME`, and `XDG_STATE_HOME`.
+Changed CLI destination files are backed up under `~/.local/state/claive-install/backups`. The installer refreshes CLI tools and `claivelib`, records source revision/path/content fingerprints in `claivelib/provenance.json` (`bin/claivelib/runtime.py` exposes read-only source-to-installed drift and smoke checks for `claive doctor` integration), installs `claive-orchestration` for Claude Code/Codex (and optionally Pi), and installs `claive-routing-codex` for Codex only. It does not install the removed Claude routing or deferred TTC experiment. Skillshare-managed symlinks are left intact if their content matches the repo source; divergent or broken symlinks are refused with an instruction to sync Skillshare. `--runtime-only` (combinable with `--dry-run`) syncs only the package, the five launchers, and the provenance record while skipping every skill check and write, so a divergent Skillshare-managed skill link never blocks a runtime repair and skill destinations are left untouched. Existing user-installed skill directories are preserved; remove obsolete Claive-owned entries through the Skillshare migration when you are ready. In this machine's setup Skillshare, not this installer, owns skill distribution. The installer does not overwrite global instructions or install reference relays. Custom destinations can be set with `CLAIVE_BIN_DIR`, `CODEX_HOME`, `CLAUDE_HOME`, and `XDG_STATE_HOME`.
 
 Hamza's Muse settings (`~/.config/muse/settings.json`) also select `muse-spark-1.3-contributor` with `high` reasoning. The installer preserves those settings; the launcher pins its own model and effort independently.
 

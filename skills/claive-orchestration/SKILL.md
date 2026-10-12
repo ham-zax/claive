@@ -11,10 +11,10 @@ reverts, escalation, and candidate selection. Follow `claive-orch next RUN`.
 For plain `claive` delegation, these arbiter rules **do not apply**: the parent judges
 the evidence and makes authorized decisions. A worker report alone is not proof.
 
-Source and tests: `/home/hamza/repo/claive` (`bin/claive-orch`, `bin/claive`).
-The TTC experiment is deferred; its status note is
-`/home/hamza/repo/claive/docs/experiment/README.md` and is not part of the
-active workflow.
+Source and tests: the Claive checkout (`/home/hamza/repo/claive` on the laptop,
+`/home/ubuntu/repo/claive` on ARM; `bin/claive-orch`, `bin/claive`).
+The TTC experiment is deferred; `docs/experiment/README.md` is its status note,
+not part of the active workflow.
 
 ## When to use it, and when not
 
@@ -132,10 +132,10 @@ Host specifics:
   `claude`. Output of a `run_in_background` call goes to its task file; read that file,
   since a later foreground command will not show it. Foreground `sleep` is blocked by
   the harness: wait with the command above, or use Monitor, not a sleep loop.
-- **Codex:** plain `exec_command`; prefer `open --detach` plus
-  `wait --any --timeout` under the tool's time limit over holding shell
-  sessions. Consumer `codex`. Codex caching and quota notes are in the
-  `claive-routing-codex` skill.
+- **Codex:** follow `claive-routing-codex` for launch mechanics. Prefer
+  `claive-worker` in a managed shell with a short initial yield; retain both
+  worker ID and shell session ID. Detached launches remain available when
+  the task needs them. Consumer `codex`.
 - **Pi agent or shell:** the same commands through bash. Consumer
   `pi-<name>` or `shell`. Optional push: `CLAIVE_NOTIFY_CMD`, which gets the event JSON
   on stdin.
@@ -144,7 +144,72 @@ Common commands: `claive show ID --json`, `logs ID [--stderr]`,
 `usage ID --json`, `followup ID --prompt-file F`, `close ID`, `cancel ID`.
 Read output in bounded pieces. `logs` prints raw JSONL, and one event can be several
 KB: use `claive logs ID --lines 40 | cut -c1-300`. `show --json` has `status` and
-`exit_code` but no report; read a report with `claive show ID | head -n 80 | cut -c1-300`.
+`exit_code`, parsed worker reports when requested, and separate verification/acceptance
+evidence. Read final text with `claive show ID | head -n 80 | cut -c1-300`.
+
+## Plain workers: evidence and parent acceptance
+
+Keep three claims separate: the supervisor records **execution**, the verifier
+records **checks**, and the parent records **acceptance**. Completing one stage
+does not authorize the next. Exit 0 or a worker's `done` report establishes only
+its own scope; neither grants parent acceptance. The `claive-orch` arbiter below
+keeps its existing protocol; these controls are for ordinary `claive` workers.
+
+Before launching consequential work, declare the required checks and file
+ownership. Pass `--checks-file /abs/checks.json` and repeat `--owned-path` for
+workspace-relative files, directories, or globs. The manifest is a JSON array:
+
+```json
+[{"name":"analyzer","command":["systemd-analyze","verify","job.timer"],"required":true,"timeout":60}]
+```
+
+Declare mandatory analyzers individually. A test suite exiting 0 while skipping
+one does not prove that analyzer ran. Use one writer per isolated worktree;
+Muse can create it with `--worktree`, other adapters use an externally managed
+worktree as `--workspace`. Ownership is checked against tracked/deleted and all
+untracked files, including ignored build output and the initial dirty baseline.
+It validates final changes; the engine sandbox governs filesystem restrictions.
+Build/package checks must run in scratch storage. Opted-in evidence snapshots
+require Git and `CLAIVE_DIR` outside the worker workspace.
+
+After execution settles, use `claive verify ID` to run manifest commands in fresh
+scratch copies. For checks observed elsewhere, record `--check NAME --status
+passed|failed|blocked|not_run --reason 'evidence' --environment 'host/context'`.
+Then the parent can `claive accept ID`; it never runs automatically. Blocked or
+unrun mandatory checks keep acceptance pending. Only an explicitly authorized
+parent exception (`--exception 'reason'`) may resolve those; failed mandatory
+checks cannot be excepted. Ownership violations require an explicit scope
+change (`claive scope ID --owned-path ... --reason ...`), not a worker expanding
+its assignment. Never invent an exception to obtain a green status.
+
+Inspect `show --json` evidence for the current turn. New turns start unverified
+and pending, evidence changes reset acceptance, and later workspace edits make
+verification stale. Managed worktrees with ownership/check contracts are kept
+for verification/integration; remove them when that task chain ends. Acceptance
+records and the recursion guard are local workflow controls, not an OS security
+boundary against a process with the same account's permissions.
+
+Reporting: current/previous-turn warning counts differ from cumulative history;
+`phase` differs from last observed activity, especially with overlapping tools;
+queue depth/pending follow-ups differ from instructions sent during a turn.
+`usage --json` includes recent-call input, cache percentage and growth. Provider
+cumulative totals are not the live context-window size, and cache reuse does not
+prove efficiency.
+
+For live steering, launch Pi with `--enable-steering` and use `claive steer ID
+--message 'instruction' --wait 10 --json`. Native RPC queues input after current
+tool calls and before the next model call. Correlated acknowledgement proves
+provider acceptance of input, not model consumption/compliance. Default Pi print
+mode and current Muse/Claude/Codex transports reject live steering; `followup`
+remains a separate queued turn, and `cancel` stops execution. Steering cannot be
+combined with single-turn model fallbacks. Read `docs/steering.md` for receipt
+states and `docs/harness-integration.md` for the full evidence contract.
+
+When installed behavior disagrees with source, run `claive runtime --source-dir
+/abs/claive --json` before theorizing about flags. Sync through the project's
+`install.sh --runtime-only` (backups preserved), not individual installed files.
+Skillshare owns skill distribution. On Pi-only hosts, respect that engine policy
+and the host's memory budget; do not force the laptop's Muse roster or RAM limit.
 
 ### Let workers talk to each other (aliases and conversations)
 

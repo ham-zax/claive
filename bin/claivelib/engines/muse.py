@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import uuid
 
-from claivelib.engine import WorkerEngine
+from claivelib.engine import SteeringCapability, WorkerEngine
 from claivelib.state import launch_config, session_id
 
 MUSE_MODEL = "muse-spark-1.3-contributor"
@@ -23,6 +23,9 @@ class MuseEngine(WorkerEngine):
     default_reasoning_effort = "xhigh"
     default_max_model_steps = 100
 
+    def __init__(self):
+        self._tool_tasks = {}
+
     def resolve_session_id(self, value, session_logging=True):
         if not session_logging:
             return None
@@ -33,6 +36,17 @@ class MuseEngine(WorkerEngine):
             raise ValueError(f"unsupported Muse reasoning effort: {request.reasoning_effort}")
         if request.max_model_steps is None or request.max_model_steps < 1:
             raise ValueError("--max-model-steps must be positive")
+
+    def steering_capability(self):
+        return SteeringCapability(
+            supported=False,
+            mechanism=None,
+            reason=("muse exec runs one prompt per process with stdin closed, so nothing can "
+                    "reach the running turn; the MSP schema in this binary does define turn/steer, "
+                    "but it needs a persistent `muse serve` host (a new process architecture this "
+                    "adapter does not run), and `muse session-message send` is currently refused "
+                    "with external_agent_ingress_closed"),
+        )
 
     def resolve_launch(self, **options):
         provider = options.get("provider") or "meta"
@@ -167,19 +181,29 @@ class MuseEngine(WorkerEngine):
         if not isinstance(payload, dict) or not isinstance(kind, str):
             return []
 
-        detail = payload.get("event", {})
+        detail = payload.get("event") if isinstance(payload.get("event"), dict) else {}
         normalized = {"type": "activity", "native_kind": kind}
         if kind == "task.lifecycle.proposed" and isinstance(detail, dict):
             task_kind = str(detail.get("task_kind", ""))
             if task_kind.startswith("model."):
                 normalized = {"type": "model_step", "native_kind": kind}
             elif "tool" in task_kind or "shell" in task_kind:
-                normalized = {"type": "tool_started", "native_kind": kind, "tool": task_kind}
+                task_id = detail.get("task_id") or payload.get("task_id")
+                if task_id:
+                    self._tool_tasks[task_id] = task_kind
+                normalized = {"type": "tool_started", "native_kind": kind, "tool": task_kind, "tool_id": task_id}
+        elif kind == "task.lifecycle.completed":
+            task_id = detail.get("task_id") or payload.get("task_id")
+            task_kind = self._tool_tasks.pop(task_id, None) or detail.get("task_kind", "")
+            if "tool" in task_kind or "shell" in task_kind:
+                normalized = {"type": "tool_completed", "native_kind": kind, "tool_id": task_id}
         elif kind == "run.output.delta":
             normalized = {"type": "output_delta", "native_kind": kind}
         elif kind == "task.lifecycle.failed":
             reason = detail.get("reason", "") if isinstance(detail, dict) else ""
-            normalized = {"type": "task_warning", "native_kind": kind, "reason": reason}
+            task_id = detail.get("task_id") or payload.get("task_id")
+            normalized = {"type": "task_warning", "native_kind": kind, "reason": reason,
+                          "tool_id": task_id, "tool": self._tool_tasks.pop(task_id, None)}
         elif kind.startswith("run.terminal."):
             terminal = payload.get("terminal")
             normalized = {

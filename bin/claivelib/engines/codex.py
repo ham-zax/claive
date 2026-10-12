@@ -122,14 +122,16 @@ class CodexEngine(WorkerEngine):
             self._last_text = ""
             return [{"type": "model_step", "native_kind": kind}]
         if kind == "item.started" and item_kind in {"command_execution", "mcp_tool_call", "file_change"}:
-            return [{"type": "tool_started", "native_kind": kind, "tool": item.get("command") or item_kind}]
+            return [{"type": "tool_started", "native_kind": kind, "tool": item.get("command") or item_kind, "tool_id": item.get("id")}]
         if kind == "item.completed":
             if item_kind == "agent_message" and isinstance(item.get("text"), str):
                 self._last_text = item["text"]
                 return [{"type": "output_delta", "native_kind": kind}]
             if item_kind == "command_execution" and item.get("exit_code") not in (None, 0):
-                return [{"type": "task_warning", "native_kind": kind, "tool": "shell",
-                         "reason": f"exit {item['exit_code']}"}]
+                return [{"type": "task_warning", "native_kind": kind, "tool": "shell", "tool_id": item.get("id"),
+                         "command": item.get("command"), "reason": f"exit {item['exit_code']}"}]
+            if item_kind in {"command_execution", "mcp_tool_call", "file_change"}:
+                return [{"type": "tool_completed", "native_kind": kind, "tool": item_kind, "tool_id": item.get("id")}]
         if kind == "turn.completed":
             return [{"type": "terminal_completed", "native_kind": kind, "terminal": "completed",
                      "reason": None, "text": self._last_text}]

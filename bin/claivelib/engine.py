@@ -1,7 +1,25 @@
 """Engine-neutral turn request contract."""
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, Tuple
 import uuid
+
+__all__ = ["TurnRequest", "WorkerEngine", "SteeringCapability"]
+
+
+@dataclass(frozen=True)
+class SteeringCapability:
+    """Whether an engine can deliver genuine in-flight steering.
+
+    In-flight steering means provider-confirmed input into the turn that is
+    already running (mid-turn injection at a model-call boundary). It is not
+    a queued follow-up: follow-ups wait for the current turn to settle and
+    are handled by claivelib.turns. Engines without a delivery transport
+    report supported=False with the reason why.
+    """
+    supported: bool
+    mechanism: Optional[str] = None
+    reason: str = ""
+    notes: Tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -20,6 +38,7 @@ class TurnRequest:
     session_logging: bool
     isolation: dict
     session_dir: Optional[str] = None
+    steering: bool = False
 
 
 class WorkerEngine:
@@ -29,6 +48,25 @@ class WorkerEngine:
 
     def resolve_session_id(self, value, session_logging=True):
         return (value or str(uuid.uuid4())) if session_logging else None
+
+    def steering_capability(self):
+        """Describe genuine in-flight steering support for this engine.
+
+        The default is unsupported: most supervised children run one prompt
+        per process with stdin closed, so nothing can reach the running turn.
+        Engines with a working delivery transport override this. Never report
+        a queued follow-up as steering.
+        """
+        return SteeringCapability(
+            supported=False,
+            mechanism=None,
+            reason=(f"the {self.name or 'unknown'} engine has no in-flight "
+                    "steering delivery in this adapter"),
+        )
+
+    def initial_input(self, request):
+        """Optional stdin protocol input for an opt-in duplex transport."""
+        return None
 
     def validate_turn(self, request):
         """Reject unsupported turn options before launch or queue acceptance."""

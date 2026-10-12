@@ -156,7 +156,7 @@ class WorkerFallback(unittest.TestCase):
         result, worker_id = self.launch("--model", "m1", modes={"m1": "warning"})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         listing = self.cli("list").stdout
-        self.assertIn("[!1 task failures: fixture task warning]", listing)
+        self.assertIn("[!1 turn/1 total: fixture task warning]", listing)
 
 
 if __name__ == "__main__":

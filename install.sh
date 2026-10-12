@@ -15,28 +15,45 @@ package_target=$bin_dir/claivelib
 pi_skills=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills
 dry_run=false
 with_pi=false
+runtime_only=false
 for arg in "$@"; do
   case $arg in
     --dry-run) dry_run=true ;;
     --pi) with_pi=true ;;
-    *) echo 'Usage: install.sh [--dry-run] [--pi]' >&2; exit 2 ;;
+    --runtime-only) runtime_only=true ;;
+    *) echo 'Usage: install.sh [--dry-run] [--pi] [--runtime-only]' >&2; exit 2 ;;
   esac
 done
-for path in "$bin_dir" "$codex_skills" "$claude_skills" "$pi_skills" "$backup_base"; do
+for path in "$bin_dir" "$backup_base"; do
   [[ $path == /* ]] || { echo "Installation paths must be absolute: $path" >&2; exit 2; }
 done
+if ! "$runtime_only"; then
+  for path in "$codex_skills" "$claude_skills" "$pi_skills"; do
+    [[ $path == /* ]] || { echo "Installation paths must be absolute: $path" >&2; exit 2; }
+  done
+fi
 
 sources=("$source_dir/bin/claive" "$source_dir/bin/claive-worker"
          "$source_dir/bin/claive-codex" "$source_dir/bin/claive-orch"
-         "$source_dir/bin/claive-memcap" "$source_dir/skills/claive-routing-codex/SKILL.md")
+         "$source_dir/bin/claive-memcap")
 targets=("$bin_dir/claive" "$bin_dir/claive-worker"
          "$bin_dir/claive-codex" "$bin_dir/claive-orch"
-         "$bin_dir/claive-memcap" "$skill_dir/SKILL.md")
-modes=(755 755 755 755 755 644)
+         "$bin_dir/claive-memcap")
+modes=(755 755 755 755 755)
+# --runtime-only syncs the package, launchers, and provenance, and skips every
+# skill check and write: Skillshare owns skill destinations, so a divergent or
+# broken managed skill link must not block a runtime repair.
+if ! "$runtime_only"; then
+  sources+=("$source_dir/skills/claive-routing-codex/SKILL.md")
+  targets+=("$skill_dir/SKILL.md")
+  modes+=(644)
+fi
 # Host-neutral skills go to Codex and Claude Code, and with --pi to a Pi parent agent.
 # Pi workers read the same directory; claive's recursion guard stops them launching workers.
+# Skipped entirely with --runtime-only (see above).
 skill_roots=("$codex_skills" "$claude_skills")
 ! "$with_pi" || skill_roots+=("$pi_skills")
+if ! "$runtime_only"; then
 for skill in claive-orchestration; do
   for skills_root in "${skill_roots[@]}"; do
     sources+=("$source_dir/skills/$skill/SKILL.md")
@@ -44,6 +61,14 @@ for skill in claive-orchestration; do
     modes+=(644)
   done
 done
+fi
+
+# Migrate only links to this checkout's own five launchers. Preserve unrelated
+# links and all Skillshare-owned skill links; never install through a symlink.
+project_launcher_link() {
+  [[ $1 -lt 5 && -L $3 ]] &&
+    [[ "$(readlink -f -- "$3")" == "$(readlink -f -- "$2")" ]]
+}
 
 [[ -d $package_source ]] || { echo "Missing source package: $package_source" >&2; exit 1; }
 if [[ -L $package_target || ( -e $package_target && ! -d $package_target ) ]]; then
@@ -54,6 +79,9 @@ for index in "${!sources[@]}"; do
   [[ -f ${sources[index]} ]] || { echo "Missing source: ${sources[index]}" >&2; exit 1; }
   source_file=${sources[index]}
   target=${targets[index]}
+  if project_launcher_link "$index" "$source_file" "$target"; then
+    continue
+  fi
   if [[ -L $target || -L $(dirname -- "$target") ]]; then
     # Skillshare links the SKILL DIRECTORY, not SKILL.md. Never write through it.
     # The repo and managed source must match before the rest of the installer runs.
@@ -76,8 +104,10 @@ ensure_backup_dir() {
 }
 
 # Install the package before the launcher that imports it.
+# provenance.json is installer-generated (see below), so it is excluded here.
 if [[ -d $package_target ]] &&
-   diff -qr --exclude='__pycache__' "$package_source" "$package_target" >/dev/null 2>&1; then
+   diff -qr --exclude='__pycache__' --exclude='provenance.json' \
+     "$package_source" "$package_target" >/dev/null 2>&1; then
   echo "Already current: $package_target"
 else
   if "$dry_run"; then
@@ -99,11 +129,70 @@ else
   fi
 fi
 
+# Record source revision/path/content fingerprints beside the installed package.
+# bin/claivelib/runtime.py reads this for read-only source-to-installed
+# drift/smoke checks (callable by `claive doctor`); never edit it by hand.
+provenance_target=$package_target/provenance.json
+provenance_current() {
+  CLAIVE_SOURCE_DIR=$source_dir CLAIVE_PROVENANCE_FILE=$provenance_target python3 - <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(os.environ["CLAIVE_SOURCE_DIR"]) / "bin"))
+from claivelib import runtime
+fresh = runtime.build_provenance(Path(os.environ["CLAIVE_SOURCE_DIR"]))
+try:
+    current = json.loads(Path(os.environ["CLAIVE_PROVENANCE_FILE"]).read_text(encoding="utf-8"))
+except (OSError, ValueError, AttributeError):
+    # Missing, unparsable, or hand-edited to non-dict JSON: stale, rewrite below.
+    sys.exit(1)
+keys = ("source_dir", "source_revision", "files", "launchers")
+sys.exit(0 if all(current.get(key) == fresh[key] for key in keys) else 1)
+PY
+}
+if "$dry_run"; then
+  echo "Would write provenance: $provenance_target"
+elif provenance_current; then
+  echo "Already current: $provenance_target"
+else
+  if [[ -f $provenance_target ]]; then
+    ensure_backup_dir
+    cp -p -- "$provenance_target" "$backup_dir/provenance.json"
+  fi
+  CLAIVE_SOURCE_DIR=$source_dir CLAIVE_PROVENANCE_FILE=$provenance_target python3 - <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(os.environ["CLAIVE_SOURCE_DIR"]) / "bin"))
+from claivelib import runtime
+provenance_file = Path(os.environ["CLAIVE_PROVENANCE_FILE"])
+record = runtime.build_provenance(Path(os.environ["CLAIVE_SOURCE_DIR"]))
+provenance_file.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+  chmod 644 -- "$provenance_target"
+  echo "Wrote provenance: $provenance_target"
+fi
+
 for index in "${!sources[@]}"; do
   source_file=${sources[index]}
   target=${targets[index]}
+  if project_launcher_link "$index" "$source_file" "$target"; then
+    if "$dry_run"; then
+      echo "Would migrate project launcher link with backup: $target"
+    else
+      ensure_backup_dir
+      cp -a -- "$target" "$backup_dir/$(basename -- "$target")"
+      launcher_stage=$(mktemp "$bin_dir/.claive.launcher.XXXXXX")
+      install -m "${modes[index]}" -- "$source_file" "$launcher_stage"
+      mv -T -- "$launcher_stage" "$target"
+      echo "Migrated project launcher link: $target"
+    fi
+    continue
+  fi
   if [[ -L $target || -L $(dirname -- "$target") ]]; then
-    echo "Already current (Skillshare-managed link): $target"
+    echo "Already current (managed link): $target"
     continue
   fi
   if [[ -f $target ]] && cmp -s -- "$source_file" "$target" &&

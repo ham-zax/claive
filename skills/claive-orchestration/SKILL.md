@@ -23,6 +23,17 @@ not part of the active workflow.
   costly.
 - **Do it yourself** when the task is small or tightly coupled to what you are
   doing, or when delegation overhead exceeds the work.
+- **Fit gate.** Before any launch, state `existing output that already answers it |
+  executable check | cost of a wrong first attempt | why not inline`. Read the README of
+  the tool that produced the data before briefing a worker to analyse it. If a part is
+  missing, do the work inline and say so, even when the user asked to delegate.
+- **One scoped task per turn.** For multi-part work open one reusable worker
+  (`claive open --detach`) and send one small task with one checkable deliverable per
+  turn. Read its summary, check the artifact, then `claive followup` the next task. Do
+  not put several deliverables in one brief.
+- **Bound every turn.** Pass `--turn-timeout`. Make the first wait short
+  (`claive wait ID --timeout 300`); if it prints `Reasoning-heavy` or no file or report
+  has appeared, cancel and narrow the task or lower the effort.
 - **No suitable authorized verifier?** Use direct work or plain `claive` delegation
   with focused evidence review. Do not introduce tests, scripts, or extra scope solely
   to force a task through the arbiter. A model review is not executable verification.
@@ -88,6 +99,9 @@ muse-spark-1.3-contributor-free → `xhigh`, space-bunny → `max`. Muse uses `x
 for normal tasks (the default) and `max` for very complicated ones (deep
 debugging, cross-cutting design, subtle concurrency or data-format work). Use
 `high` or `medium` only rarely, for trivial mechanical chores, and say why.
+Claude and Codex workers use `high` unless the user names a level for that task: at
+`max` a small Claude model spent 63% of a 40-minute turn in hidden reasoning and wrote
+nothing.
 
 Pi rules: **always pass `--model`** (an explicit model also becomes Pi's global
 default, and omitting it inherits whatever was used last), plus `--engine pi
@@ -208,7 +222,9 @@ states and `docs/harness-integration.md` for the full evidence contract.
 When installed behavior disagrees with source, run `claive runtime --source-dir
 /abs/claive --json` before theorizing about flags. Sync through the project's
 `install.sh --runtime-only` (backups preserved), not individual installed files.
-Skillshare owns skill distribution. On Pi-only hosts, respect that engine policy
+The Skillshare source (`~/.config/skillshare/skills/`) is the canonical copy of this
+skill: edit it there, `skillshare sync`, then copy it into the Claive checkout's
+`skills/` mirror. On Pi-only hosts, respect that engine policy
 and the host's memory budget; do not force the laptop's Muse roster or RAM limit.
 
 ### Let workers talk to each other (aliases and conversations)

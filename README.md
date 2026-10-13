@@ -239,7 +239,7 @@ claive-memcap 2G -- npm test        # memory cap without systemd-run (init --ver
 claive-orch arms
 ```
 
-Active skills are centrally managed by Skillshare. Claive maintains matching source files:
+The Skillshare source (`~/.config/skillshare/skills/`) is the canonical copy of the active skills, and every agent reads it through Skillshare links. This repository keeps a tracked mirror:
 
 - `skills/claive-orchestration`: verified Muse/Pi runs and general delegation for Claude Code, Codex, and shell parents.
 - `skills/claive-routing-codex`: Codex-specific managed-terminal worker launch and recovery.
@@ -296,7 +296,7 @@ On an explicit Muse subscription-quota exhaustion, the manager records the failu
 
 Requirements: Linux with Python 3. The default production engine requires Muse at `~/.local/bin/muse`; `MUSE_WORKER_BINARY` can select another absolute Muse executable. The combined terminal view also requires tmux and Codex on PATH. No third-party Python packages are required by the tools or their checks.
 
-Edit this repository, copy the two active `SKILL.md` files into the matching Skillshare source directories, and run `skillshare sync`. For CLI binaries, use:
+Edit the two active `SKILL.md` files in the Skillshare source, run `skillshare sync`, then copy them into `skills/` here so the mirror matches (`install.sh` without `--runtime-only` fails while they differ). For CLI binaries, use:
 
 ```bash
 ./install.sh --dry-run

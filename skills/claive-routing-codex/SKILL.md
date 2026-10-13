@@ -7,7 +7,7 @@ description: Codex-specific delegation through Claive. Launch, supervise, and re
 
 Muse Code is the default engine; Pi is available explicitly with `--engine pi` through `opencode2api`. Follow the global AGENTS.md delegation criteria; complete small or tightly coupled tasks directly when delegation would add overhead. The parent owns synthesis, integration, and final verification.
 
-The maintained source is `skills/claive-routing-codex/SKILL.md` in the Claive checkout (`/home/hamza/repo/claive` on the laptop, `/home/ubuntu/repo/claive` on ARM). Skillshare owns the live copy at `~/.config/skillshare/skills/claive-routing-codex/`; update both, then `skillshare sync`. Do not run the legacy skill installer over Skillshare links. `reference/global-AGENTS.md` is a snapshot, not a replacement for global instructions.
+The canonical copy is the Skillshare source at `~/.config/skillshare/skills/claive-routing-codex/`: edit it there, then `skillshare sync`. `skills/claive-routing-codex/SKILL.md` in the Claive checkout (`/home/hamza/repo/claive` on the laptop, `/home/ubuntu/repo/claive` on ARM) is a tracked mirror; copy the edited file into it. Do not run the legacy skill installer over Skillshare links. `reference/global-AGENTS.md` is a snapshot, not a replacement for global instructions.
 
 For a task with an executable check, prefer the verifier-gated ladder in the `claive-orchestration` skill (`claive-orch`: Muse implements, a cross-family Pi critic reviews, and the arbiter accepts or reverts each round). This skill governs Codex launch mechanics. The TTC experiment is deferred and has no active skill; do not auto-load or reinstall its former materials.
 

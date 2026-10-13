@@ -1697,6 +1697,9 @@ def main(launcher=None):
         check_nested()
         path, state = create_job(args)
         print(f"Worker {state['id']} | {clean(state['label'])} | {path}", flush=True)
+        from claivelib import advice
+        for note in advice.launch_notes(state, Path(args.prompt_file).stat().st_size):
+            print(note, file=sys.stderr, flush=True)
         if args.action == "open" and getattr(args, "detach", False):
             spawn_supervisor(path, state, "_reusable")
             print(f"Wait: claive wait {state['id']}\nFollow-up: claive followup {state['id']} --prompt-file ...\n"
@@ -1810,6 +1813,10 @@ def main(launcher=None):
             if usage["cache_hit_ratio"] is not None:
                 print(f"Reported input served from cache: {usage['cache_hit_ratio']:.1%}")
             recent = usage["recent"]
+            from claivelib import advice
+            note = advice.heavy_call_note(usage.get("calls", []))
+            if note:
+                print(note)
             print(f"Latest call input: {recent['input_tokens']} | cache: {recent['cache_percent']} | "
                   f"input growth: {recent['growth_tokens']} tokens ({recent['trend']})")
             print("Provider counters across retained session; not context size or an invoice. Cache reuse does not prove context efficiency.")
@@ -1839,6 +1846,16 @@ def main(launcher=None):
                     return outcome_code(state)
             if args.timeout is not None and time.monotonic() - start >= args.timeout:
                 print(f"Timed out after {'%g' % args.timeout}s; still running: {' '.join(ids)}")
+                from claivelib import advice
+                for job_id, path in zip(ids, paths):
+                    state = load(path)
+                    try:
+                        calls = get_engine(state.get("engine", DEFAULT_ENGINE)).session_usage(state).get("calls", [])
+                    except Exception:  # a reminder must never break the wait
+                        continue
+                    note = advice.heavy_call_note(calls)
+                    if note:
+                        print(f"{job_id}: {note}")
                 return 124
             time.sleep(0.25)
     elif args.action == "followup":

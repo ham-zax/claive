@@ -86,6 +86,50 @@ class AcceptanceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "stale"):
             a.decide(self.job, self.state)
 
+    def test_freshness_readback_detects_changes_after_parent_accepts(self):
+        self.finish()
+        a.verify(self.job, self.state)
+        a.decide(self.job, self.state)
+        self.assertEqual(a.check_freshness(self.job, self.state)["status"], "fresh")
+        (self.workspace / "owned.txt").write_text("changed after parent accepted")
+        self.assertEqual(a.check_freshness(self.job, self.state)["status"], "stale")
+        self.assertEqual(a.view(self.job, self.state)["acceptance"]["status"], "accepted")
+
+    def test_pytest_summary_requires_real_passes_and_no_skips(self):
+        check = self.state["acceptance_contract"]["checks"][0]
+        check["pytest"] = {"min_passed": 2, "max_skipped": 0}
+        check["command"] = [sys.executable, "-c", "print('2 passed, 1 skipped in 0.02s')"]
+        self.finish()
+        failed = a.verify(self.job, self.state)
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("skipped 1", failed["checks"][0]["reason"])
+        with self.assertRaisesRegex(ValueError, "failed"):
+            a.decide(self.job, self.state, exception="cannot bypass failure")
+        check["command"] = [sys.executable, "-c", "print('skipped: all')"]
+        blocked = a.verify(self.job, self.state)
+        self.assertEqual(blocked["status"], "blocked")
+        check["command"] = [sys.executable, "-c", "print('2 passed in 0.02s')"]
+        self.assertEqual(a.verify(self.job, self.state)["status"], "passed")
+
+    def test_verifier_rejects_external_symlink_in_scratch_copy(self):
+        outside = self.root / "outside.txt"
+        outside.write_text("must not be read")
+        (self.workspace / "external.txt").symlink_to(outside)
+        self.finish()
+        evidence = a.verify(self.job, self.state)
+        self.assertEqual(evidence["status"], "blocked")
+        self.assertIn("unsafe verification symlink", evidence["checks"][0]["reason"])
+
+    def test_verifier_captures_only_output_tail(self):
+        self.state["acceptance_contract"]["checks"][0]["command"] = [
+            sys.executable, "-c", "print('A' * 130000 + 'END')"]
+        self.finish()
+        evidence = a.verify(self.job, self.state)
+        self.assertEqual(evidence["status"], "passed")
+        output = evidence["checks"][0]["stdout"]
+        self.assertLessEqual(len(output), 8000)
+        self.assertTrue(output.endswith('END\n'))
+
     def test_verifier_build_artifacts_stay_in_scratch(self):
         self.state["acceptance_contract"]["checks"][0]["command"] = [sys.executable, "-c", "from pathlib import Path; Path('build').mkdir(); Path('build/artifact').write_text('x')"]
         self.finish()

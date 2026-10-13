@@ -1,10 +1,12 @@
 """Codex CLI engine (`codex exec --json`), strictly locked to GPT-6 Luna at max effort."""
 import json
 import os
+import shutil
+import sys
 from pathlib import Path
 import uuid
 
-from claivelib.engine import WorkerEngine
+from claivelib.engine import SteeringCapability, WorkerEngine
 from claivelib.state import launch_config, session_id
 
 CODEX_MODEL = "gpt-6-luna"
@@ -13,7 +15,8 @@ CODEX_EFFORT = "max"
 
 
 def default_binary():
-    return os.environ.get("CODEX_WORKER_BINARY", str(Path.home() / ".nvm/versions/node/v24.19.0/bin/codex"))
+    pinned = Path.home() / ".nvm/versions/node/v24.19.0/bin/codex"
+    return os.environ.get("CODEX_WORKER_BINARY", str(pinned if pinned.is_file() else shutil.which("codex") or pinned))
 
 
 def _home():
@@ -30,6 +33,17 @@ class CodexEngine(WorkerEngine):
     default_model = CODEX_MODEL
     default_reasoning_effort = CODEX_EFFORT
 
+    def steering_capability(self):
+        return SteeringCapability(True, "codex-app-server", notes=(
+            "Requires --enable-steering; input is accepted for the active turn ID only.",
+            "App Server acknowledgement does not establish model consumption.",))
+
+    def initial_input(self, request):
+        if not request.steering:
+            return None
+        return json.dumps({"type": "prompt", "id": "claive-initial",
+                           "message": Path(request.prompt_file).read_text()}) + "\n"
+
     def __init__(self):
         self._last_text = ""
 
@@ -41,6 +55,7 @@ class CodexEngine(WorkerEngine):
     def resolve_launch(self, **options):
         return {
             "binary": default_binary(),
+            "steering": bool(options.get("steering")),
             "provider": options.get("provider") or CODEX_PROVIDER,
             "model": options.get("model") or CODEX_MODEL,
             "read_only": bool(options.get("read_only")),
@@ -84,6 +99,22 @@ class CodexEngine(WorkerEngine):
     def build_command(self, request):
         self.validate_turn(request)
         sandbox = "read-only" if request.read_only else "workspace-write"
+        if request.steering:
+            if _yolo(request):
+                sandbox = "danger-full-access"
+            wrapper = Path(__file__).with_name("codex_appserver.py")
+            command = [sys.executable, str(wrapper), "--binary", request.binary,
+                       "--cwd", request.workspace, "--model", request.model,
+                       "--sandbox", sandbox]
+            if request.session_id and self._session_file(request.session_id):
+                command.extend(["--resume", request.session_id])
+            if request.web:
+                command.append("--web")
+            if not request.session_logging:
+                command.append("--ephemeral")
+            if os.environ.get("CLAIVE_CODEX_USE_USER_CONFIG", "").lower() in {"1", "true", "yes"}:
+                command.append("--user-config")
+            return command
         if _yolo(request):
             guard = ["--dangerously-bypass-approvals-and-sandbox"]
         else:
@@ -115,6 +146,11 @@ class CodexEngine(WorkerEngine):
             raise ValueError("Codex event has no string type")
         item = event.get("item") if isinstance(event.get("item"), dict) else {}
         item_kind = item.get("type")
+        if kind == "control_response":
+            return [{"type": "control_response", "native_kind": kind,
+                     "id": event.get("id"), "command": event.get("command"),
+                     "success": event.get("success"), "data": event.get("data"),
+                     "error": event.get("error")}]
         if kind == "thread.started" and isinstance(event.get("thread_id"), str):
             self._last_text = ""
             return [{"type": "session_bound", "native_kind": kind, "session_id": event["thread_id"]}]

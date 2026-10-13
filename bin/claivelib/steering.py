@@ -1,4 +1,4 @@
-"""Turn-bound delivery receipts for opt-in Pi RPC steering."""
+"""Turn-bound delivery receipts for opt-in Pi and Codex duplex steering."""
 import dataclasses
 import fcntl
 import json

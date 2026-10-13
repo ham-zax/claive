@@ -23,7 +23,7 @@ Select an engine deliberately and follow the parent's current authorization poli
 | `muse` (default) | Pinned `muse-spark-1.3-contributor`; usual substantive effort `xhigh`; supports managed worktrees and read-only isolation |
 | `pi` | `--engine pi --provider opencode2api`; models selected explicitly or inherited; no managed worktree, `--web`, or model-step cap |
 | `claude` | `--engine claude`; pinned `claude-haiku-5-5`; headless and isolated from user settings, hooks, MCP, and skills; no managed worktree or model-step cap; `--output-schema` returns schema-validated JSON; `--enable-steering` for live steering |
-| `codex` | `--engine codex`; pinned `gpt-6-luna`, effort `max`; writer defaults to workspace-write sandbox, read-only uses the read-only sandbox; no managed worktree, output schema, or model-step cap |
+| `codex` | `--engine codex`; pinned `gpt-6-luna` at effort `max` (default) or `gpt-6.1-sol` at `xhigh`; writer runs without the Codex sandbox by default, read-only uses the read-only sandbox; no managed worktree, output schema, or model-step cap |
 
 Claude/Codex workers are **available**, not automatically authorized as a
 fallback or as critics for the Muse/Pi arbiter. Do not silently switch engines,
@@ -31,8 +31,8 @@ relax sandboxing, or assume another model's worker permissions carry over.
 For a Codex worker, `CLAIVE_CODEX_USE_USER_CONFIG=1` explicitly opts into that
 worker's existing Codex user MCP/skill configuration; the default is isolated.
 `--ignore-rules` remains supplied in both modes; config opt-in does not enable rules.
-`CLAIVE_CODEX_YOLO=1` explicitly bypasses the sandbox for a writing worker:
-**do not set it without task-specific authorization**. Neither setting installs
+A writing Codex worker runs without the Codex sandbox or approvals by default, so
+scope it in the brief; `CLAIVE_CODEX_YOLO=0` restores the workspace-write sandbox. Neither setting installs
 new MCP servers. Consult `docs/harness-integration.md` for the runtime protocol.
 
 For routine work from the Codex parent, favor `claive-worker` in Codex's managed

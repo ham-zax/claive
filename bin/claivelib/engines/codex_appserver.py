@@ -43,7 +43,7 @@ def run(args):
         home_for_server(base, args.user_config, Path(home), args.ephemeral)
         env = dict(os.environ, CODEX_HOME=home)
         command = [args.binary, "app-server", "--listen", "stdio://",
-                   "-c", 'model_reasoning_effort="max"',
+                   "-c", 'model_reasoning_effort="' + args.effort + '"',
                    "-c", 'approval_policy="never"',
                    "-c", 'sandbox_mode="' + args.sandbox + '"',
                    "-c", 'web_search="' + ("live" if args.web else "disabled") + '"',
@@ -80,7 +80,7 @@ def run(args):
             nonlocal prompt
             if thread_id and prompt is not None:
                 send("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": prompt}],
-                                    "model": args.model, "effort": "max"}, "turn")
+                                    "model": args.model, "effort": args.effort}, "turn")
                 prompt = None
 
         def drain_steers():
@@ -209,7 +209,7 @@ def run(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    for name in ("binary", "cwd", "model", "sandbox"):
+    for name in ("binary", "cwd", "model", "effort", "sandbox"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--resume")
     parser.add_argument("--web", action="store_true")

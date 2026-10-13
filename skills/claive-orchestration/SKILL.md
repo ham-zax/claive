@@ -45,7 +45,7 @@ The TTC experiment is deferred and is not part of this workflow.
 
 `claive` runs ordinary bounded tasks on `--engine muse|pi|claude|codex`. The runtime
 pins Muse to `muse-spark-1.3-contributor`, Claude to `claude-haiku-5-5`, and Codex to
-`gpt-6-luna`; Pi uses `opencode2api` and its selected model. `claive-orch` uses only
+`gpt-6-luna` at `max` (or `gpt-6.1-sol` at `xhigh`, passing both); Pi uses `opencode2api` and its selected model. `claive-orch` uses only
 Muse/Pi for its implementer/critic ladder; its roster does not authorize Claude/Codex
 workers. Engine sandbox, settings and option limits: `README.md` and
 `docs/harness-integration.md`. Codex parents also follow `claive-routing-codex`.

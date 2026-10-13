@@ -1,4 +1,4 @@
-"""Codex CLI engine (`codex exec --json`), strictly locked to GPT-6 Luna at max effort."""
+"""Codex CLI engine (`codex exec --json`), strictly locked to a fixed list of model and effort pairs."""
 import json
 import os
 import shutil
@@ -12,6 +12,8 @@ from claivelib.state import launch_config, session_id
 CODEX_MODEL = "gpt-6-luna"
 CODEX_PROVIDER = "openai"
 CODEX_EFFORT = "max"
+# Each allowed model runs at exactly one reasoning effort; the default pair stays Luna at max.
+CODEX_EFFORTS = {CODEX_MODEL: CODEX_EFFORT, "gpt-6.1-sol": "xhigh"}
 
 
 def default_binary():
@@ -24,8 +26,8 @@ def _home():
 
 
 def _yolo(request):
-    """CLAIVE_CODEX_YOLO=1 lets write turns skip Codex's sandbox and approvals; read-only turns never do."""
-    return not request.read_only and os.environ.get("CLAIVE_CODEX_YOLO", "").lower() in {"1", "true", "yes"}
+    """Write turns skip Codex's sandbox and approvals unless CLAIVE_CODEX_YOLO=0; read-only turns never do."""
+    return not request.read_only and os.environ.get("CLAIVE_CODEX_YOLO", "").lower() not in {"0", "false", "no", "off"}
 
 
 class CodexEngine(WorkerEngine):
@@ -78,15 +80,16 @@ class CodexEngine(WorkerEngine):
 
     @staticmethod
     def _check_model(model):
-        if model != CODEX_MODEL:
-            raise ValueError(f"the codex engine is locked to {CODEX_MODEL}, not {model}")
+        if model not in CODEX_EFFORTS:
+            raise ValueError(f"the codex engine is locked to {' or '.join(CODEX_EFFORTS)}, not {model}")
 
     def validate_turn(self, request):
         self._check_model(request.model)
         if request.provider != CODEX_PROVIDER:
             raise ValueError(f"the codex engine supports only the {CODEX_PROVIDER} provider")
-        if request.reasoning_effort != CODEX_EFFORT:
-            raise ValueError(f"the codex engine is locked to reasoning effort {CODEX_EFFORT}")
+        effort = CODEX_EFFORTS[request.model]
+        if request.reasoning_effort != effort:
+            raise ValueError(f"the codex engine is locked to reasoning effort {effort} for {request.model}")
         if request.max_model_steps is not None:
             raise ValueError("Codex does not support --max-model-steps")
 
@@ -105,7 +108,7 @@ class CodexEngine(WorkerEngine):
             wrapper = Path(__file__).with_name("codex_appserver.py")
             command = [sys.executable, str(wrapper), "--binary", request.binary,
                        "--cwd", request.workspace, "--model", request.model,
-                       "--sandbox", sandbox]
+                       "--effort", request.reasoning_effort, "--sandbox", sandbox]
             if request.session_id and self._session_file(request.session_id):
                 command.extend(["--resume", request.session_id])
             if request.web:
@@ -127,7 +130,7 @@ class CodexEngine(WorkerEngine):
             "--json", "--skip-git-repo-check",
             *(["--ignore-user-config"] if ignore_user_config else []), "--ignore-rules",
             "-m", request.model,
-            "-c", f'model_reasoning_effort="{CODEX_EFFORT}"',
+            "-c", f'model_reasoning_effort="{request.reasoning_effort}"',
             *guard,
             "-c", f'web_search="{"live" if request.web else "disabled"}"',
         ]
@@ -189,6 +192,7 @@ class CodexEngine(WorkerEngine):
         if path is None:
             raise ValueError("retained Codex session file is unavailable")
         calls, total = [], None
+        model = launch_config(state).get("model") or CODEX_MODEL
         with path.open() as stream:
             for line in stream:
                 record = json.loads(line)
@@ -199,7 +203,7 @@ class CodexEngine(WorkerEngine):
                 total = info.get("total_token_usage")
                 last = info.get("last_token_usage")
                 if isinstance(last, dict):
-                    calls.append(dict(model=CODEX_MODEL, **self._counters(last)))
+                    calls.append(dict(model=model, **self._counters(last)))
         totals = self._counters(total) if isinstance(total, dict) else {}
         inputs = totals.get("input_tokens", 0)
         ratio = totals["cached_tokens"] / inputs if inputs and "cached_tokens" in totals else None

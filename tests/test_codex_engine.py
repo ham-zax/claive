@@ -62,7 +62,7 @@ class CodexChecks(unittest.TestCase):
         launch = dict(self.engine.resolve_launch(), binary=str(self.binary))
         self.assertEqual(launch["model"], "gpt-6-luna")
         self.engine.validate_launch(launch)
-        for model in ("gpt-5.6-luna", "gpt-6.1-sol", None):
+        for model in ("gpt-5.6-luna", "gpt-6-sol", None):
             with self.subTest(model=model):
                 with self.assertRaisesRegex(ValueError, "locked"):
                     self.engine.validate_launch(dict(launch, model=model))
@@ -72,6 +72,22 @@ class CodexChecks(unittest.TestCase):
             with self.subTest(effort=effort):
                 with self.assertRaisesRegex(ValueError, "locked"):
                     self.engine.build_command(self.request(reasoning_effort=effort))
+
+    def test_sol_runs_only_at_xhigh(self):
+        launch = dict(self.engine.resolve_launch(model="gpt-6.1-sol"), binary=str(self.binary))
+        self.assertEqual(launch["model"], "gpt-6.1-sol")
+        self.engine.validate_launch(launch)
+        command = self.engine.build_command(self.request(model="gpt-6.1-sol", reasoning_effort="xhigh"))
+        self.assertEqual(command[command.index("-m") + 1], "gpt-6.1-sol")
+        self.assertIn('model_reasoning_effort="xhigh"', command)
+        self.assertNotIn('model_reasoning_effort="max"', command)
+        steered = self.engine.build_command(
+            self.request(model="gpt-6.1-sol", reasoning_effort="xhigh", steering=True))
+        self.assertEqual(steered[steered.index("--effort") + 1], "xhigh")
+        for effort in ("max", "high", "medium"):
+            with self.subTest(effort=effort):
+                with self.assertRaisesRegex(ValueError, "locked"):
+                    self.engine.build_command(self.request(model="gpt-6.1-sol", reasoning_effort=effort))
 
     def test_unsupported_options_are_rejected(self):
         launch = dict(self.engine.resolve_launch(), binary=str(self.binary))
@@ -93,7 +109,7 @@ class CodexChecks(unittest.TestCase):
         self.assertIn('web_search="disabled"', command)
         self.assertEqual(command[-2:], ["--", "--do the thing\n"])
         writer = self.engine.build_command(self.request(web=True))
-        self.assertIn('sandbox_mode="workspace-write"', writer)
+        self.assertIn(YOLO, writer)
         self.assertIn('web_search="live"', writer)
         rollout = self.root / f"home/sessions/2026/10/08/rollout-2026-10-08T00-00-00-{THREAD}.jsonl"
         rollout.parent.mkdir(parents=True)
@@ -104,16 +120,23 @@ class CodexChecks(unittest.TestCase):
         self.assertIn("--ephemeral", self.engine.build_command(
             self.request(session_id=None, session_logging=False)))
 
-    def test_unset_yolo_keeps_the_sandboxed_command(self):
+    def test_yolo_opt_out_keeps_the_sandboxed_command(self):
         expected = [str(self.binary), "exec", "--json", "--skip-git-repo-check", "--ignore-user-config",
                     "--ignore-rules", "-m", CODEX_MODEL, "-c", 'model_reasoning_effort="max"',
                     "-c", 'sandbox_mode="workspace-write"', "-c", 'approval_policy="never"',
                     "-c", 'web_search="disabled"', "--cd", str(self.root), "--", "--do the thing\n"]
-        self.assertEqual(self.engine.build_command(self.request()), expected)
-        for value in ("", "0", "no", "on"):
+        for value in ("0", "no", "off", "FALSE"):
             with self.subTest(value=value):
                 os.environ["CLAIVE_CODEX_YOLO"] = value
                 self.assertEqual(self.engine.build_command(self.request()), expected)
+        for value in (None, "", "1", "on"):
+            with self.subTest(value=value):
+                os.environ.pop("CLAIVE_CODEX_YOLO", None)
+                if value is not None:
+                    os.environ["CLAIVE_CODEX_YOLO"] = value
+                command = self.engine.build_command(self.request())
+                self.assertIn(YOLO, command)
+                self.assertFalse([part for part in command if "sandbox_mode" in part])
 
     def test_user_config_opt_in_keeps_ignore_rules(self):
         previous = os.environ.get("CLAIVE_CODEX_USE_USER_CONFIG")
@@ -141,12 +164,13 @@ class CodexChecks(unittest.TestCase):
                 os.environ["CLAIVE_CODEX_USE_USER_CONFIG"] = previous
 
     def assert_yolo_swaps_the_sandbox_overrides(self, shape):
+        os.environ["CLAIVE_CODEX_YOLO"] = "0"
         plain = self.engine.build_command(self.request())
         start = plain.index('sandbox_mode="workspace-write"') - 1
         self.assertEqual(plain[1:1 + len(shape)], shape)
         self.assertEqual(plain[start:start + 4],
                          ["-c", 'sandbox_mode="workspace-write"', "-c", 'approval_policy="never"'])
-        os.environ["CLAIVE_CODEX_YOLO"] = "YES"
+        os.environ.pop("CLAIVE_CODEX_YOLO")
         yolo = self.engine.build_command(self.request())
         self.assertEqual(yolo[1:1 + len(shape)], shape)
         self.assertEqual(yolo, plain[:start] + [YOLO] + plain[start + 4:])

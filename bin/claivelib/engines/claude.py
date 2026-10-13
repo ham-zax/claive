@@ -5,7 +5,7 @@ from pathlib import Path
 import uuid
 from datetime import datetime, timezone
 
-from claivelib.engine import WorkerEngine
+from claivelib.engine import SteeringCapability, WorkerEngine
 from claivelib.state import launch_config, session_id
 
 CLAUDE_MODEL = "claude-haiku-5-5"
@@ -33,6 +33,27 @@ class ClaudeEngine(WorkerEngine):
     def __init__(self):
         self._last_text = ""
 
+    def steering_capability(self):
+        return SteeringCapability(True, "claude-stream-json", notes=(
+            "Requires --enable-steering; input joins the turn after the current tool calls finish.",
+            "Acknowledgement is Claude's replay of the message as it enters the conversation; "
+            "compliance is not established.",))
+
+    @staticmethod
+    def _user_frame(text, identifier=None):
+        frame = {"type": "user", "message": {"role": "user", "content": text}}
+        if identifier:
+            frame["uuid"] = str(uuid.UUID(identifier))
+        return json.dumps(frame) + "\n"
+
+    def initial_input(self, request):
+        if not request.steering:
+            return None
+        return self._user_frame(Path(request.prompt_file).read_text(encoding="utf-8"))
+
+    def steering_frame(self, identifier, message):
+        return self._user_frame(message, identifier)
+
     def resolve_session_id(self, value, session_logging=True):
         if not session_logging:
             return None
@@ -41,6 +62,7 @@ class ClaudeEngine(WorkerEngine):
     def resolve_launch(self, **options):
         return {
             "binary": default_binary(),
+            "steering": bool(options.get("steering")),
             "provider": options.get("provider") or CLAUDE_PROVIDER,
             "model": options.get("model") or CLAUDE_MODEL,
             "read_only": bool(options.get("read_only")),
@@ -56,10 +78,23 @@ class ClaudeEngine(WorkerEngine):
             raise ValueError("Claude binary must be an absolute executable file")
         self._check_model(launch.get("model"))
         if launch.get("output_schema"):
-            raise ValueError("Claude does not support --output-schema")
+            self._schema(launch["output_schema"])
         isolation = launch.get("isolation") or {}
         if isolation.get("mode", "none") != "none" or isolation.get("base"):
             raise ValueError("Claude does not manage worktrees; pass an externally retained worktree as --workspace")
+
+    @staticmethod
+    def _schema(path):
+        """The JSON Schema text for --json-schema; Claude takes the schema itself, not a file path."""
+        schema = Path(path)
+        if not schema.is_absolute() or not schema.is_file():
+            raise ValueError("--output-schema must be an existing absolute file")
+        try:
+            if not isinstance(json.loads(schema.read_text(encoding="utf-8")), dict):
+                raise ValueError("not a JSON object")
+        except ValueError as error:
+            raise ValueError(f"--output-schema must hold a JSON Schema object: {error}") from error
+        return schema.read_text(encoding="utf-8")
 
     @staticmethod
     def _check_model(model):
@@ -102,6 +137,13 @@ class ClaudeEngine(WorkerEngine):
                 command += ["--session-id", request.session_id]
         else:
             command += ["--no-session-persistence"]
+        if request.output_schema:
+            # Claude validates the final answer against the schema and returns it as the result text.
+            command += ["--json-schema", self._schema(request.output_schema)]
+        if request.steering:
+            # Duplex turn: the prompt and later steering arrive as stream-json user messages on stdin,
+            # and Claude replays each one on stdout when it enters the conversation.
+            return command + ["--input-format", "stream-json", "--replay-user-messages"]
         # claive runs workers with stdin closed and Claude has no prompt-file flag, so the prompt is argv.
         command += ["--", Path(request.prompt_file).read_text(encoding="utf-8")]
         return command
@@ -127,6 +169,10 @@ class ClaudeEngine(WorkerEngine):
                         self._last_text = block.get("text", "")
                         result.append({"type": "output_delta", "native_kind": kind})
                 return result or [{"type": "model_step", "native_kind": kind}]
+        elif kind == "user" and event.get("isReplay"):
+            identifier = str(event.get("uuid") or "").replace("-", "")
+            return [{"type": "control_response", "native_kind": kind, "id": identifier, "command": "steer",
+                     "success": True, "data": "entered the conversation"}]
         elif kind == "user":
             message = event.get("message")
             blocks = message.get("content") if isinstance(message, dict) else None
@@ -155,6 +201,8 @@ class ClaudeEngine(WorkerEngine):
         elif kind == "result":
             completed = event.get("subtype") == "success" and not event.get("is_error")
             text = event.get("result") if isinstance(event.get("result"), str) else self._last_text
+            if completed and isinstance(event.get("structured_output"), (dict, list)):
+                text = json.dumps(event["structured_output"])
             return [{
                 "type": "terminal_completed" if completed else "terminal_failed",
                 "native_kind": kind,

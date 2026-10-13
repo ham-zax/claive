@@ -9,8 +9,10 @@ Muse remains the default engine. Use `claive-worker --engine pi` to select Pi.
 
 Claude Code is available with `--engine claude` (headless `claude -p`, binary `~/.local/bin/claude` or
 `CLAUDE_WORKER_BINARY`). It is strictly locked to `claude-haiku-5-5`: any other `--model`, role model or
-timeout fallback is refused. Efforts are `low` to `max` (default `xhigh`), auto-compacting at 100k tokens; `--max-model-steps`,
-`--output-schema` and worktree isolation are unsupported. Settings, hooks, MCP servers and skills are not loaded;
+timeout fallback is refused. Efforts are `low` to `max` (default `xhigh`), auto-compacting at 100k tokens; `--max-model-steps`
+and worktree isolation are unsupported. `--output-schema /abs/schema.json` is passed as Claude's `--json-schema`, so the
+result is the validated JSON object. `--enable-steering` switches to stream-json input for live steering
+(see [docs/steering.md](docs/steering.md)). Settings, hooks, MCP servers and skills are not loaded;
 read-only workers get `Read,Grep,Glob`.
 
 Codex is available with `--engine codex` (`codex exec --json`, binary from `CODEX_WORKER_BINARY` or the nvm install).
@@ -243,6 +245,8 @@ claive-memcap 2G -- npm test        # memory cap without systemd-run (init --ver
 claive-orch arms
 ```
 
+The full step-by-step protocol (step table, arbiter rules, integration, quota fallback) is in [docs/orchestration-ladder.md](docs/orchestration-ladder.md); the skill carries only the summary.
+
 The Skillshare source (`~/.config/skillshare/skills/`) is the canonical copy of the active skills, and every agent reads it through Skillshare links. This repository keeps a tracked mirror:
 
 - `skills/claive-orchestration`: verified Muse/Pi runs and general delegation for Claude Code, Codex, and shell parents.
@@ -331,6 +335,18 @@ Hosts without Muse (for example a Pi-only server) set the default engine and rol
 ```
 
 Role keys: `engine`, `model`, `reasoning_effort`, `read_only`, `max_model_steps` (ignored by Pi, which has no step cap), `preamble`. Stored workers keep the engine they were launched with.
+
+The same file holds the user's per-engine policy under `engines`. claive enforces it in code on every launch, follow-up, effort change, model fallback and batch stage, including workers that were already open when the file changed:
+
+```json
+{"engines": {
+  "claude": {"enabled": false, "reason": "subscription quota is for interactive use"},
+  "pi": {"default_model": "big-pickle", "default_reasoning_effort": "high",
+         "disabled_reasoning_efforts": ["max"],
+         "disabled_models": {"space-bunny-free": "too slow"}}}}
+```
+
+`"enabled": false` refuses the engine and tells the caller it is `explicitly disabled by the user`, with the optional `reason`, and not to retry or work around it. `default_model` and `default_reasoning_effort` apply when neither a flag nor a role chooses; the engine still validates them, so they cannot unlock a model an engine is locked against. `disabled_models` and `disabled_reasoning_efforts` are a list of names or an object mapping each name to a reason. A misspelt engine name or key fails every launch instead of silently disabling nothing. `claive engines [--json]` prints the effective policy, defaults and steering support per engine, and `doctor` reports disabled engines.
 
 A host whose `opencode2api` runs locally can route Pi turns over loopback instead of the public URL in `models.json` with `{"providers": {"opencode2api": {"base_url": "http://127.0.0.1:PORT/v1"}}}`. Only `localhost` and loopback addresses are accepted. Pi reads the URL only from `models.json`, so claive gives Pi turns an overlay agent directory (`$CLAIVE_DIR/pi-agent-overlay`: links to every entry of the real one plus a mode-600 `models.json` differing only in `baseUrl`), rebuilt each turn. The real `models.json` is never edited; `doctor` times both URLs, and workers record and print `Provider override:`.
 

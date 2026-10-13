@@ -1,4 +1,4 @@
-"""Turn-bound delivery receipts for opt-in Pi and Codex duplex steering."""
+"""Turn-bound delivery receipts for opt-in Pi, Codex and Claude duplex steering."""
 import dataclasses
 import fcntl
 import json
@@ -63,6 +63,7 @@ class Transport:
     """Supervisor-only nonblocking stdin owner; acknowledgements come from provider events."""
     def __init__(self, path, state, stream, initial_input):
         self.path, self.state, self.stream = path, state, stream
+        self.frame = get_engine(state.get("engine", "muse")).steering_frame
         self.pending = initial_input.encode()
         self.sending = None
         self.closed = False
@@ -85,7 +86,7 @@ class Transport:
                     file.unlink()
                     continue
                 self.sending = identifier
-                self.pending = (json.dumps(dict(type="steer", id=identifier, message=request["message"])) + "\n").encode()
+                self.pending = self.frame(identifier, request["message"]).encode()
                 file.unlink()
                 break
         if self.pending:

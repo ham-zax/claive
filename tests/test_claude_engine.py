@@ -63,6 +63,10 @@ class ClaudeChecks(unittest.TestCase):
         launch = dict(self.engine.resolve_launch(), binary=str(self.binary))
         with self.assertRaises(ValueError):
             self.engine.validate_launch(dict(launch, output_schema="/x.json"))
+        broken = self.root / "broken.json"
+        broken.write_text("[1]")
+        with self.assertRaises(ValueError):
+            self.engine.validate_launch(dict(launch, output_schema=str(broken)))
         with self.assertRaises(ValueError):
             self.engine.validate_launch(dict(launch, isolation={"mode": "create"}))
         with self.assertRaises(ValueError):
@@ -92,6 +96,17 @@ class ClaudeChecks(unittest.TestCase):
         self.assertNotIn("--session-id", resumed)
         self.assertIn("--no-session-persistence", self.engine.build_command(
             self.request(session_id=None, session_logging=False)))
+
+    def test_output_schema_becomes_json_schema_and_structured_result(self):
+        schema = self.root / "schema.json"
+        schema.write_text('{"type": "object", "required": ["verdict"]}')
+        self.engine.validate_launch(dict(self.engine.resolve_launch(output_schema=str(schema)), binary=str(self.binary)))
+        command = self.engine.build_command(self.request(output_schema=str(schema)))
+        self.assertEqual(command[command.index("--json-schema") + 1], schema.read_text())
+        self.assertNotIn("--json-schema", self.engine.build_command(self.request()))
+        done = self.engine.normalize_event({"type": "result", "subtype": "success", "is_error": False,
+                                            "result": "prose", "structured_output": {"verdict": "pass"}})
+        self.assertEqual(json.loads(done[0]["text"]), {"verdict": "pass"})
 
     def test_events_normalize_to_a_single_terminal(self):
         events = [

@@ -1,5 +1,6 @@
 """Engine-neutral turn request contract."""
 from dataclasses import dataclass, field
+import json
 from typing import Optional, Tuple
 import uuid
 
@@ -67,6 +68,10 @@ class WorkerEngine:
     def initial_input(self, request):
         """Optional stdin protocol input for an opt-in duplex transport."""
         return None
+
+    def steering_frame(self, identifier, message):
+        """One stdin line that delivers a steering instruction over the duplex transport."""
+        return json.dumps(dict(type="steer", id=identifier, message=message)) + "\n"
 
     def validate_turn(self, request):
         """Reject unsupported turn options before launch or queue acceptance."""

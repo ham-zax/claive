@@ -484,11 +484,17 @@ def collect_stats(histories):
     return {"critics": critics, "implementers": implementers, "categories": categories}
 
 
+def _excluded(model):
+    """Built-in model policy plus the user's engines policy for the Pi rosters."""
+    from claivelib import config as cfg
+    return workers.disallowed_model(model) or cfg.model_disabled("pi", model)
+
+
 def pick_critic(stats_critics, lane_family, seed, roster=CRITIC_ROSTER, reserve=CRITIC_RESERVE,
                 min_uses=3, explore=0.2):
     """Choose a cross-family critic: cold-start, then epsilon-greedy on smoothed rates."""
     def pool_candidates(pool):
-        return [m for m in pool if model_family(m, "pi") != lane_family and not workers.disallowed_model(m)]
+        return [m for m in pool if model_family(m, "pi") != lane_family and not _excluded(m)]
     candidates = pool_candidates(roster)
     order = list(roster)
     if not candidates:
@@ -621,7 +627,7 @@ def breadth_choice(stats_implementers, lane_a_family, critic_families, roster=CR
         out = []
         for model in pool:
             family = model_family(model, "pi")
-            if family == lane_a_family or workers.disallowed_model(model):
+            if family == lane_a_family or _excluded(model):
                 continue
             if strict and family in critics:
                 continue

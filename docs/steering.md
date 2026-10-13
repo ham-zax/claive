@@ -1,7 +1,8 @@
 # Steering a running worker
 
-Pi and Codex support native input at a model-call boundary through distinct transports.
-Pi uses RPC and Codex uses App Server (v2 `turn/steer`). Opt in when launching a worker:
+Pi, Codex and Claude support native input at a model-call boundary through distinct transports.
+Pi uses RPC, Codex uses App Server (v2 `turn/steer`) and Claude uses stream-json input. Opt in
+when launching a worker:
 
 ```sh
 claive open --engine pi --enable-steering \
@@ -33,6 +34,17 @@ response included the steered `CLAIVE_STEER_VERIFIED` marker. The ARM host
 reported a bubblewrap/user-namespace warning; this no-tool smoke does not
 establish that sandboxed shell tools work on the host.
 
+For Claude, launch with `--engine claude --enable-steering`. The adapter then starts
+`claude --print --input-format stream-json --replay-user-messages` and sends the prompt and each
+steering instruction as a stream-json user message on stdin; without the flag the prompt stays in
+argv with stdin closed. Claude adds the instruction after the current tool calls finish and before
+its next model request, and replays it on stdout at that moment with the receipt's ID. claive
+records that replay as `acknowledged` with disposition `entered the conversation`, so for Claude
+an acknowledgement means the instruction is in the model's context, not only received. A real
+Claude Code 2.1.296 smoke on 2026-10-13 (Haiku 5.5) steered during a 10-second Bash call and
+completed the same turn with the steered `CLAIVE_STEER_VERIFIED` marker. An instruction that
+arrives after the last model request of the turn is not replayed and ends `unconfirmed`.
+
 `--message-file` can read an instruction from a file. This sends a correlated
 `steer` command into the running agent process. Pi queues the instruction after
 current tool calls finish and before the next model request. It does not change
@@ -54,11 +66,11 @@ still stops the worker process group. Steering and single-turn model fallbacks
 cannot be combined. All other launch policy (model, tools, read-only settings,
 extensions, provider overlays, session retention) is preserved.
 
-Current Muse `exec` and Claude print adapters explicitly reject
+The current Muse `exec` adapter explicitly rejects
 steering. Muse's installed headless mailbox returns
 `external_agent_ingress_closed`; its MSP `turn/steer` surface requires a persistent
-`muse serve` host that this adapter does not launch. These are current transport
-limitations, not claims that the providers lack every possible interactive API.
+`muse serve` host that this adapter does not launch. This is a current transport
+limitation, not a claim that the provider lacks every possible interactive API.
 
 Protocol evidence: installed Pi 1.1.0 `dist/modes/rpc/rpc-mode.js` accepts JSON
 `prompt` and `steer` commands, emits correlated `response` events, and shuts down

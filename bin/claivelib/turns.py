@@ -9,7 +9,7 @@ import time
 import uuid
 
 from claivelib import cli
-from claivelib.engines import DEFAULT_ENGINE, get_engine
+from claivelib.engines import DEFAULT_ENGINE
 
 
 def queue(path, prompt_file, label=None, reasoning_effort=None, max_model_steps=None,
@@ -28,7 +28,7 @@ def queue(path, prompt_file, label=None, reasoning_effort=None, max_model_steps=
         if max_model_steps is not None and max_model_steps < 1:
             raise ValueError("--max-model-steps must be positive")
         policy = json.loads((path / "policy.json").read_text())
-        get_engine(state.get("engine", DEFAULT_ENGINE)).validate_turn(cli.turn_request(
+        cli.validate_turn(state.get("engine", DEFAULT_ENGINE), cli.turn_request(
             state, prompt_file=str(prompt),
             reasoning_effort=reasoning_effort or policy["reasoning_effort"],
             max_model_steps=max_model_steps if max_model_steps is not None else policy["max_model_steps"],

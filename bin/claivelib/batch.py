@@ -194,6 +194,7 @@ def validate_plan(plan_path):
                 cli_mod.check_model_policy(model)
             engine_name = resolved.get("engine") or (roles[role]["engine"] if role else None) or default_engine()
             get_engine(engine_name)
+            cli_mod.check_engine_policy(engine_name, model, resolved.get("reasoning_effort"))
             steps = resolved.get("max_model_steps")
             if steps is not None and steps < 1:
                 raise ValueError(f"stage {name}: max_model_steps must be positive")

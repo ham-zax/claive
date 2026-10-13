@@ -56,6 +56,22 @@ def check_model_policy(model):
         raise ValueError(f"model {model} is disallowed by claive policy")
 
 
+def check_engine_policy(engine_name, model=None, reasoning_effort=None):
+    """Enforce the user's engines policy; a misspelt engine name must not silently disable nothing."""
+    for name in config.load().get("engines", {}):
+        try:
+            get_engine(name)
+        except ValueError as error:
+            raise ValueError(f"invalid claive config {config.config_path()}: engines.{name}: {error}") from error
+    config.check_engine(engine_name, model, reasoning_effort)
+
+
+def validate_turn(engine_name, request):
+    """Apply the user's engines policy, then the engine's own turn rules."""
+    check_engine_policy(engine_name, request.model, request.reasoning_effort)
+    get_engine(engine_name).validate_turn(request)
+
+
 def parse_turn_timeout(raw):
     if raw is None:
         return None
@@ -492,6 +508,7 @@ def rebuild_for_fallback(state, engine, new_model):
         session_logging=fresh_launch["session_logging"], isolation=fresh_launch["isolation"],
         session_dir=fresh_launch.get("session_dir"), steering=bool(fresh_launch.get("steering")),
     )
+    check_engine_policy(engine.name, request.model, request.reasoning_effort)
     command = engine.build_command(request)
     return fresh_launch, command, fresh_session
 
@@ -938,7 +955,7 @@ def reusable_worker(job_id):
                     next_turn = turn_request(state, prompt_file=effective,
                                              reasoning_effort=effort, max_model_steps=steps,
                                              isolation=isolation)
-                    engine.validate_turn(next_turn)
+                    validate_turn(state.get("engine", DEFAULT_ENGINE), next_turn)
                     command = engine.build_command(next_turn)
                 except ValueError as error:
                     state.update(last_turn_status="failed", error=str(error),
@@ -1006,8 +1023,11 @@ def create_job(args):
         raise ValueError(f"unknown role: {role}")
     engine_name = getattr(args, "engine", None) or (role_def["engine"] if role_def else None) or default_engine()
     engine = get_engine(engine_name)
+    check_engine_policy(engine_name)
+    policy = config.engine_policy(engine_name)
     session_id = engine.resolve_session_id(args.session_id, not args.no_session_log)
-    effort = args.reasoning_effort or (role_def["reasoning_effort"] if role_def else None) or engine.default_reasoning_effort
+    effort = (args.reasoning_effort or (role_def["reasoning_effort"] if role_def else None)
+              or policy.get("default_reasoning_effort") or engine.default_reasoning_effort)
     if args.max_model_steps is not None:
         steps = args.max_model_steps
     elif role_def and role_def.get("max_model_steps") is not None and engine.default_max_model_steps is not None:
@@ -1017,7 +1037,7 @@ def create_job(args):
     read_only = bool(args.read_only or (role_def and role_def.get("read_only")))
     config.check_workspace([workspace] + ([Path(args.worktree_existing)] if args.worktree_existing else []),
                            read_only)
-    effective_model = args.model or (role_def["model"] if role_def else None)
+    effective_model = args.model or (role_def["model"] if role_def else None) or policy.get("default_model")
     check_model_policy(effective_model)
     isolation = dict(mode="create" if args.worktree else "existing" if args.worktree_existing else "none",
                      base=args.worktree_base, existing_path=args.worktree_existing)
@@ -1040,7 +1060,7 @@ def create_job(args):
         session_logging=launch["session_logging"], isolation=launch["isolation"],
         session_dir=launch.get("session_dir"), steering=bool(launch.get("steering")),
     )
-    engine.validate_turn(initial_turn)
+    validate_turn(engine_name, initial_turn)
     mission_id = getattr(args, "mission", None) or os.environ.get("CLAIVE_MISSION") or None
     if mission_id:
         from claivelib import mission as mission_mod
@@ -1306,7 +1326,17 @@ def doctor_checks(live=False):
     except ValueError:
         default = None
     results = {}
+    try:
+        policies = config.load().get("engines", {})
+    except ValueError:
+        policies = {}
     for name in ("muse", "pi", "claude", "codex"):
+        if policies.get(name, {}).get("enabled") is False:
+            results[name] = False
+            reason = policies[name].get("reason")
+            add(name, name != default, name == default,
+                "disabled by user" + (f": {reason}" if reason else ""))
+            continue
         try:
             binary = importlib.import_module(f"claivelib.engines.{name}").default_binary()
         except ImportError:
@@ -1422,6 +1452,41 @@ def doctor_checks(live=False):
     return checks
 
 
+def engines_report(json_output=False):
+    """What a parent may launch: the user's policy and the effective defaults for every engine."""
+    check_engine_policy(None)
+    default, rows = default_engine(), []
+    for name in ("muse", "pi", "claude", "codex"):
+        policy = config.engine_policy(name)
+        row = dict(engine=name, enabled=policy.get("enabled", True), reason=policy.get("reason", ""),
+                   default=name == default,
+                   disabled_models=policy.get("disabled_models", []),
+                   disabled_reasoning_efforts=policy.get("disabled_reasoning_efforts", []))
+        try:
+            engine = get_engine(name)
+            capability = engine.steering_capability()
+            row.update(default_model=policy.get("default_model") or getattr(engine, "default_model", None),
+                       default_reasoning_effort=(policy.get("default_reasoning_effort")
+                                                 or engine.default_reasoning_effort),
+                       steering=capability.mechanism if capability.supported else None)
+        except ValueError as error:
+            row.update(enabled=False, reason=row["reason"] or str(error))
+        rows.append(row)
+    if json_output:
+        print(json.dumps({"engines": rows}, indent=2))
+        return 0
+    for row in rows:
+        if not row["enabled"]:
+            print(f"{row['engine']} DISABLED" + (f" ({clean(row['reason'])})" if row["reason"] else ""))
+            continue
+        blocked = [f"no {label} {', '.join(row[key])}" for label, key in
+                   (("model", "disabled_models"), ("effort", "disabled_reasoning_efforts")) if row[key]]
+        print(f"{row['engine']}{' (default)' if row['default'] else ''} model {row['default_model'] or 'engine default'}"
+              f" effort {row['default_reasoning_effort']} steering {row['steering'] or 'no'}"
+              + "".join(f"; {item}" for item in blocked))
+    return 0
+
+
 def doctor(json_output=False, live=False):
     checks = doctor_checks(live)
     ok = all(item["ok"] for item in checks if item["required"])
@@ -1484,7 +1549,7 @@ def parser():
         launch.add_argument("--label")
         launch.add_argument("--engine", default=None)
         launch.add_argument("--role", choices=sorted(ROLES))
-        launch.add_argument("--enable-steering", action="store_true", help="opt into supported duplex provider transport (Pi RPC)")
+        launch.add_argument("--enable-steering", action="store_true", help="opt into the duplex provider transport (Pi, Codex, Claude)")
         launch.add_argument("--checks-file", help="absolute JSON required-check manifest for parent verification")
         launch.add_argument("--owned-path", action="append", help="workspace-relative allowed path or glob (repeatable)")
         launch.add_argument("--report", action="store_true", help="request a structured claive-report block")
@@ -1663,6 +1728,8 @@ def parser():
     watch.add_argument("--no-color", action="store_true")
     watch.add_argument("--compact", action="store_true", help="at most five lines; one row per worker")
     commands.add_parser("status-line", help="one-line summary for tmux or shell status bars")
+    engines_cmd = commands.add_parser("engines", help="list each engine's user policy, defaults and steering support")
+    engines_cmd.add_argument("--json", action="store_true")
     examined = commands.add_parser("doctor", help="read-only health check; launches a model only with --live")
     examined.add_argument("--json", action="store_true")
     examined.add_argument("--live", action="store_true",
@@ -1876,7 +1943,7 @@ def main(launcher=None):
         if args.max_model_steps is not None and args.max_model_steps < 1:
             raise ValueError("--max-model-steps must be positive")
         policy = json.loads((path / "policy.json").read_text())
-        get_engine(state.get("engine", DEFAULT_ENGINE)).validate_turn(turn_request(
+        validate_turn(state.get("engine", DEFAULT_ENGINE), turn_request(
             state, reasoning_effort=args.reasoning_effort,
             max_model_steps=args.max_model_steps if args.max_model_steps is not None else policy["max_model_steps"],
         ))
@@ -1921,6 +1988,8 @@ def main(launcher=None):
             raise ValueError("no matching live supervisor; no signal sent")
         os.kill(pid, signal.SIGTERM)
         print(f"Cancellation requested for {args.id}. Check with claive wait {args.id}.")
+    elif args.action == "engines":
+        return engines_report(args.json)
     elif args.action == "doctor":
         return doctor(args.json, args.live)
     elif args.action == "answer":
@@ -1941,7 +2010,7 @@ def main(launcher=None):
         answer_file.write_text(f"Parent question was:\n{question}\n\nParent decision:\n{decision}\n\n"
                                "Continue the assignment with this decision.\n")
         policy = json.loads((path / "policy.json").read_text())
-        get_engine(state.get("engine", DEFAULT_ENGINE)).validate_turn(turn_request(
+        validate_turn(state.get("engine", DEFAULT_ENGINE), turn_request(
             state, prompt_file=str(answer_file),
             reasoning_effort=policy["reasoning_effort"], max_model_steps=policy["max_model_steps"],
         ))

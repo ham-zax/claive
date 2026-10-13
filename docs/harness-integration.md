@@ -176,6 +176,9 @@ Claive Codex workers default to `--ignore-user-config` so user-level tools canno
 - Workers get `CLAIVE_WORKER_ID` and cannot launch workers or batches (this
   prevents recursive orchestration when a worker reads claive's own skills).
   `CLAIVE_ALLOW_NESTED=1` overrides this; use it only on purpose.
+- `claive engines [--json]` reports the user's engine policy (enabled state and
+  reason, default and disabled models and efforts, steering transport). Launches,
+  follow-ups and batch plans that violate it are refused before any model call.
 - `claive doctor` checks binaries (it runs `pi --version`), the state directory,
   the config, that Pi's `models.json` lists every model claive may request
   (`pi_provider`), the provider's `GET /models` latency, and quota, without
@@ -273,7 +276,7 @@ project's `install.sh`, which backs up changed destinations and copies the whole
 package. User config opt-in for Codex does not enable rules: `--ignore-rules`
 remains supplied. Missing provenance/source is reported explicitly.
 
-For genuine steering at the next Pi/Codex model boundary, see [steering.md](steering.md).
+For genuine steering at the next Pi/Codex/Claude model boundary, see [steering.md](steering.md).
 Use `install.sh --runtime-only` when syncing just the runtime; Skillshare owns skills.
 
 The installer backs up and migrates symlinks to this checkout's own command

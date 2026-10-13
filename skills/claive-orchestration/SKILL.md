@@ -38,7 +38,7 @@ The TTC experiment is deferred and is not part of this workflow.
 - **Performance, profiling, debugging:** measure the baseline first; see the
   measurement rules at the top of `docs/orchestration-ladder.md`.
 - Respect the host's rules on delegation. Hamza's Claude Code setup grants
-  standing permission for Muse and Pi workers; elsewhere, ask first if the host
+  standing permission for Codex and Pi workers; elsewhere, ask first if the host
   requires it.
 
 ## Engines and policy
@@ -72,7 +72,7 @@ used in the run or failing. `muse-spark-1.3-free` and
 never use them as critic or lane b against Muse.
 
 **Reasoning effort.** Pi models are free: run them at `max` (the Pi engine default;
-Pi clamps it to each model's highest level). Muse uses `xhigh` normally and `max` for
+Pi clamps it to each model's highest level). Codex uses `xhigh` normally and `max` for
 very complicated tasks (deep debugging, cross-cutting design, subtle concurrency or
 data-format work); use `high` or `medium` only for trivial mechanical chores, and say
 why. Claude and Codex workers use `high` unless the user names a level for that task:

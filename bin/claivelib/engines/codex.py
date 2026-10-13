@@ -17,8 +17,11 @@ CODEX_EFFORTS = {CODEX_MODEL: CODEX_EFFORT, "gpt-6.1-sol": "xhigh"}
 
 
 def default_binary():
+    """CODEX_WORKER_BINARY, else ~/.local/bin/codex, else the pinned nvm install, else PATH."""
+    local = Path.home() / ".local/bin/codex"
     pinned = Path.home() / ".nvm/versions/node/v24.19.0/bin/codex"
-    return os.environ.get("CODEX_WORKER_BINARY", str(pinned if pinned.is_file() else shutil.which("codex") or pinned))
+    found = next((path for path in (local, pinned) if path.is_file()), None)
+    return os.environ.get("CODEX_WORKER_BINARY", str(found or shutil.which("codex") or local))
 
 
 def _home():

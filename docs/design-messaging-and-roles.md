@@ -1,7 +1,7 @@
 # Design note: worker messaging, channels and roles
 
-Status: revision 3. Features 1 (`send`) and 2 (`wait --inbox`) are built. The rest is a
-proposal.
+Status: revision 3. Features 1 to 4 (`send`, `wait --inbox`, `ask`/`peek`, refusals and
+receipts) are built. The rest is a proposal.
 
 Source: [Local Operator](https://github.com/damianvtran/local-operator) (`lop`). Revision 2
 uses its source code, not only the README. The main files are
@@ -159,20 +159,33 @@ claive ask ID --message "..." --timeout 120   # question, wait for the answer
 claive peek ID [--steps 5]                    # last steps, no interruption
 ```
 
-- `ask` delivers with `now` (or `wake` when the worker is idle).
-- An answer through the reply command counts. An answer in plain text with no tool calls
-  also counts.
-- When the timeout passes, claive withdraws the question. A late question never arrives.
-- `peek` reads the event log only. It has a limit of 50 steps and a character limit for
-  each step.
+- `ask` delivers with `now` (or `wake` when the worker is idle, or `note` when it is busy
+  without steering). The timeout is 0 < S <= 3600 seconds (default 120).
+- The worker answers with `claive reply MSG_ID --message ...`, or the final text of the
+  delivery turn counts. Built: lop's "an assistant message with no tool calls is the answer"
+  rule is not added, because in claive such a message ends the turn, so the final-text rule
+  already covers it.
+- When the timeout passes, claive withdraws a question that has not arrived (note, wake
+  request or steering request). The deadline is also stored with the message, so a
+  question cannot arrive late even when the `ask` process stops. A delivered question
+  without an answer ends `expired`. Exit codes: 0 answered, 124 withdrawn or expired,
+  3 the worker needs the parent, 1 refused or failed turn.
+- `peek` reads the event log only, for the parent only. Steps have stable 1-based numbers
+  and a total; `--steps` (1..50, default 5) and `--start N` page through them. Each step
+  is cut to 600 characters in the middle (head and tail kept), as in lop.
 
 ### 4. Refusals and receipts
 
-- **Ambiguous target:** list the matches and exit with an error.
-- **Refusals with reasons:** sends to itself, to closed workers or to workers outside the
-  channel are refused. Each refusal tells the sender how to fix the request.
-- **Receipts in both directions:** the target transcript shows the sender, the
-  engine/model, the channel and the message ID.
+- **Ambiguous target:** worker commands accept a 4..11 character ID prefix. An ambiguous
+  prefix lists the matches and exits with an error.
+- **Refusals with reasons:** sends to itself and sends from workers are refused. `wake`
+  (and the wake of `now` and `ask`) is refused while the worker waits for a parent
+  decision; `note` stays allowed. Channel refusals come with feature 5.
+- **Receipts in both directions:** each delivered message is a `<parent-message>` envelope
+  (adapted from lop) with an instruction line and `[Message ID: <id> | from: <sender>]`.
+  The sender is `parent ($CLAIVE_PARENT)` or `parent (unknown harness)`. The sender's
+  receipt has the target, engine and model. The final text of each turn is kept in
+  `results/turn-NNNN.txt`.
 
 ### 5. Channels opened by the parent
 
@@ -235,7 +248,7 @@ switch. Engines that cannot limit tools must refuse a role that needs a limit.
 ## Build order
 
 1. Done: `send` (feature 1) and event-based `wait` (feature 2)
-2. `ask` and `peek` (feature 3), and refusals and receipts (feature 4)
+2. Done: `ask` and `peek` (feature 3), and refusals and receipts (feature 4)
 3. Run the kill test from review 1 with a minimal channel
 4. If the kill test passes: full channels (feature 5)
 5. Roles (feature 6)

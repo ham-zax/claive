@@ -54,7 +54,8 @@ fi
 skill_roots=("$codex_skills" "$claude_skills")
 ! "$with_pi" || skill_roots+=("$pi_skills")
 if ! "$runtime_only"; then
-for skill in claive-orchestration; do
+shared_skills=(claive-orchestration)
+for skill in "${shared_skills[@]}"; do
   for skills_root in "${skill_roots[@]}"; do
     sources+=("$source_dir/skills/$skill/SKILL.md")
     targets+=("$skills_root/$skill/SKILL.md")

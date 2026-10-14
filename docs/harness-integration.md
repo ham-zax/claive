@@ -76,8 +76,13 @@ Any parent using the same `$CLAIVE_DIR` can discover it with
 queue related work with `claive followup @backend --prompt-file /abs/task.md`.
 To add context without a new task, use `claive send @backend --message '...'`
 (`--mode note|wake|now`; receipts in the worker's `messages/receipts/`).
-Worker commands accept `@name` in place of an ID, including `answer` and
-`wait --any`. Names do not start workers or restore closed sessions.
+To question it, `claive ask @backend --message '...' --timeout 120` (exit 0 answered,
+124 withdrawn/expired, 3 needs the parent); the worker answers with `claive reply
+MSG_ID --message '...'` or in its final text. `claive peek @backend [--steps N]
+[--start N]` reads its numbered recent steps without touching it (parent only).
+Set `CLAIVE_PARENT=<harness>` to name the sender in delivered messages.
+Worker commands accept `@name` or a unique 4..11 character ID prefix in place of
+an ID, including `answer` and `wait --any`. Names do not start workers or restore closed sessions.
 
 An operation resolves the address once; its output and persisted mission links
 use the worker ID, so rebinding a name cannot move an existing assignment.

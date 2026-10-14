@@ -1,0 +1,17 @@
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: sudo apt-get install -y shellcheck
+      - run: python3 -m compileall -q bin/claivelib tests
+      - run: shellcheck install.sh bin/claive-worker bin/claive-codex
+      - run: python3 -m unittest discover -s tests -p 'test_*.py'

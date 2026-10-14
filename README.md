@@ -32,6 +32,18 @@ Use `claive send ID --message "..."` to leave a note for a reusable worker's nex
 `--mode wake` to start a turn when the worker is idle, or `--mode now` to steer a supported,
 opted-in running turn (it falls back to wake when steering is unavailable). `--message-file`
 accepts an absolute file path, `--id` makes a send retry-safe, and `--json` prints the receipt.
+Messages arrive as a `<parent-message>` envelope with the message ID and sender (set
+`CLAIVE_PARENT` to name your harness). A worker cannot message itself or other workers, and
+`wake` is refused while the worker waits for `claive answer`.
+
+`claive ask ID --message "..." [--timeout 120]` asks a question and waits for the answer:
+the worker replies with `claive reply MSG_ID --message "..."`, or the final text of that
+turn counts. A question that has not arrived by the deadline is withdrawn. Exit codes: 0
+answered, 124 withdrawn or expired, 3 the worker needs the parent, 1 refused.
+
+`claive peek ID [--steps 5] [--start N] [--json]` shows numbered recent steps of a worker
+(text, tool calls, results) without touching it. Parent only. Worker commands also accept a
+unique ID prefix of 4 to 11 characters.
 
 ## Native Codex progress
 
@@ -365,5 +377,8 @@ Run checks from the repository root. The suite is hermetic: `tests/hermetic.py` 
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 shellcheck install.sh bin/claive-worker bin/claive-codex
 ```
+
+`just check` runs both; `just test-one tests/test_x.py` runs single files (no `PYTHONPATH` needed).
+CI (`.github/workflows/test.yml`) runs the same checks on every push to main and every pull request.
 
 Checks cover pinned Muse defaults, structured/legacy state compatibility, the engine-neutral fixture lifecycle, reusable follow-ups, dynamic effort, closure/cancellation, cache-usage accounting, subscription-quota notices, terminal-event validation, malformed and failed results, process-group cancellation, concurrent jobs, stale process identities, installer isolation, private state files, and tmux with nondefault pane indices. A real Muse echo check characterizes linked-worktree creation and cleanup when Muse is installed; the tmux check requires tmux. These checks do not test live model authentication or model availability. Test workers and the temporary tmux server are stopped during cleanup.

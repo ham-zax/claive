@@ -178,7 +178,10 @@ combined with single-turn model fallbacks. Receipt states: `docs/steering.md`.
 **Messages.** `claive send ID --message '...' [--mode note|wake|now] [--id HEX32] --json`
 gives a reusable worker context without a new task. `note` (default) waits for its next
 turn, `wake` starts a turn when it is idle, `now` steers and falls back to `wake`. The
-message is context, not a change of assignment. A repeated `--id` returns the first receipt.
+message is context, not a change of assignment. A repeated `--id` returns the first receipt. Question a worker with `claive ask ID --message '...' --timeout 120` (0 answered, 124
+withdrawn/expired, 3 needs the parent); it answers with `claive reply MSG_ID` or its final
+text. `claive peek ID [--steps N] [--start N]` shows its numbered recent steps without
+interrupting it. IDs accept a unique 4..11 character prefix.
 
 **Workers talking to each other.** When two or more perspectives should react to each
 other's reasoning (design debate, proposer/critic rounds, cross-checking a diagnosis),

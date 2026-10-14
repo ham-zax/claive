@@ -180,6 +180,35 @@ class PiEngine(WorkerEngine):
             self._selected_model = None
         return command
 
+    def describe_event(self, event) -> list[dict]:
+        from claivelib.peek import content_text, compact
+
+        kind = event.get("type")
+        if not isinstance(kind, str):
+            return super().describe_event(event)
+        if kind == "message_end":
+            message = event.get("message")
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                if message.get("stopReason") in {"error", "aborted"}:
+                    return [{"kind": "error", "text": str(message.get("errorMessage") or
+                                                          message["stopReason"])}]
+                text = content_text(message.get("content"))
+                return [{"kind": "text", "text": text}] if text else []
+            return []
+        if kind == "tool_execution_start":
+            return [{"kind": "tool_call", "text": str(event.get("toolName", "tool")) +
+                     " " + compact(event.get("args", {}))}]
+        if kind == "tool_execution_end":
+            result = event.get("result")
+            text = content_text(result.get("content")) if isinstance(result, dict) else ""
+            return [{"kind": "tool_result", "text": ("error: " if event.get("isError") else "") + text}]
+        if kind == "response" and event.get("success") is False:
+            return [{"kind": "error", "text": str(event.get("error") or "Pi prompt rejected")}]
+        if kind in {"message_start", "message_update", "agent_start", "agent_end",
+                    "agent_settled", "turn_start", "turn_end", "session"}:
+            return []
+        return super().describe_event(event)
+
     def normalize_event(self, event):
         kind = event.get("type")
         if not isinstance(kind, str):

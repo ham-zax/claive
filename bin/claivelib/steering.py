@@ -42,6 +42,24 @@ def submit(path, message):
         return record
 
 
+def withdraw(path, receipt_id):
+    """Claim an unconsumed request so it can no longer reach the provider."""
+    if not re.fullmatch(r"[0-9a-f]{32}", receipt_id):
+        raise ValueError("invalid steering receipt ID")
+    with (path / ".steering.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        for file in (path / "steering" / "requests").glob(f"*-{receipt_id}.json"):
+            try:
+                os.rename(file, file.with_name(file.name + ".withdrawn"))
+            except FileNotFoundError:
+                continue
+            record = receipt(path, receipt_id)
+            record.update(status="withdrawn", updated_at=time.time())
+            atomic(path / "steering" / "receipts" / f"{receipt_id}.json", record)
+            return True
+    return False
+
+
 def summary(path, state):
     # Steering is a new explicit launch flag; reporting it needs no legacy command decoding.
     launch = state.get("launch") if isinstance(state.get("launch"), dict) else {}
@@ -79,15 +97,21 @@ class Transport:
             return
         if not self.pending:
             for file in sorted((self.path / "steering" / "requests").glob("*.json")):
-                request = json.loads(file.read_text())
+                claimed = file.with_suffix(".claimed")
+                try:
+                    os.rename(file, claimed)
+                except FileNotFoundError:
+                    continue
+                try:
+                    request = json.loads(claimed.read_text())
+                finally:
+                    claimed.unlink(missing_ok=True)
                 identifier = request["id"]
                 if request["turn"] != self.state.get("turn", 1):
                     self.update(identifier, status="not_delivered", reason="original turn ended")
-                    file.unlink()
                     continue
                 self.sending = identifier
                 self.pending = self.frame(identifier, request["message"]).encode()
-                file.unlink()
                 break
         if self.pending:
             try:
@@ -139,6 +163,7 @@ class Transport:
                         self.update(record["id"], status=status, reason="turn ended before provider acknowledgement", turn_ended=True)
                     else:
                         self.update(record["id"], turn_ended=True)
-                for file in (self.path / "steering" / "requests").glob("*.json"):
+                requests = self.path / "steering" / "requests"
+                for file in list(requests.glob("*.json")) + list(requests.glob("*.claimed")):
                     if json.loads(file.read_text()).get("turn") == self.state.get("turn", 1):
                         file.unlink()

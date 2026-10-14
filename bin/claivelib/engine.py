@@ -92,6 +92,10 @@ class WorkerEngine:
     def normalize_event(self, event):
         raise NotImplementedError
 
+    def describe_event(self, event) -> list[dict]:
+        """Describe a raw provider event without updating engine state."""
+        return [{"kind": "event", "text": str(event.get("type", "unknown"))}]
+
     def discover_workspace(self, command, stderr_text):
         return None
 

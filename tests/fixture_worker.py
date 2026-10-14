@@ -33,6 +33,16 @@ def emit(kind, **payload):
 
 
 emit("model")
+if mode == "reply":
+    question_id = re.search(r"claive reply ([0-9a-f]{32})", prompt_text)[1]
+    launcher = os.path.join(os.path.dirname(__file__), "fixture-workers")
+    replies = [subprocess.run([launcher, "reply", question_id, "--message", "fixture reply"],
+                              text=True, capture_output=True) for _ in range(2)]
+    if os.environ.get("FIXTURE_REPLY_OUT"):
+        with open(os.environ["FIXTURE_REPLY_OUT"], "w") as output:
+            json.dump([dict(code=result.returncode, stdout=result.stdout, stderr=result.stderr)
+                       for result in replies], output)
+    time.sleep(0.4)
 if mode == "brief":
     time.sleep(0.3)
 if mode == "slow":

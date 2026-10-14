@@ -19,6 +19,51 @@ sys.path.insert(0, str(REPO_ROOT / "bin"))
 from claivelib import messaging
 
 
+class EnvelopeChecks(unittest.TestCase):
+    def setUp(self):
+        self.note = dict(id="a" * 32, sender="parent (codex)", kind="send",
+                         message="Keep this body.\n\nIncluding its blank line.\n")
+        self.ask = dict(self.note, id="b" * 32, kind="ask", expires_at=0)
+
+    def test_exact_note_and_ask_envelopes(self):
+        note_instruction = "This is a note from the parent, not a question and not a change of assignment. No reply is needed."
+        ask_instruction = (
+            'Answer it now with `claive reply ' + "b" * 32 + ' --message "..."` '
+            '(a short, direct reply), then carry on with what you were doing. '
+            'Do not restructure your work around the question. If you cannot run '
+            'that command, give the answer in your final message. If you read this '
+            'after 1970-01-01T00:00:00Z, ignore it.')
+        for record, instruction in ((self.note, note_instruction), (self.ask, ask_instruction)):
+            with self.subTest(kind=record["kind"]):
+                self.assertEqual(messaging.delivered_text(record),
+                    f"<parent-message>\n{instruction}\n\n"
+                    f"[Message ID: {record['id']} | from: parent (codex)]\n"
+                    f"{record['message']}\n</parent-message>")
+
+    def test_extraction_round_trips_and_rejects_other_text(self):
+        for record, kind in ((self.note, "note"), (self.ask, "ask")):
+            envelope = messaging.delivered_text(record)
+            self.assertEqual(messaging.extract_parent_message(envelope),
+                             (kind, record["id"], record["message"]))
+            for text in ("quoted:\n" + envelope, envelope + "\nextra", envelope + "\n",
+                         envelope.replace("No reply is needed.", "Please reply.") if kind == "note"
+                         else envelope.replace("Answer it now", "Answer it later"),
+                         envelope + "\n\n" + envelope, "plain text"):
+                with self.subTest(kind=kind, text=text):
+                    self.assertIsNone(messaging.extract_parent_message(text))
+        envelope = messaging.delivered_text(self.ask)
+        self.assertIsNone(messaging.extract_parent_message(
+            envelope.replace("claive reply " + self.ask["id"], "claive reply " + "c" * 32)))
+
+    def test_format_block_joins_visible_envelopes_without_heading(self):
+        messages = [(None, self.note), (None, self.ask)]
+        self.assertEqual(messaging.format_block(messages),
+                         messaging.delivered_text(self.note) + "\n\n" + messaging.delivered_text(self.ask))
+        self.assertEqual(messaging.format_block(messages, [self.note["id"]]),
+                         messaging.delivered_text(self.ask))
+        self.assertEqual(messaging.format_block(messages, [self.note["id"], self.ask["id"]]), "")
+
+
 class MessagingChecks(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="messaging-check-")
@@ -126,8 +171,11 @@ class MessagingChecks(unittest.TestCase):
         self.assertEqual(self.cli("followup", worker_id, "--prompt-file", str(self.prompt)).returncode, 0)
         self.until_idle(worker_id, 2)
         prompt = self.prompt_for_turn(1)
-        self.assertIn("Messages from the parent (context, not a change of assignment):", prompt)
-        self.assertLess(prompt.index("[Message ID: " + message_id + "]"), prompt.index("Continue the existing assignment."))
+        self.assertEqual(prompt.count("<parent-message>"), 1)
+        self.assertEqual(prompt.count("</parent-message>"), 1)
+        self.assertIn(messaging.delivered_text(dict(id=message_id, message=message_file.read_text(),
+                                                   sender=json.loads(sent.stdout)["sender"])), prompt)
+        self.assertLess(prompt.index("[Message ID: " + message_id + " | from: "), prompt.index("Continue the existing assignment."))
         self.assertEqual(prompt.count("Please preserve the existing API."), 1)
         receipt = json.loads((self.registry / worker_id / "messages/receipts" / f"{message_id}.json").read_text())
         self.assertEqual(receipt["status"], "delivered")
@@ -145,6 +193,12 @@ class MessagingChecks(unittest.TestCase):
         self.until_idle(worker_id, 2)
         prompt = self.prompt_for_turn(1)
         self.assertEqual(prompt.count(message), 1)
+        sent_record = json.loads(sent.stdout)
+        envelope = messaging.delivered_text(dict(id=sent_record["id"], message=message,
+                                                sender=sent_record["sender"]))
+        self.assertEqual(prompt, envelope + "\n")
+        self.assertEqual((self.registry / worker_id / "messages/wake-prompts" /
+                          f"{sent_record['id']}.md").read_text(), envelope + "\n")
         receipt = json.loads((self.registry / worker_id / "messages/receipts" /
                               f"{json.loads(sent.stdout)['id']}.json").read_text())
         self.assertEqual(receipt["status"], "delivered")
@@ -191,7 +245,9 @@ class MessagingChecks(unittest.TestCase):
               mock.patch("claivelib.steering.submit", return_value=steering_receipt) as submit):
             receipt, duplicate = messaging.send(path, "Continue the live turn.", "now", "d" * 32)
         self.assertFalse(duplicate)
-        submit.assert_called_once_with(path, "Continue the live turn.")
+        submit.assert_called_once_with(path,
+            messaging.delivered_text(dict(id="d" * 32, message="Continue the live turn.",
+                                          sender=receipt["sender"])))
         self.assertIn("delivered mid-turn", receipt["result"])
         self.assertIn(steering_receipt["id"], receipt["result"])
         self.assertEqual(receipt["steering_receipt_id"], steering_receipt["id"])

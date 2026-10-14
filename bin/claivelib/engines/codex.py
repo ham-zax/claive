@@ -151,6 +151,35 @@ class CodexEngine(WorkerEngine):
             return [request.binary, "exec", "resume", *shared, request.session_id, "--", prompt]
         return [request.binary, "exec", *shared, "--cd", request.workspace, "--", prompt]
 
+    def describe_event(self, event) -> list[dict]:
+        from claivelib.peek import compact
+
+        kind = event.get("type")
+        if not isinstance(kind, str):
+            return super().describe_event(event)
+        item = event.get("item")
+        if isinstance(item, dict):
+            item_kind = item.get("type")
+            if kind == "item.completed" and item_kind == "agent_message" and isinstance(item.get("text"), str):
+                return [{"kind": "text", "text": item["text"]}]
+            if kind == "item.completed" and item_kind == "error":
+                return [{"kind": "error", "text": str(item.get("message") or "Codex item failed")}]
+            if item_kind in {"command_execution", "mcp_tool_call", "file_change"}:
+                details = {key: value for key, value in item.items() if key not in {"id", "type"}}
+                if kind == "item.started":
+                    return [{"kind": "tool_call", "text":
+                             ("shell" if item_kind == "command_execution" else item_kind) + " " + compact(details)}]
+                if kind == "item.completed":
+                    failed = item_kind == "command_execution" and item.get("exit_code") not in (None, 0)
+                    return [{"kind": "tool_result", "text": ("error: " if failed else "") + compact(details)}]
+        if kind == "turn.failed":
+            error = event.get("error")
+            return [{"kind": "error", "text": str(error.get("message") or "Codex turn failed")
+                     if isinstance(error, dict) else "Codex turn failed"}]
+        if kind in {"thread.started", "turn.started", "turn.completed"}:
+            return []
+        return super().describe_event(event)
+
     def normalize_event(self, event):
         kind = event.get("type")
         if not isinstance(kind, str):

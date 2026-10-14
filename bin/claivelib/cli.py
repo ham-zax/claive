@@ -104,9 +104,9 @@ def parse_fallback_models(raw):
     return models
 
 
-def check_nested():
+def check_nested(message="claive workers may not launch workers (CLAIVE_WORKER_ID is set)"):
     if os.environ.get("CLAIVE_WORKER_ID") and os.environ.get("CLAIVE_ALLOW_NESTED") != "1":
-        raise ValueError("claive workers may not launch workers (CLAIVE_WORKER_ID is set)")
+        raise ValueError(message)
 
 
 def _report_status(state):
@@ -257,14 +257,31 @@ def identity(pid):
 
 
 def job_path(job_id):
+    if job_id == "":
+        raise ValueError("empty worker ID")
+    if not isinstance(job_id, str):
+        raise ValueError("invalid worker ID")
     if isinstance(job_id, str) and job_id.startswith("@"):
         from claivelib import aliases
         job_id = aliases.resolve(job_id)
+    if re.fullmatch(r"[0-9a-f]{4,11}", job_id):
+        matches = sorted(path for path in root().iterdir()
+                         if path.name.startswith(job_id) and (path / "state.json").is_file())
+        if len(matches) > 1:
+            descriptions = []
+            for path in matches:
+                state = json.loads((path / "state.json").read_text())
+                descriptions.append(f"{path.name} ({state.get('status', '')}, {state.get('label', '')})")
+            raise ValueError(f"worker ID prefix '{job_id}' is ambiguous: {', '.join(descriptions)}; "
+                             "use the full ID or an @alias")
+        if matches:
+            return matches[0]
+        raise ValueError(f"unknown worker '{job_id}'; run claive list")
     if not re.fullmatch(r"[0-9a-f]{12}", job_id):
         raise ValueError("invalid worker ID")
     path = root() / job_id
     if not (path / "state.json").is_file():
-        raise ValueError(f"unknown worker: {job_id}")
+        raise ValueError(f"unknown worker '{job_id}'; run claive list")
     return path
 
 
@@ -673,7 +690,10 @@ def supervise(job_id, control=None):
             if actual:
                 state["actual_workspace"] = actual
             answer = state.pop("answer", "")
-            (path / "result.txt").write_text(answer if isinstance(answer, str) else json.dumps(answer))
+            final_text = answer if isinstance(answer, str) else json.dumps(answer)
+            from claivelib import messaging
+            messaging._write_text(path / "result.txt", final_text)
+            messaging._write_text(path / "results" / f"turn-{state['turn']:04}.txt", final_text)
             if state.get("reusable"):
                 (path / f"turn-{state['turn']:04}.txt").write_text(
                     answer if isinstance(answer, str) else json.dumps(answer))
@@ -964,6 +984,14 @@ def reusable_worker(job_id):
                 source = None
                 from claivelib import messaging
                 with messaging.lock(path):
+                    if request.get("stop_file") and Path(request["stop_file"]).exists():
+                        turns.complete(path, state, request.get("request_id"), "conversation stopped before delivery")
+                        pending[0].unlink()
+                        continue
+                    if request.get("expires_at") is not None and time.time() >= request["expires_at"]:
+                        turns.complete(path, state, request.get("request_id"), "queued follow-up expired before delivery", 124)
+                        pending[0].unlink()
+                        continue
                     notes = messaging.pending_messages(path)
                     if state.get("report_contract"):
                         source = request["prompt_file"]
@@ -1606,6 +1634,19 @@ def parser():
     message.add_argument("--message-file")
     send.add_argument("--id", dest="message_id", help="32 lowercase hexadecimal message ID")
     send.add_argument("--json", action="store_true")
+    ask = commands.add_parser("ask", help="ask a worker a question and wait for its answer")
+    ask.add_argument("id")
+    message = ask.add_mutually_exclusive_group(required=True)
+    message.add_argument("--message")
+    message.add_argument("--message-file")
+    ask.add_argument("--timeout", type=float, default=120)
+    ask.add_argument("--id", dest="message_id", help="32 lowercase hexadecimal message ID")
+    ask.add_argument("--json", action="store_true")
+    reply = commands.add_parser("reply", help="record an answer to a parent's question")
+    reply.add_argument("id")
+    message = reply.add_mutually_exclusive_group(required=True)
+    message.add_argument("--message")
+    message.add_argument("--message-file")
     steer = commands.add_parser("steer", help="send input to a running supported provider, distinct from follow-up")
     steer.add_argument("id")
     message = steer.add_mutually_exclusive_group(required=True)
@@ -1663,6 +1704,11 @@ def parser():
         if action == "logs":
             command.add_argument("--stderr", action="store_true")
             command.add_argument("--lines", type=int, default=20)
+    peek = commands.add_parser("peek", help="read a worker's recent steps without interrupting it")
+    peek.add_argument("id")
+    peek.add_argument("--steps", type=int, default=5)
+    peek.add_argument("--start", type=int, help="first step number to show (pages forward)")
+    peek.add_argument("--json", action="store_true")
     waiting = commands.add_parser("wait")
     waiting.add_argument("id", nargs="*")
     waiting.add_argument("--any", action="store_true")
@@ -1793,11 +1839,12 @@ def main(launcher=None):
     args = parser().parse_args()
     # Resolve once per command so a concurrent rebind cannot redirect later reads
     # or writes in the same operation. Persisted links and output keep canonical IDs.
-    worker_actions = {"show", "logs", "cancel", "close", "usage", "followup", "effort", "answer", "verify", "accept", "scope", "steer", "send"}
-    if args.action in worker_actions and args.id.startswith("@"):
+    worker_actions = {"show", "logs", "cancel", "close", "usage", "followup", "effort", "answer", "verify", "accept", "scope", "steer", "send", "peek", "ask"}
+    if args.action in worker_actions and (args.id.startswith("@") or not re.fullmatch(r"[0-9a-f]{12}", args.id)):
         args.id = job_path(args.id).name
     elif args.action == "wait":
-        args.id = [job_path(value).name if value.startswith("@") else value for value in args.id]
+        args.id = [job_path(value).name if value.startswith("@") or not re.fullmatch(r"[0-9a-f]{12}", value)
+                   else value for value in args.id]
     if args.action in {"run", "start", "open"}:
         check_nested()
         path, state = create_job(args)
@@ -1860,6 +1907,9 @@ def main(launcher=None):
         if state.get("reusable"):
             state["next_turn_defaults"] = json.loads((job_path(args.id) / "policy.json").read_text())
         print(json.dumps(state, indent=2)) if args.json else report(state)
+    elif args.action == "peek":
+        from claivelib import peek
+        return peek.show(args.id, args.steps, args.json, args.start)
     elif args.action == "steer":
         check_nested()
         path = job_path(args.id)
@@ -1874,9 +1924,14 @@ def main(launcher=None):
         print(json.dumps(receipt, indent=2) if args.json else
               f"Steering {receipt['id']}: {receipt['status']} (provider acknowledgement does not prove consumption)")
         return 1 if receipt["status"] in {"rejected", "not_delivered", "unconfirmed"} else 124 if args.wait and receipt["status"] in {"pending", "sent"} else 0
-    elif args.action == "send":
-        check_nested()
+    elif args.action in {"send", "ask"}:
         path = job_path(args.id)
+        if os.environ.get("CLAIVE_WORKER_ID") == path.name:
+            raise ValueError("a worker cannot message itself; put the note in your own answer")
+        check_nested("workers cannot send messages to workers; report to the parent in your final answer")
+        if args.action == "ask":
+            from claivelib import asking
+            asking.validate_timeout(args.timeout)
         if args.message_file:
             filename = Path(args.message_file)
             if not filename.is_absolute() or not filename.is_file():
@@ -1884,6 +1939,10 @@ def main(launcher=None):
             message_text = filename.read_text()
         else:
             message_text = args.message
+        if args.action == "ask":
+            record, code, notice = asking.ask(path, message_text, args.timeout, args.message_id)
+            print(json.dumps(record, indent=2) if args.json else notice)
+            return code
         from claivelib import messaging
         receipt, duplicate = messaging.send(path, message_text, args.mode, args.message_id)
         output = dict(receipt)
@@ -2066,6 +2125,22 @@ def main(launcher=None):
         return engines_report(args.json)
     elif args.action == "doctor":
         return doctor(args.json, args.live)
+    elif args.action == "reply":
+        from claivelib import asking
+        worker_id = os.environ.get("CLAIVE_WORKER_ID")
+        if not worker_id:
+            raise ValueError("claive reply works only inside a worker turn")
+        path = job_path(worker_id)
+        if args.message_file:
+            filename = Path(args.message_file)
+            if not filename.is_absolute() or not filename.is_file():
+                raise ValueError("--message-file must be an existing absolute file")
+            message_text = filename.read_text()
+        else:
+            message_text = args.message
+        asking.reply(path, args.id, message_text)
+        print(f"Reply recorded for {args.id}")
+        return 0
     elif args.action == "answer":
         path = job_path(args.id)
         state = load(path)

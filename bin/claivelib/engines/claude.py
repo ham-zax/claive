@@ -148,6 +148,41 @@ class ClaudeEngine(WorkerEngine):
         command += ["--", Path(request.prompt_file).read_text(encoding="utf-8")]
         return command
 
+    def describe_event(self, event) -> list[dict]:
+        from claivelib.peek import content_text, compact
+
+        kind = event.get("type")
+        if not isinstance(kind, str):
+            return super().describe_event(event)
+        if kind in {"assistant", "user"}:
+            if kind == "user" and event.get("isReplay"):
+                return []
+            message = event.get("message")
+            blocks = message.get("content") if isinstance(message, dict) else None
+            if isinstance(blocks, list):
+                steps = []
+                for block in blocks:
+                    if not isinstance(block, dict):
+                        continue
+                    if kind == "assistant" and block.get("type") == "text":
+                        steps.append({"kind": "text", "text": content_text([block])})
+                    elif kind == "assistant" and block.get("type") == "tool_use":
+                        steps.append({"kind": "tool_call", "text": str(block.get("name", "tool")) +
+                                      " " + compact(block.get("input", {}))})
+                    elif kind == "user" and block.get("type") == "tool_result":
+                        steps.append({"kind": "tool_result", "text":
+                                      ("error: " if block.get("is_error") else "") +
+                                      content_text(block.get("content"))})
+                return steps
+        if kind == "result":
+            if event.get("subtype") == "success" and not event.get("is_error"):
+                return []  # The assistant event already contains the final text.
+            return [{"kind": "error", "text": str(event.get("result") or
+                                                  event.get("subtype") or "Claude turn failed")}]
+        if kind == "system" and event.get("subtype") == "init":
+            return []
+        return super().describe_event(event)
+
     def normalize_event(self, event):
         kind = event.get("type")
         if not isinstance(kind, str):

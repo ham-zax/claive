@@ -63,9 +63,13 @@ def notify(event):
         pass
 
 
-def read_new(consumer="default", peek=False):
+def check_consumer(consumer):
     if not CONSUMER_RE.fullmatch(consumer or ""):
         raise ValueError(f"invalid consumer: {consumer}")
+
+
+def read_new(consumer="default", peek=False):
+    check_consumer(consumer)
     root = _root()
     inbox = root / "inbox.jsonl"
     cursors = root / "inbox-cursors"
@@ -78,11 +82,33 @@ def read_new(consumer="default", peek=False):
         return _read_from(inbox, cursor_file, peek)
 
 
-def _read_from(inbox, cursor_file, peek):
+def has_unread(consumer="default"):
+    """Cheap check for wait loops: true when the inbox holds bytes past the consumer's cursor.
+
+    Reads no events and moves no cursor. A half-written last line also counts, so an empty
+    read_new after a true result means "not yet", not "nothing to report".
+    """
+    check_consumer(consumer)
+    root = _root()
     try:
-        start = int(cursor_file.read_text().strip() or 0)
-    except (OSError, ValueError):
+        size = (root / "inbox.jsonl").stat().st_size
+    except OSError:
+        return False
+    start = _cursor_offset(root / "inbox-cursors" / consumer)
+    if start > size:
         start = 0
+    return size > start
+
+
+def _cursor_offset(cursor_file):
+    try:
+        return int(cursor_file.read_text().strip() or 0)
+    except (OSError, ValueError):
+        return 0
+
+
+def _read_from(inbox, cursor_file, peek):
+    start = _cursor_offset(cursor_file)
     if not inbox.exists():
         if not peek:
             _save_cursor(cursor_file, 0)

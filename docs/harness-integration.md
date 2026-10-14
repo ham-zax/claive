@@ -46,7 +46,9 @@ Pick whichever your host supports; all three read the same events.
    `claive wait ID1 ID2 ... --any --timeout 300`. This returns the first worker that
    settles, printing its report and exiting with its code. Exit 124 means nothing
    finished yet. Do other work, then wait again. Keep the timeout below your host's
-   command time limit.
+   command time limit. Add `--inbox CONSUMER` to also return on new inbox events for that
+   consumer (advancing its cursor, exit 3 if an event needs the parent), and `--json` for
+   one object with the event that ended the wait.
 2. **Inbox** (poll at natural pauses, or after a context reset):
    `claive inbox --consumer <your-harness-name> --json`. This returns every turn,
    batch and goal event since that consumer's last read. Use one consumer name per
@@ -72,6 +74,8 @@ After opening a reusable worker, bind it with `claive alias set backend ID`.
 Any parent using the same `$CLAIVE_DIR` can discover it with
 `claive alias list --json`, inspect it with `claive show @backend --json`, and
 queue related work with `claive followup @backend --prompt-file /abs/task.md`.
+To add context without a new task, use `claive send @backend --message '...'`
+(`--mode note|wake|now`; receipts in the worker's `messages/receipts/`).
 Worker commands accept `@name` in place of an ID, including `answer` and
 `wait --any`. Names do not start workers or restore closed sessions.
 

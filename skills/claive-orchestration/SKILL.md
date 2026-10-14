@@ -104,6 +104,7 @@ line: `Worker <id> | label | path`. Exit codes everywhere: 0 completed, 1 failed
 - **Wait:** `claive wait ID [ID ...] --any --timeout S` returns the first worker
   to settle (with its report and code); on 124 do other work and wait again.
   Several IDs need `--any`: without it the wait exits 1 at once and waits for nothing.
+  `--inbox CONSUMER` (IDs optional) also returns on new inbox events for that consumer.
   To check whether a worker still runs, read `claive show ID --json` status, not a
   `pgrep` pattern (your own shell's command line contains the pattern).
 - **After a context reset or between turns:** `claive inbox --consumer <host>`
@@ -173,6 +174,11 @@ after the current tool calls and before the next model call. An acknowledgement
 proves the provider accepted it, not that the model complied. Muse rejects steering;
 `followup` is a separate queued turn and `cancel` stops execution. Steering cannot be
 combined with single-turn model fallbacks. Receipt states: `docs/steering.md`.
+
+**Messages.** `claive send ID --message '...' [--mode note|wake|now] [--id HEX32] --json`
+gives a reusable worker context without a new task. `note` (default) waits for its next
+turn, `wake` starts a turn when it is idle, `now` steers and falls back to `wake`. The
+message is context, not a change of assignment. A repeated `--id` returns the first receipt.
 
 **Workers talking to each other.** When two or more perspectives should react to each
 other's reasoning (design debate, proposer/critic rounds, cross-checking a diagnosis),

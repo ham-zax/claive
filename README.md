@@ -26,6 +26,13 @@ Codex workers with `--enable-steering` use a separate App Server transport for
 turn-bound in-flight instructions; see [steering.md](docs/steering.md). Ordinary
 Codex exec launches are unchanged.
 
+## Send a message to a worker
+
+Use `claive send ID --message "..."` to leave a note for a reusable worker's next turn. Add
+`--mode wake` to start a turn when the worker is idle, or `--mode now` to steer a supported,
+opted-in running turn (it falls back to wake when steering is unavailable). `--message-file`
+accepts an absolute file path, `--id` makes a send retry-safe, and `--json` prints the receipt.
+
 ## Native Codex progress
 
 The default integration uses Codex's existing background-terminal indicator and `/ps`. The agent runs `claive-worker` through its managed shell tool with a short yield, retains the returned terminal session ID, and collects the final output. The launcher stays alive between related turns until explicitly closed, so Codex can track it while the parent continues working. The worker also appears in the optional registry dashboard.

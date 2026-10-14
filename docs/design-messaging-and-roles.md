@@ -1,6 +1,7 @@
 # Design note: worker messaging, channels and roles
 
-Status: proposal, revision 2. No code is written yet.
+Status: revision 3. Features 1 (`send`) and 2 (`wait --inbox`) are built. The rest is a
+proposal.
 
 Source: [Local Operator](https://github.com/damianvtran/local-operator) (`lop`). Revision 2
 uses its source code, not only the README. The main files are
@@ -131,15 +132,25 @@ Other rules:
 - A repeated `MSG_ID` returns the first receipt and does not deliver again.
 - Channels and `ask` use this delivery code. Build it first.
 
+Built. Limits as built:
+
+- `wake` and `now` fall back to a note when the worker is busy. Muse has no steering, so
+  `now` falls back to `wake` for Muse.
+- `wake` does not check `needs_parent`. A wake can start a turn while the worker waits for
+  an answer (`followup` does the same).
+- A note to a worker that gets no more turns is never read.
+- `--id` takes 32 lowercase hex characters. Without it, claive makes one.
+
 ### 2. Event-based `claive wait`
 
-`claive wait` returns at the first event:
+Built as `claive wait [IDs] --inbox CONSUMER [--json]`. It returns at the first event:
 
-- a job ends
-- a channel event happens
-- a worker asks a question (exit 3)
+- a listed worker settles (`event: worker`)
+- a new inbox event for the consumer (`event: inbox`; the cursor moves; exit 3 if an event
+  needs the parent)
+- the timeout (`event: timeout`, exit 124, the cursor does not move)
 
-The JSON output names the event type.
+Channel events come with feature 5. With `--json`, the human report goes to stderr.
 
 ### 3. `claive ask` and `claive peek`
 
@@ -223,8 +234,7 @@ switch. Engines that cannot limit tools must refuse a role that needs a limit.
 
 ## Build order
 
-1. `send` with message IDs and result strings (feature 1), and event-based `wait`
-   (feature 2)
+1. Done: `send` (feature 1) and event-based `wait` (feature 2)
 2. `ask` and `peek` (feature 3), and refusals and receipts (feature 4)
 3. Run the kill test from review 1 with a minimal channel
 4. If the kill test passes: full channels (feature 5)
@@ -234,6 +244,6 @@ switch. Engines that cannot limit tools must refuse a role that needs a limit.
 
 1. Is `note` as the default channel mode acceptable? Review 3 recommends it. Only `--ask`
    wakes a worker.
-2. Does Muse support steering? If not, `now` falls back to `wake` for Muse.
+2. Answered: Muse has no steering, so `now` falls back to `wake`.
 3. Can channel members `peek` each other, or only send messages?
 4. Do you accept the default limits: 20 messages, 6 for each pair, 4 members and 900 s?

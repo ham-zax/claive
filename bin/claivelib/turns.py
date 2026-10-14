@@ -13,13 +13,16 @@ from claivelib.engines import DEFAULT_ENGINE
 
 
 def queue(path, prompt_file, label=None, reasoning_effort=None, max_model_steps=None,
-          expires_at=None, requires_no_parent=False, stop_file=None, receipt=False):
+          expires_at=None, requires_no_parent=False, stop_file=None, receipt=False,
+          only_if_idle=False, message_id=None):
     fd = os.open(path / ".requests.lock", os.O_WRONLY | os.O_CREAT, 0o600)
     with os.fdopen(fd, "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         state = cli.load(path)
         if not state.get("reusable") or state["status"] not in cli.ACTIVE or (path / "close.request").exists():
             raise ValueError("worker is not available for follow-up; reopen its retained --session-id if appropriate")
+        if only_if_idle and (state["status"] != "idle" or list((path / "requests").glob("*.json"))):
+            return None, state
         if requires_no_parent and state.get("needs_parent"):
             raise ValueError("worker is waiting for a parent decision")
         prompt = Path(prompt_file)
@@ -36,6 +39,10 @@ def queue(path, prompt_file, label=None, reasoning_effort=None, max_model_steps=
         request_id = uuid.uuid4().hex
         request = dict(prompt_file=str(prompt), label=label,
                        reasoning_effort=reasoning_effort, max_model_steps=max_model_steps)
+        if message_id is not None:
+            if not isinstance(message_id, str) or not re.fullmatch(r"[0-9a-f]{32}", message_id):
+                raise ValueError("invalid queued message ID")
+            request["message_id"] = message_id
         if receipt:
             request["request_id"] = request_id
         if expires_at is not None:
@@ -59,6 +66,10 @@ def validate(request):
         identifier = request["request_id"]
         if not isinstance(identifier, str) or not re.fullmatch(r"[0-9a-f]{32}", identifier):
             raise ValueError("invalid follow-up request ID")
+    if "message_id" in request:
+        identifier = request["message_id"]
+        if not isinstance(identifier, str) or not re.fullmatch(r"[0-9a-f]{32}", identifier):
+            raise ValueError("invalid queued message ID")
     if "expires_at" in request:
         deadline = request["expires_at"]
         try:

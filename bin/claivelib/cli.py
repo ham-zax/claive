@@ -2,6 +2,7 @@
 """Track reusable coding workers and display their progress beside any parent agent. No dependencies."""
 
 import argparse
+import contextlib
 import dataclasses
 import datetime
 import importlib
@@ -778,6 +779,21 @@ def outcome_code(state):
     return min(code, 255) if isinstance(code, int) and code > 0 else 1
 
 
+def _wait_result(event, worker, code, inbox_events=()):
+    print(json.dumps(dict(event=event, worker=worker, code=code, inbox_events=list(inbox_events)), indent=2))
+    return code
+
+
+def _wait_inbox(events, as_json):
+    # Same text as `claive inbox`; an event that needs the parent takes precedence over a plain exit 0.
+    code = 3 if any(event.get("needs_parent") for event in events) else 0
+    if as_json:
+        return _wait_result("inbox", None, code, events)
+    from claivelib import inbox as inbox_mod
+    print(inbox_mod.format_text(events))
+    return code
+
+
 def _worktree_git(cwd, *args):
     return subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, timeout=120)
 
@@ -946,41 +962,50 @@ def reusable_worker(job_id):
                 new_turn = state["turn"] + 1
                 effective = request["prompt_file"]
                 source = None
-                if state.get("report_contract"):
-                    source = request["prompt_file"]
-                    effective = str(path / f"prompt-{new_turn:04}.md")
-                    (path / f"prompt-{new_turn:04}.md").write_text(
-                        Path(source).read_text() + "\n\n" + REPORT_CONTRACT)
-                try:
-                    next_turn = turn_request(state, prompt_file=effective,
-                                             reasoning_effort=effort, max_model_steps=steps,
-                                             isolation=isolation)
-                    validate_turn(state.get("engine", DEFAULT_ENGINE), next_turn)
-                    command = engine.build_command(next_turn)
-                except ValueError as error:
-                    state.update(last_turn_status="failed", error=str(error),
-                                 phase="follow-up rejected; ready for another assignment",
-                                 failure_kind="rejected")
+                from claivelib import messaging
+                with messaging.lock(path):
+                    notes = messaging.pending_messages(path)
+                    if state.get("report_contract"):
+                        source = request["prompt_file"]
+                    if state.get("report_contract") or notes:
+                        effective = str(path / f"prompt-{new_turn:04}.md")
+                        prompt = Path(request["prompt_file"]).read_text()
+                        block = messaging.format_block(notes, already_in_prompt=(request.get("message_id"),))
+                        content = f"{block}\n\n{prompt}" if block else prompt
+                        if state.get("report_contract"):
+                            content += "\n\n" + REPORT_CONTRACT
+                        Path(effective).write_text(content)
+                    try:
+                        next_turn = turn_request(state, prompt_file=effective,
+                                                 reasoning_effort=effort, max_model_steps=steps,
+                                                 isolation=isolation)
+                        validate_turn(state.get("engine", DEFAULT_ENGINE), next_turn)
+                        command = engine.build_command(next_turn)
+                    except ValueError as error:
+                        state.update(last_turn_status="failed", error=str(error),
+                                     phase="follow-up rejected; ready for another assignment",
+                                     failure_kind="rejected")
+                        save(path / "state.json", state)
+                        _write_turn_event(state)
+                        turns.complete(path, state, request.get("request_id"), str(error))
+                        pending[0].unlink()
+                        print(f"Worker {job_id}: follow-up rejected: {clean(error)}", flush=True)
+                        continue
+                    state["previous_turn_task_failures"] = state.get("turn_task_failures", 0)
+                    state.update(prompt_file=effective, reasoning_effort=effort,
+                                 max_model_steps=steps, command=command,
+                                 label=request.get("label") or state["label"], turn=new_turn,
+                                 status="running", phase="starting related follow-up")
+                    # Legacy queued requests have no ID; never carry a preceding ID
+                    # into their outcome or overwrite an earlier delivery receipt.
+                    state.pop("request_id", None)
+                    if request.get("request_id"):
+                        state["request_id"] = request["request_id"]
+                    if source:
+                        state["source_prompt_file"] = source
                     save(path / "state.json", state)
-                    _write_turn_event(state)
-                    turns.complete(path, state, request.get("request_id"), str(error))
+                    messaging.mark_delivered(path, notes, new_turn)
                     pending[0].unlink()
-                    print(f"Worker {job_id}: follow-up rejected: {clean(error)}", flush=True)
-                    continue
-                state["previous_turn_task_failures"] = state.get("turn_task_failures", 0)
-                state.update(prompt_file=effective, reasoning_effort=effort,
-                             max_model_steps=steps, command=command,
-                             label=request.get("label") or state["label"], turn=new_turn,
-                             status="running", phase="starting related follow-up")
-                # Legacy queued requests have no ID; never carry a preceding ID
-                # into their outcome or overwrite an earlier delivery receipt.
-                state.pop("request_id", None)
-                if request.get("request_id"):
-                    state["request_id"] = request["request_id"]
-                if source:
-                    state["source_prompt_file"] = source
-                save(path / "state.json", state)
-                pending[0].unlink()
                 break
             if (path / "close.request").exists():
                 state.update(status=state["last_turn_status"], phase="session closed", ended_at=time.time())
@@ -1573,6 +1598,14 @@ def parser():
                             help="comma-separated fallback models for single-turn workers (run/start only)")
         if action == "open":
             launch.add_argument("--detach", action="store_true", help="run the reusable loop in the background")
+    send = commands.add_parser("send", help="send a parent message to a worker")
+    send.add_argument("id")
+    send.add_argument("--mode", choices=("note", "wake", "now"), default="note")
+    message = send.add_mutually_exclusive_group(required=True)
+    message.add_argument("--message")
+    message.add_argument("--message-file")
+    send.add_argument("--id", dest="message_id", help="32 lowercase hexadecimal message ID")
+    send.add_argument("--json", action="store_true")
     steer = commands.add_parser("steer", help="send input to a running supported provider, distinct from follow-up")
     steer.add_argument("id")
     message = steer.add_mutually_exclusive_group(required=True)
@@ -1631,9 +1664,12 @@ def parser():
             command.add_argument("--stderr", action="store_true")
             command.add_argument("--lines", type=int, default=20)
     waiting = commands.add_parser("wait")
-    waiting.add_argument("id", nargs="+")
+    waiting.add_argument("id", nargs="*")
     waiting.add_argument("--any", action="store_true")
     waiting.add_argument("--timeout", type=float)
+    waiting.add_argument("--inbox", metavar="CONSUMER", help="also return on new inbox events for CONSUMER")
+    waiting.add_argument("--json", action="store_true", help="print one JSON object with the event that ended the wait")
+    waiting.set_defaults(wait_parser=waiting)
     inbox_cmd = commands.add_parser("inbox", help="show turn and batch events since the consumer cursor")
     inbox_cmd.add_argument("--consumer", default="default")
     inbox_cmd.add_argument("--peek", action="store_true")
@@ -1757,7 +1793,7 @@ def main(launcher=None):
     args = parser().parse_args()
     # Resolve once per command so a concurrent rebind cannot redirect later reads
     # or writes in the same operation. Persisted links and output keep canonical IDs.
-    worker_actions = {"show", "logs", "cancel", "close", "usage", "followup", "effort", "answer", "verify", "accept", "scope", "steer"}
+    worker_actions = {"show", "logs", "cancel", "close", "usage", "followup", "effort", "answer", "verify", "accept", "scope", "steer", "send"}
     if args.action in worker_actions and args.id.startswith("@"):
         args.id = job_path(args.id).name
     elif args.action == "wait":
@@ -1838,6 +1874,25 @@ def main(launcher=None):
         print(json.dumps(receipt, indent=2) if args.json else
               f"Steering {receipt['id']}: {receipt['status']} (provider acknowledgement does not prove consumption)")
         return 1 if receipt["status"] in {"rejected", "not_delivered", "unconfirmed"} else 124 if args.wait and receipt["status"] in {"pending", "sent"} else 0
+    elif args.action == "send":
+        check_nested()
+        path = job_path(args.id)
+        if args.message_file:
+            filename = Path(args.message_file)
+            if not filename.is_absolute() or not filename.is_file():
+                raise ValueError("--message-file must be an existing absolute file")
+            message_text = filename.read_text()
+        else:
+            message_text = args.message
+        from claivelib import messaging
+        receipt, duplicate = messaging.send(path, message_text, args.mode, args.message_id)
+        output = dict(receipt)
+        if duplicate:
+            output.update(duplicate=True, notice="duplicate: original receipt returned")
+        print(json.dumps(output, indent=2) if args.json else
+              ("duplicate: original receipt returned\n" + json.dumps(receipt, indent=2) if duplicate else
+               f"Message {receipt['id']}: {receipt['result']}"))
+        return 0
     elif args.action == "runtime":
         from claivelib import runtime
         drift = runtime.check_drift(args.source_dir)
@@ -1903,20 +1958,39 @@ def main(launcher=None):
                 print("".join(deque(stream, maxlen=args.lines)), end="")
     elif args.action == "wait":
         ids = args.id
+        if not ids and args.inbox is None:
+            args.wait_parser.error("the following arguments are required: id")
         if len(ids) > 1 and not args.any:
             raise ValueError("use --any to wait for several workers")
         if args.timeout is not None and args.timeout <= 0:
             raise ValueError("--timeout must be > 0")
+        from claivelib import inbox as inbox_mod
+        if args.inbox is not None:
+            inbox_mod.check_consumer(args.inbox)
         paths = [job_path(job_id) for job_id in ids]
         start = time.monotonic()
         while True:
             for job_id, path in zip(ids, paths):
                 state = load(path)
                 if state["status"] not in ACTIVE or (state["status"] == "idle" and not list((path / "requests").glob("*.json"))):
+                    if args.json:
+                        # The human report goes to stderr so stdout stays one JSON object.
+                        with contextlib.redirect_stdout(sys.stderr):
+                            report(state)
+                        return _wait_result("worker", job_id, outcome_code(state))
                     report(state)
                     return outcome_code(state)
+            if args.inbox is not None and inbox_mod.has_unread(args.inbox):
+                events = inbox_mod.read_new(args.inbox)
+                if events:
+                    return _wait_inbox(events, args.json)
             if args.timeout is not None and time.monotonic() - start >= args.timeout:
-                print(f"Timed out after {'%g' % args.timeout}s; still running: {' '.join(ids)}")
+                if args.json:
+                    return _wait_result("timeout", None, 124)
+                if ids:
+                    print(f"Timed out after {'%g' % args.timeout}s; still running: {' '.join(ids)}")
+                else:
+                    print(f"Timed out after {'%g' % args.timeout}s; no new inbox events for {args.inbox}")
                 from claivelib import advice
                 for job_id, path in zip(ids, paths):
                     state = load(path)

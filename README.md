@@ -16,7 +16,7 @@ result is the validated JSON object. `--enable-steering` switches to stream-json
 read-only workers get `Read,Grep,Glob`.
 
 Codex is available with `--engine codex` (`codex exec --json`, binary from `CODEX_WORKER_BINARY` or the nvm install).
-It is strictly locked to two pairs: `gpt-6-luna` at reasoning effort `max` (the default) and `gpt-6.1-sol` at `xhigh` (pass both `--model gpt-6.1-sol --reasoning-effort xhigh`); any other `--model` or `--reasoning-effort` is refused.
+It is strictly locked to these model and reasoning-effort pairs: `gpt-6-luna` at `max` (the default), and `gpt-6.1-sol` at `low`, `medium`, `high` or `xhigh` (`--model gpt-6.1-sol` with no effort runs at `medium`; `max` and `ultra` are refused for it). Any other `--model` or `--reasoning-effort` is refused.
 Compaction is left at Codex's own behaviour. Codex chooses its own thread ID,
 so the job's session ID is replaced by it once the thread starts. Workers default to `--ignore-user-config` so user-level tools cannot unexpectedly enter an isolated worker; set `CLAIVE_CODEX_USE_USER_CONFIG=1` only for a deployment with pre-registered Codex MCP servers and installed user skills to omit that flag while retaining `--ignore-rules`. Read-only workers
 use the read-only sandbox, writers run with `--dangerously-bypass-approvals-and-sandbox` by default (`CLAIVE_CODEX_YOLO=0` restores the `workspace-write` sandbox with approvals off; read-only workers are always sandboxed). `--max-model-steps`, `--output-schema` and

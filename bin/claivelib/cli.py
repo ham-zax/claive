@@ -1026,8 +1026,9 @@ def create_job(args):
     check_engine_policy(engine_name)
     policy = config.engine_policy(engine_name)
     session_id = engine.resolve_session_id(args.session_id, not args.no_session_log)
+    effective_model = args.model or (role_def["model"] if role_def else None) or policy.get("default_model")
     effort = (args.reasoning_effort or (role_def["reasoning_effort"] if role_def else None)
-              or policy.get("default_reasoning_effort") or engine.default_reasoning_effort)
+              or policy.get("default_reasoning_effort") or engine.default_effort_for(effective_model))
     if args.max_model_steps is not None:
         steps = args.max_model_steps
     elif role_def and role_def.get("max_model_steps") is not None and engine.default_max_model_steps is not None:
@@ -1037,7 +1038,6 @@ def create_job(args):
     read_only = bool(args.read_only or (role_def and role_def.get("read_only")))
     config.check_workspace([workspace] + ([Path(args.worktree_existing)] if args.worktree_existing else []),
                            read_only)
-    effective_model = args.model or (role_def["model"] if role_def else None) or policy.get("default_model")
     check_model_policy(effective_model)
     isolation = dict(mode="create" if args.worktree else "existing" if args.worktree_existing else "none",
                      base=args.worktree_base, existing_path=args.worktree_existing)

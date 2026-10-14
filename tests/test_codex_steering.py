@@ -18,15 +18,16 @@ THREAD = "01a12e77-d81b-7c61-8ceb-22cbea15eb32"
 TURN = "01a12e77-d81b-7c61-8ceb-22cbea15eb33"
 
 FIXTURE = '''#!/usr/bin/env python3
-import json,sys
+import json,os,sys
 THREAD="01a12e77-d81b-7c61-8ceb-22cbea15eb32"
 TURN="01a12e77-d81b-7c61-8ceb-22cbea15eb33"
+MODEL=os.environ.get("CODEX_FIXTURE_MODEL","gpt-6-luna")
 def emit(v):print(json.dumps(v),flush=True)
 for line in sys.stdin:
  m=json.loads(line);method=m.get("method");identifier=m.get("id")
  if method=="initialize":emit(dict(id=identifier,result={"userAgent":"fixture"}))
  if method in ("thread/start","thread/resume"):
-  assert m["params"]["model"]=="gpt-6-luna" and m["params"]["modelProvider"]=="openai"
+  assert m["params"]["model"]==MODEL and m["params"]["modelProvider"]=="openai"
   if method=="thread/resume":assert m["params"]["threadId"]==THREAD
   emit(dict(id=identifier,result={"thread":{"id":THREAD}}))
  if method=="turn/start":
@@ -73,9 +74,9 @@ class CodexSteeringChecks(unittest.TestCase):
             self.cli("cancel", identifier)
             self.cli("wait", identifier, "--timeout", "4")
 
-    def launch(self, action="start"):
+    def launch(self, action="start", *extra):
         args = [action, "--engine", "codex", "--enable-steering", "--workspace", str(self.workspace),
-                "--prompt-file", str(self.prompt)]
+                "--prompt-file", str(self.prompt), *extra]
         if action == "open":
             args.append("--detach")
         result = self.cli(*args)
@@ -88,6 +89,15 @@ class CodexSteeringChecks(unittest.TestCase):
                 return identifier
             time.sleep(0.03)
         self.fail(f"Codex app server turn did not start: {state}")
+
+    def test_sol_without_an_effort_runs_at_medium(self):
+        for model, effort in (("gpt-6-luna", "max"), ("gpt-6.1-sol", "medium")):
+            with self.subTest(model=model):
+                self.env["CODEX_FIXTURE_MODEL"] = model
+                extra = () if model == "gpt-6-luna" else ("--model", model)
+                state = json.loads(self.cli("show", self.launch("start", *extra), "--json").stdout)
+                self.assertEqual((state["model"], state["reasoning_effort"]), (model, effort))
+                self.assertEqual(state["command"][state["command"].index("--effort") + 1], effort)
 
     def test_codex_app_server_same_turn_steering(self):
         identifier = self.launch()

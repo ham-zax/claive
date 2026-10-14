@@ -47,6 +47,10 @@ class WorkerEngine:
     default_reasoning_effort = "high"
     default_max_model_steps = None
 
+    def default_effort_for(self, model):
+        """Effort for a turn that names none; an engine with per-model defaults overrides this."""
+        return self.default_reasoning_effort
+
     def resolve_session_id(self, value, session_logging=True):
         return (value or str(uuid.uuid4())) if session_logging else None
 

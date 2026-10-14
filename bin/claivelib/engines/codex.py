@@ -12,8 +12,10 @@ from claivelib.state import launch_config, session_id
 CODEX_MODEL = "gpt-6-luna"
 CODEX_PROVIDER = "openai"
 CODEX_EFFORT = "max"
-# Each allowed model runs at exactly one reasoning effort; the default pair stays Luna at max.
-CODEX_EFFORTS = {CODEX_MODEL: CODEX_EFFORT, "gpt-6.1-sol": "xhigh"}
+# Efforts each allowed model accepts: Luna only at max; Sol at low to xhigh, never max or ultra.
+CODEX_EFFORTS = {CODEX_MODEL: (CODEX_EFFORT,), "gpt-6.1-sol": ("low", "medium", "high", "xhigh")}
+# Effort for a turn that names a model but no effort; other models keep the engine default.
+CODEX_DEFAULT_EFFORTS = {"gpt-6.1-sol": "medium"}
 
 
 def default_binary():
@@ -37,6 +39,9 @@ class CodexEngine(WorkerEngine):
     name = "codex"
     default_model = CODEX_MODEL
     default_reasoning_effort = CODEX_EFFORT
+
+    def default_effort_for(self, model):
+        return CODEX_DEFAULT_EFFORTS.get(model, CODEX_EFFORT)
 
     def steering_capability(self):
         return SteeringCapability(True, "codex-app-server", notes=(
@@ -90,9 +95,9 @@ class CodexEngine(WorkerEngine):
         self._check_model(request.model)
         if request.provider != CODEX_PROVIDER:
             raise ValueError(f"the codex engine supports only the {CODEX_PROVIDER} provider")
-        effort = CODEX_EFFORTS[request.model]
-        if request.reasoning_effort != effort:
-            raise ValueError(f"the codex engine is locked to reasoning effort {effort} for {request.model}")
+        efforts = CODEX_EFFORTS[request.model]
+        if request.reasoning_effort not in efforts:
+            raise ValueError(f"the codex engine is locked to reasoning effort {' or '.join(efforts)} for {request.model}")
         if request.max_model_steps is not None:
             raise ValueError("Codex does not support --max-model-steps")
 

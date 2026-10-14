@@ -23,7 +23,7 @@ Select an engine deliberately and follow the parent's current authorization poli
 | `muse` (default) | Pinned `muse-spark-1.3-contributor`; usual substantive effort `xhigh`; supports managed worktrees and read-only isolation |
 | `pi` | `--engine pi --provider opencode2api`; models selected explicitly or inherited; no managed worktree, `--web`, or model-step cap |
 | `claude` | `--engine claude`; pinned `claude-haiku-5-5`; headless and isolated from user settings, hooks, MCP, and skills; no managed worktree or model-step cap; `--output-schema` returns schema-validated JSON; `--enable-steering` for live steering |
-| `codex` | `--engine codex`; pinned `gpt-6-luna` at effort `max` (default) or `gpt-6.1-sol` at `xhigh`; writer runs without the Codex sandbox by default, read-only uses the read-only sandbox; no managed worktree, output schema, or model-step cap |
+| `codex` | `--engine codex`; pinned `gpt-6-luna` at effort `max` (default) or `gpt-6.1-sol` at `low`, `medium`, `high` or `xhigh` (`medium` when no effort is passed; `max` and `ultra` are refused); writer runs without the Codex sandbox by default, read-only uses the read-only sandbox; no managed worktree, output schema, or model-step cap |
 
 Claude/Codex workers are **available**, not automatically authorized as a
 fallback or as critics for the Muse/Pi arbiter. Do not silently switch engines,
@@ -44,9 +44,10 @@ Keep the terminal session ID, Claive worker ID, and engine session UUID distinct
 
 Use **only `gpt-6.1-sol`** for Codex workers. Do not substitute a different Codex model/provider or route through agy/OpenCode's historical defaults without explicit fallback authorization below. Their relay copies in `reference/` are archival. Native host subagents require an explicit request.
 
-- **`xhigh`: default for normal implementation, investigation, review, and other substantive work** (the `gpt-6.1-sol` effort).
-- **`max`: very complicated work**, difficult fixes, or consequential reasoning.
-- **`high`/`medium`: rarely**, only for trivial mechanical work such as generating a commit message.
+- **`xhigh`: reasoning, not implementation.** Planning, logic or design debates, and other important high-level discussion.
+- **`medium` or `low`: mechanical implementation**, where the assignment states the exact steps. `gpt-6.1-sol` runs at `medium` when no effort is passed.
+- **`high`: complex implementation**, where the assignment gives a goal and the worker decides what to do and how.
+- **`max` and `ultra`: never.** The engine refuses both for `gpt-6.1-sol`.
 - **Pi workers: always `max`** (the Pi engine default). They are free; Pi clamps `max` to each model's highest supported level.
 - **Pi models:** prefer `mimo-v2.6-flash-free`, `big-pickle`, `space-bunny-free`; `longcat-2.5-preview-free` only rarely. Do not use `nemotron-*` or `ling-3.1-flash-free`.
 
@@ -97,7 +98,7 @@ claive logs ID              # recent JSONL events
 claive logs ID --stderr     # diagnostic output
 claive wait ID              # wait for assigned turns; idle means ready, not closed
 claive followup ID --prompt-file /absolute/next.md --reasoning-effort xhigh
-claive effort ID --reasoning-effort max # future default; current call unchanged
+claive effort ID --reasoning-effort high # future default; current call unchanged
 claive usage ID             # retained session provider token/cache counters
 claive close ID             # drain queued turns, close supervisor, retain history
 claive cancel ID            # stop the worker process group
@@ -144,7 +145,7 @@ else
 fi
 ```
 
-- Pin `--model gpt-6.1-sol`. Use `xhigh` for normal tasks and `max` for very complicated work; `high`/`medium` only rarely for trivial chores. The orchestrator chooses per turn.
+- Pin `--model gpt-6.1-sol`. The orchestrator chooses the effort per turn: `xhigh` for planning and discussion, `medium` or `low` for mechanical implementation, `high` for complex implementation, never `max` or `ultra`.
 - Set `--max-model-steps` to fit the assignment; the default 100 is not a required ceiling.
 - `--user-input-auto-resolve` cancels interactive questions automatically. A worker that needs an answer must report a blocker; cancellation is not authorization.
 - For enforced read-only work add **both** `--disable-write --disable-shell`. The first disables only non-shell filesystem writes; leaving shell enabled permits writes through commands. Run any necessary verification commands in the parent or an isolated workspace.

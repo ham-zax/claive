@@ -45,7 +45,7 @@ The TTC experiment is deferred and is not part of this workflow.
 
 `claive` runs ordinary bounded tasks on `--engine muse|pi|claude|codex`. The runtime
 pins Muse to `muse-spark-1.3-contributor`, Claude to `claude-haiku-5-5`, and Codex to
-`gpt-6-luna` at `max` (or `gpt-6.1-sol` at `xhigh`, passing both); Pi uses `opencode2api` and its selected model. `claive-orch` uses only
+`gpt-6-luna` at `max` (or `gpt-6.1-sol` at `low`, `medium`, `high` or `xhigh`; `medium` when no effort is passed); Pi uses `opencode2api` and its selected model. `claive-orch` uses only
 Muse/Pi for its implementer/critic ladder; its roster does not authorize Claude/Codex
 workers. Engine sandbox, settings and option limits: `README.md` and
 `docs/harness-integration.md`. Codex parents also follow `claive-routing-codex`.
@@ -72,12 +72,14 @@ used in the run or failing. `muse-spark-1.3-free` and
 never use them as critic or lane b against Muse.
 
 **Reasoning effort.** Pi models are free: run them at `max` (the Pi engine default;
-Pi clamps it to each model's highest level). Codex uses `xhigh` normally and `max` for
-very complicated tasks (deep debugging, cross-cutting design, subtle concurrency or
-data-format work); use `high` or `medium` only for trivial mechanical chores, and say
-why. Claude and Codex workers use `high` unless the user names a level for that task:
-at `max` a small Claude model spent 63% of a 40-minute turn in hidden reasoning and
-wrote nothing.
+Pi clamps it to each model's highest level). Codex (`gpt-6.1-sol`) takes its effort
+from the kind of turn: `xhigh` for planning, logic or design debates and other important
+high-level discussion; `medium` (used when no effort is passed) or `low` for mechanical
+implementation where the brief states the exact steps; `high` for complex implementation
+where the brief gives a goal and the worker decides what to do and how. Never `max` or
+`ultra`: the engine refuses both for this model. Claude workers use `high` or `xhigh`
+unless the user names a level for that task: at `max` a small Claude model spent 63% of
+a 40-minute turn in hidden reasoning and wrote nothing.
 
 **Pi rules.** Always pass `--model` (an explicit model also becomes Pi's global
 default, and omitting it inherits whatever was used last), plus `--engine pi

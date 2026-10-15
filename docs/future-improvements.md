@@ -1,6 +1,6 @@
 # Future improvements
 
-Status: proposals, 2026-10-15. A1 to A4 are implemented. Nothing else is approved for implementation. Each item needs the
+Status: proposals, 2026-10-15. A1 to A4 and B2 to B3 are implemented. Other proposals need the
 user's approval before work starts. Sources: the retro of the worker-freedom session
 (2026-10-15) and a review of Sno Station (`sno-ai/sno-station`, `sno-ai/sno-station-skills`).
 
@@ -116,8 +116,10 @@ claive now finds an exhausted quota only when a turn fails. Sno's
 
 ### B2. A stronger `reviewer` role preamble
 
+Implemented 2026-10-15 in the built-in preamble, in our own words.
+
 Sno's review prompts (`peer-review/skill/assets/adversarial-review.prompt.md`, also a plan and a
-test variant) have rules that the claive `reviewer` role does not have:
+test variant) informed these additions to the claive `reviewer` role:
 
 1. **Cut first.** Before the defect search, list what the change adds that no observed failure
    or stated requirement needs (a lock, cap, retry, flag, gate, queue). This agrees with the
@@ -130,16 +132,18 @@ test variant) have rules that the claive `reviewer` role does not have:
    stall or a wait with no timeout, a wrong flow, two writers on one resource. "Wrong but loud
    is acceptable. Wrong and silent is the bug." Retro item A1 is this type of bug.
 
-**Proposal:** add these four rules to the built-in `reviewer` preamble in `roles.py`, in our own
-words. Or copy the prompt text with the Apache-2.0 attribution above.
+**Change:** the built-in `reviewer` preamble in `roles.py` now includes these four rules in our
+own words. Role overrides still control custom preambles.
 
 ### B3. Rule for checks
 
+Implemented 2026-10-15 in the harness guide and orchestration skill.
+
 From Sno's `charter` skill: "The expected result comes from the requirement or from independent
 data, never from the program's own output. For a defect, the check reproduces the defect
-first." claive-orch already needs a verifier that fails at base. **Proposal:** add the first
-sentence to the check-manifest section of `docs/harness-integration.md` and to the
-`claive-orchestration` skill.
+first." claive-orch already needs a verifier that fails at base. **Change:** the check-manifest
+section of `docs/harness-integration.md` and the `claive-orchestration` skill now require
+independent expected results, in our own words.
 
 ### B4. Count what the critics find
 
@@ -179,6 +183,6 @@ The live tests edited `~/.config/claive/config.json` and needed a manual restore
 
 1. A1, A4 (small, they catch real bugs).
 2. A2, A3.
-3. B2, B3 (text only).
+3. B2, B3 (text only, implemented).
 4. B1 design note and live check.
 5. A6, B4, B5 when there is a need.

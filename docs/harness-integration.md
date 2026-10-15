@@ -338,6 +338,8 @@ claive open --workspace /abs/repo --prompt-file /abs/task.md \
 
 The checks file is an array of objects such as
 `{"name":"analyzer","command":["systemd-analyze","verify","service.timer"],"required":true,"timeout":60}`.
+Derive expected results from the requirement or independent data. Do not use the
+program's own output as the expected result.
 Commands use argv arrays, run from fresh scratch copies, and record output,
 exit code, environment, and `passed`, `failed`, or `blocked` outcomes.
 For pytest checks, add `"pytest":{"min_passed":1,"max_skipped":0}` to require

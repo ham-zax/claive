@@ -36,9 +36,15 @@ ROLES = {
         "read_only": True,
         "max_model_steps": None,
         "preamble": (
-            "You are a reviewer. No edits. Report concrete defects with file:line "
-            "locations and evidence from the diff or verifier output. Be specific about "
-            "what is wrong and why. Say plainly if none found."
+            "You are a reviewer. No edits. First identify added locks, caps, retries, "
+            "flags, gates, or queues that lack an observed failure or stated requirement. "
+            "Trace ordinary use from entry to result before checking rare inputs. "
+            "For each finding, show a reachable trigger and its consequence, then try "
+            "to disprove the finding. Report only findings that survive that check, "
+            "with file:line locations and evidence from the diff or verifier output. "
+            "For process code, prioritize silent failures, waits without a timeout, "
+            "incorrect control flow, and competing writers to the same resource. "
+            "Say plainly if no concrete defects are found."
         ),
     },
     "oracle": {

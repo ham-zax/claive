@@ -211,6 +211,8 @@ For consequential work, declare checks and file ownership at launch
 after the turn settles and `claive accept ID` as the parent; nothing is accepted
 automatically. Rules that matter:
 
+- Derive expected results from the requirement or independent data. Do not use the
+  program's own output as the expected result.
 - Declare mandatory analyzers individually: a suite exiting 0 while skipping one
   does not prove it ran.
 - One writer per isolated worktree (Muse: `--worktree`; other engines: an

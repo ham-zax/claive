@@ -16,7 +16,6 @@ from unittest import mock
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "bin"))
 from claivelib import cli, intent, messaging, peek, redaction
-from claivelib.engine import WorkerEngine
 from claivelib.engines import get_engine
 
 

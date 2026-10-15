@@ -49,7 +49,8 @@ if os.environ.get("FIXTURE_PROMPT_OUT"):
         copy.write(prompt_text + "\n----\n")
 if os.environ.get("FIXTURE_ENV_OUT"):
     with open(os.environ["FIXTURE_ENV_OUT"], "a") as copy:
-        copy.write(json.dumps({"CLAIVE_WORKER_ID": os.environ.get("CLAIVE_WORKER_ID")}) + "\n")
+        copy.write(json.dumps({"CLAIVE_WORKER_ID": os.environ.get("CLAIVE_WORKER_ID"),
+                               "CLAIVE_BIN": os.environ.get("CLAIVE_BIN")}) + "\n")
 ASK = ("Need a choice.\n\n```claive-report\n{\"status\": \"needs_decision\", \"summary\": \"Two designs.\", "
        "\"question\": \"Design A or B?\"}\n```\n")
 
@@ -60,8 +61,8 @@ def emit(kind, **payload):
 
 emit("model")
 if mode == "reply":
-    question_id = re.search(r"claive reply ([0-9a-f]{32})", prompt_text)[1]
-    launcher = os.path.join(os.path.dirname(__file__), "fixture-workers")
+    question_id = re.search(r'"\$CLAIVE_BIN" reply ([0-9a-f]{32})', prompt_text)[1]
+    launcher = os.environ["CLAIVE_BIN"]
     replies = [subprocess.run([launcher, "reply", question_id, "--message", "fixture reply"],
                               text=True, capture_output=True) for _ in range(2)]
     if os.environ.get("FIXTURE_REPLY_OUT"):

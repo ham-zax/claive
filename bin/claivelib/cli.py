@@ -648,7 +648,7 @@ def supervise(job_id, control=None):
             timed_out = False
             kill_at = None
             turn_start = None
-            child_env = dict(os.environ, CLAIVE_WORKER_ID=job_id)
+            child_env = dict(os.environ, CLAIVE_WORKER_ID=job_id, CLAIVE_BIN=launcher_path())
             if state.get("engine") == "pi":
                 # Rebuilt every turn so models.json edits and config changes take effect.
                 overlay = provider.overlay_agent_dir(root())
@@ -1387,15 +1387,53 @@ def discard_job(path, launch):
 
 
 def spawn_supervisor(path, state, entry):
-    """Start a detached supervisor (`_supervise` or `_reusable`); discard the job if it cannot start."""
+    """Start a detached supervisor and wait for its PID; discard the job if Popen fails."""
     try:
         with (path / "supervisor.log").open("w") as log:
             args = [f"claive-supervisor {state['id']}", launcher_path(), entry, state["id"]]
-            subprocess.Popen(args, executable=sys.executable,
-                             stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+            process = subprocess.Popen(args, executable=sys.executable,
+                                       stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                       start_new_session=True)
     except BaseException:
         discard_job(path, launch_config(state))
         raise
+
+    def supervisor_pid():
+        try:
+            saved = json.loads((path / "state.json").read_text())
+        except (OSError, ValueError):
+            return None
+        return saved.get("supervisor_pid") if isinstance(saved, dict) else None
+
+    def failed(reason):
+        try:
+            log_lines = (path / "supervisor.log").read_text(errors="replace").splitlines()[-20:]
+        except OSError:
+            log_lines = []
+        log_tail = "\n".join(log_lines)
+        raise ValueError(f"worker supervisor did not start ({reason}); see {path / 'supervisor.log'}\n"
+                         f"{log_tail}")
+
+    deadline = time.monotonic() + 5
+    while True:
+        if supervisor_pid():
+            return
+        returncode = process.poll()
+        if returncode is not None:
+            if supervisor_pid():
+                return
+            failed(f"exited with code {returncode}")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            if supervisor_pid():
+                return
+            returncode = process.poll()
+            if returncode is not None:
+                if supervisor_pid():
+                    return
+                failed(f"exited with code {returncode}")
+            failed("no PID after 5 s")
+        time.sleep(min(0.05, remaining))
 
 
 def report(state):

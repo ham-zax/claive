@@ -19,10 +19,13 @@ class CodexForkAppServerChecks(unittest.TestCase):
             prompt = root / "prompt.md"
             prompt.write_text("branch prompt\n")
             capture = root / "requests.jsonl"
+            env_capture = root / "environment.json"
             binary = root / "fake-codex"
             binary.write_text("""#!/usr/bin/python3
 import json, os, sys
 capture = os.environ["CODEX_FAKE_CAPTURE"]
+with open(os.environ["CODEX_FAKE_ENV_CAPTURE"], "w") as stream:
+    json.dump({"CLAIVE_BIN": os.environ.get("CLAIVE_BIN")}, stream)
 def output(value):
     print(json.dumps(value), flush=True)
 for line in sys.stdin:
@@ -41,7 +44,9 @@ for line in sys.stdin:
         output({"method": "turn/completed", "params": {"threadId": "forked-thread", "turn": {"id": "fork-turn", "status": "completed"}}})
 """)
             binary.chmod(0o700)
-            env = dict(os.environ, CODEX_HOME=str(root / "codex-home"), CODEX_FAKE_CAPTURE=str(capture))
+            launcher = str(root / "supervisor-claive")
+            env = dict(os.environ, CODEX_HOME=str(root / "codex-home"), CODEX_FAKE_CAPTURE=str(capture),
+                       CODEX_FAKE_ENV_CAPTURE=str(env_capture), CLAIVE_BIN=launcher)
             result = subprocess.run(
                 [sys.executable, str(CODEX_APP_SERVER), "--binary", str(binary), "--cwd", str(root),
                  "--model", "gpt-6-luna", "--effort", "max", "--sandbox", "read-only",
@@ -56,6 +61,7 @@ for line in sys.stdin:
             self.assertIn({"type": "item.completed", "item": {"type": "agent_message",
                                                                    "text": "copied branch"}}, events)
             requests = [json.loads(line) for line in capture.read_text().splitlines()]
+            self.assertEqual(json.loads(env_capture.read_text())["CLAIVE_BIN"], launcher)
             fork_request = next(request for request in requests if request.get("method") == "thread/fork")
             self.assertEqual(fork_request["params"]["threadId"], "source-thread")
             turn_request = next(request for request in requests if request.get("method") == "turn/start")

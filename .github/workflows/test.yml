@@ -13,5 +13,6 @@ jobs:
           python-version: "3.14"
       - run: sudo apt-get install -y shellcheck
       - run: python3 -m compileall -q bin/claivelib tests
+      - run: pipx run ruff check --select F bin/claivelib tests
       - run: shellcheck install.sh bin/claive-worker bin/claive-codex
       - run: python3 -m unittest discover -s tests -p 'test_*.py'

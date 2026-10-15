@@ -9,6 +9,7 @@ test-one +files:
 # Syntax and shell checks, fast enough for every commit.
 lint:
     python3 -m compileall -q bin/claivelib tests
+    uvx ruff check --select F bin/claivelib tests
     shellcheck install.sh bin/claive-worker bin/claive-codex
 
 check: lint test

@@ -236,11 +236,12 @@ class AsyncChecks(unittest.TestCase):
         self.eventually(lambda: self.state(job)["status"] not in {"idle", "running"}, "worker did not close")
 
     # B. recursion guard ------------------------------------------------------------
-    def test_workers_get_their_id_and_cannot_launch_workers(self):
+    def test_workers_get_their_id_and_launcher_and_cannot_launch_workers(self):
         result, job = self.launch("run")
         self.assertEqual(result.returncode, 0, result.stderr)
         recorded = [json.loads(line) for line in self.env_out.read_text().splitlines()]
         self.assertEqual(recorded[-1]["CLAIVE_WORKER_ID"], job)
+        self.assertEqual(recorded[-1]["CLAIVE_BIN"], FIXTURE_CLI)
 
         before = len(self.workers())
         for action in ("run", "start", "open"):

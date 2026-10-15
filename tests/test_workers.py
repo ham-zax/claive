@@ -9,7 +9,6 @@ import tempfile
 import time
 import unittest
 import sys
-import uuid
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +23,11 @@ MUSE_MODEL = "muse-spark-1.3-contributor"
 
 FAKE = """#!/usr/bin/python3
 import json, os, signal, subprocess, sys, time
+args = sys.argv[1:]
+for other_flag in ("--disable-approval", "--approval-mode"):
+    if "--permission-profile" in args and other_flag in args:
+        print(f"error: --permission-profile cannot be used with {other_flag}", file=sys.stderr)
+        sys.exit(2)
 mode = os.environ.get("MUSE_TEST_MODE", "success")
 def emit(kind, **payload):
     print(json.dumps({"payload_type": kind, "payload": payload}), flush=True)
@@ -547,6 +551,17 @@ class WorkerChecks(unittest.TestCase):
         self.assertEqual((self.registry / state["id"] / "result.txt").read_text(), "fixture result")
         self.assertEqual((self.registry / state["id"] / "state.json").stat().st_mode & 0o777, 0o600)
 
+    def test_fake_muse_rejects_permission_profile_flag_pairs(self):
+        for other_flag in ("--disable-approval", "--approval-mode"):
+            with self.subTest(other_flag=other_flag):
+                result = subprocess.run(
+                    [str(self.fake), "--permission-profile", "default", other_flag],
+                    text=True, capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(
+                    result.stderr,
+                    f"error: --permission-profile cannot be used with {other_flag}\n")
+
     def test_read_only_worktree_is_created_by_claive_and_removed_after(self):
         # Read-only lanes get a detached worktree, always removed when the worker ends.
         repo = self.git_repo(self.path / "repo")
@@ -590,6 +605,56 @@ class WorkerChecks(unittest.TestCase):
         result, state = self.launch(mode="malformed")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(state["malformed_events"], 1)
+
+    def test_start_fails_when_supervisor_exits_before_recording_pid(self):
+        startup = self.path / "supervisor-startup"
+        startup.mkdir()
+        (startup / "sitecustomize.py").write_text(
+            "import os, sys\n"
+            "if len(sys.argv) > 1 and sys.argv[1] == '_supervise':\n"
+            "    print('fake supervisor failed before PID', file=sys.stderr, flush=True)\n"
+            "    os._exit(23)\n"
+        )
+        result = subprocess.run(
+            [CLI, "start", "--workspace", str(self.path), "--prompt-file", str(self.prompt), "--label", "fixture"],
+            env=dict(self.env, MUSE_TEST_MODE="success", PYTHONPATH=str(startup)),
+            text=True, capture_output=True, timeout=12)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("worker supervisor did not start (exited with code 23)", result.stderr)
+        self.assertIn("fake supervisor failed before PID", result.stderr)
+        worker_id = re.search(r"Worker ([0-9a-f]{12})", result.stdout).group(1)
+        path = self.registry / worker_id
+        state = json.loads((path / "state.json").read_text())
+        self.assertEqual(state["status"], "starting")
+        self.assertNotIn("supervisor_pid", state)
+        self.assertTrue(path.is_dir())
+
+    def test_start_timeout_keeps_running_supervisor_and_job(self):
+        path = self.registry / "0123456789ab"
+        path.mkdir(parents=True)
+        state = {"id": path.name, "status": "starting"}
+        state_file = path / "state.json"
+        state_file.write_text(json.dumps(state))
+        process = mock.Mock()
+        process.poll.return_value = None
+        clock = [0.0]
+
+        def tick():
+            now = clock[0]
+            clock[0] += 0.05
+            return now
+
+        with (mock.patch.object(module.subprocess, "Popen", return_value=process),
+              mock.patch.object(module.time, "monotonic", side_effect=tick),
+              mock.patch.object(module.time, "sleep") as sleep):
+            with self.assertRaisesRegex(ValueError, "worker supervisor did not start \\(no PID after 5 s\\)"):
+                module.spawn_supervisor(path, state, "_supervise")
+
+        self.assertEqual(json.loads(state_file.read_text()), state)
+        self.assertTrue(path.is_dir())
+        self.assertGreater(sleep.call_count, 1)
+        process.terminate.assert_not_called()
+        process.kill.assert_not_called()
 
     def test_background_and_process_group_cancellation(self):
         result, initial = self.launch(action="start", mode="slow")

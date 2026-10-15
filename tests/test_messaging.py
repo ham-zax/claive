@@ -29,7 +29,7 @@ class EnvelopeChecks(unittest.TestCase):
     def test_exact_note_and_ask_envelopes(self):
         note_instruction = "This is a note from the parent, not a question and not a change of assignment. No reply is needed."
         ask_instruction = (
-            'Answer it now with `claive reply ' + "b" * 32 + ' --message "..."` '
+            'Answer it now with `"$CLAIVE_BIN" reply ' + "b" * 32 + ' --message "..."` '
             '(a short, direct reply), then carry on with what you were doing. '
             'Do not restructure your work around the question. If you cannot run '
             'that command, give the answer in your final message. If you read this '
@@ -54,7 +54,7 @@ class EnvelopeChecks(unittest.TestCase):
                     self.assertIsNone(messaging.extract_parent_message(text))
         envelope = messaging.delivered_text(self.ask)
         self.assertIsNone(messaging.extract_parent_message(
-            envelope.replace("claive reply " + self.ask["id"], "claive reply " + "c" * 32)))
+            envelope.replace('"$CLAIVE_BIN" reply ' + self.ask["id"], '"$CLAIVE_BIN" reply ' + "c" * 32)))
 
     def test_format_block_joins_visible_envelopes_without_heading(self):
         messages = [(None, self.note), (None, self.ask)]

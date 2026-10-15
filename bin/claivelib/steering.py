@@ -3,7 +3,6 @@ import dataclasses
 import fcntl
 import json
 import os
-from pathlib import Path
 import re
 import time
 import uuid

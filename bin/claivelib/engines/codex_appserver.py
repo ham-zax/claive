@@ -42,6 +42,9 @@ def run(args):
     with tempfile.TemporaryDirectory(prefix="claive-codex-home-") as home:
         home_for_server(base, args.user_config, Path(home), args.ephemeral)
         env = dict(os.environ, CODEX_HOME=home)
+        launcher = os.environ.get("CLAIVE_BIN")
+        if launcher is not None:
+            env["CLAIVE_BIN"] = launcher
         command = [args.binary, "app-server", "--listen", "stdio://",
                    "-c", 'model_reasoning_effort="' + args.effort + '"',
                    "-c", 'approval_policy="never"',

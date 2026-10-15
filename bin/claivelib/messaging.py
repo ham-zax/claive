@@ -34,7 +34,7 @@ PARENT_MESSAGE_TAG = "<parent-message>"
 PARENT_MESSAGE_CLOSE_TAG = "</parent-message>"
 TO_WORKER_INSTRUCTIONS = {
     "note": "This is a note from the parent, not a question and not a change of assignment. No reply is needed.",
-    "ask": ('Answer it now with `claive reply {id} --message "..."` (a short, direct reply), then carry on '
+    "ask": ('Answer it now with `"$CLAIVE_BIN" reply {id} --message "..."` (a short, direct reply), then carry on '
             'with what you were doing. Do not restructure your work around the question. If you cannot run '
             'that command, give the answer in your final message. If you read this after {deadline}, ignore it.'),
 }

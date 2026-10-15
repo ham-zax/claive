@@ -92,6 +92,13 @@ class BudgetTextChecks(unittest.TestCase):
     def test_handoff_marker_accepts_surrounding_whitespace(self):
         self.assertTrue(budget.is_handoff("\n\t\n \t[claive-handoff]\t \n## Next step\nContinue."))
 
+    def test_late_marker_line_reports_only_an_exact_later_line(self):
+        self.assertIsNone(budget.late_marker_line("\n \n" + HANDOFF))
+        self.assertEqual(budget.late_marker_line("first line\nsecond line\n\n[claive-handoff]"), 4)
+        self.assertIsNone(budget.late_marker_line("No marker here."))
+        self.assertIsNone(budget.late_marker_line("see [claive-handoff] here"))
+        self.assertEqual(budget.late_marker_line("preface\n  [claive-handoff]  "), 2)
+
     def test_next_step_body_is_stripped_and_limited(self):
         self.assertEqual(budget.next_step(HANDOFF + "\n\n## Later\nIgnore"), "Check the next step.")
         self.assertEqual(budget.next_step("## Next step\n\n  " + "x" * 350), "x" * 300)
@@ -158,6 +165,41 @@ class BudgetGateChecks(unittest.TestCase):
 
 
 class ClaudeBudgetChecks(unittest.TestCase):
+    def test_stopping_reply_with_late_marker_records_budget_warning(self):
+        reply = "A preface.\nMore detail.\n\n[claive-handoff]\n## Next step\nContinue."
+        self.plan([{"usage": 100000}, {"read": 1}, {"result": reply}])
+        self.create()
+        code, state = self.supervise()
+        warning = budget.LATE_MARKER.format(line=4)
+        self.assertEqual(code, 0, state)
+        self.assertEqual(state["budget_phase"], "stopping")
+        self.assertEqual(state["budget_warning"], warning)
+        self.assertEqual((state["handoffs"], state["budget_missed"]), (0, 0))
+        shown = subprocess.run([str(REPO / "bin/claive"), "show", state["id"]], env=self.env,
+                               text=True, capture_output=True, timeout=5)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn(f"Budget warning: {warning}\n", shown.stdout)
+        shown_json = subprocess.run([str(REPO / "bin/claive"), "show", state["id"], "--json"], env=self.env,
+                                    text=True, capture_output=True, timeout=5)
+        self.assertEqual(shown_json.returncode, 0, shown_json.stderr)
+        self.assertEqual(json.loads(shown_json.stdout)["budget_warning"], warning)
+
+    def test_stopping_reply_without_marker_does_not_record_budget_warning(self):
+        self.plan([{"usage": 100000}, {"read": 1}, {"result": "The worker stopped without a marker."}])
+        self.create()
+        code, state = self.supervise()
+        self.assertEqual(code, 0, state)
+        self.assertEqual(state["budget_phase"], "stopping")
+        self.assertNotIn("budget_warning", state)
+
+    def test_late_marker_below_stop_limit_does_not_record_budget_warning(self):
+        self.plan([{"usage": 85000}, {"read": 1}, {"result": "A preface.\n[claive-handoff]"}])
+        self.create()
+        code, state = self.supervise()
+        self.assertEqual(code, 0, state)
+        self.assertEqual(state["budget_phase"], "warned")
+        self.assertNotIn("budget_warning", state)
+
     def test_show_budget_on_after_handoff_in_text_and_json(self):
         self.plan([{"result": HANDOFF}], [{"usage": 87999}, {"read": 1}, {"result": "done"}])
         self.create()
@@ -212,6 +254,7 @@ class ClaudeBudgetChecks(unittest.TestCase):
         code, state = self.supervise()
         self.assertEqual(code, 3, state)
         self.assertIsNone(state.get("pending_handoff"))
+        self.assertEqual(state["needs_parent"]["kind"], "budget_limit")
         handoff_file = self.path / "handoffs/turn-0001-2.md"
         self.assertTrue(state["needs_parent"]["question"].endswith(
             f"Its latest handoff is in {handoff_file}. Start a new worker from that handoff to continue."))
@@ -422,6 +465,7 @@ class ClaudeBudgetChecks(unittest.TestCase):
         self.assertEqual((self.path / "result.txt").read_text(), FINAL)
         self.assertEqual((self.path / "results/turn-0001.txt").read_text(), FINAL)
         self.assertEqual((state["handoffs"], state["turn_handoffs"], state["context_tokens"]), (1, 1, 95000))
+        self.assertNotIn("budget_warning", state)
         self.assertEqual(len(self.receipts()), 2)
         self.assertTrue(all(item["status"] == "acknowledged" for item in self.receipts()))
         events = [json.loads(line) for line in (self.registry / "inbox.jsonl").read_text().splitlines()]
@@ -584,6 +628,69 @@ class ClaudeBudgetChecks(unittest.TestCase):
         self.assertEqual(closed.returncode, 0, closed.stderr)
         process.communicate(timeout=5)
         self.assertEqual(process.returncode, 0)
+
+    def test_close_after_limit_clears_parent_state_and_keeps_handoff(self):
+        self.plan([{"result": HANDOFF}], [{"result": HANDOFF}])
+        Path(self.env["CLAIVE_CONFIG"]).write_text(json.dumps({"engines": {"claude": {"budget": {
+            "models": {"claude-haiku-5-5": {"max_handoffs": 1}}}}}}))
+        launcher = str(REPO / "bin/claive")
+        process = subprocess.Popen([launcher, "open", "--engine", "claude", "--workspace", str(self.workspace),
+                                    "--prompt-file", str(self.prompt), "--report"], env=self.env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        def cleanup():
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+
+        self.addCleanup(cleanup)
+        deadline = time.monotonic() + 5
+        first = None
+        while time.monotonic() < deadline:
+            for file in self.registry.glob("*/state.json"):
+                candidate = json.loads(file.read_text())
+                if candidate.get("status") == "idle" and candidate["turn"] == 1:
+                    self.path = file.parent
+                    first = candidate
+                    break
+            if first is not None:
+                break
+            if process.poll() is not None:
+                self.fail(f"reusable worker exited: {process.communicate()}")
+            time.sleep(0.02)
+        self.assertIsNotNone(first, "turn 1 did not become idle")
+        self.assertEqual(first["needs_parent"]["kind"], "budget_limit")
+        handoff_file = Path(first["pending_handoff"])
+        self.assertTrue(handoff_file.is_file())
+        inbox_file = self.registry / "inbox.jsonl"
+        inbox_before = inbox_file.read_text()
+
+        closed = subprocess.run([launcher, "close", first["id"]], env=self.env,
+                                text=True, capture_output=True, timeout=5)
+        self.assertEqual(closed.returncode, 0, closed.stderr)
+        process.communicate(timeout=5)
+        self.assertEqual(process.returncode, 0)
+        state = json.loads((self.path / "state.json").read_text())
+        self.assertEqual((state["status"], state["phase"]), ("completed", "session closed"))
+        self.assertNotIn("needs_parent", state)
+        self.assertNotIn("pending_handoff", state)
+        self.assertTrue(handoff_file.is_file())
+        self.assertEqual(inbox_file.read_text(), inbox_before)
+
+        listed = subprocess.run([launcher, "list"], env=self.env, text=True, capture_output=True, timeout=5)
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        row = next(line for line in listed.stdout.splitlines() if first["id"] in line)
+        self.assertNotIn("ASK", row)
+        self.assertIn("COMPLETED", row)
+        shown = subprocess.run([launcher, "show", first["id"]], env=self.env,
+                               text=True, capture_output=True, timeout=5)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertNotIn("Needs parent", shown.stdout)
+        self.assertNotIn("Pending handoff:", shown.stdout)
 
 
 if __name__ == "__main__":

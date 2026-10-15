@@ -51,6 +51,8 @@ GATE_DENY = """[claive budget] claive, which runs this session, denied this tool
 {k}k tokens, at the {stop_k}k stop limit, and claive denies every tool call in this session from now
 on. claive's instructions arrive as a user message."""
 
+LATE_MARKER = "The stop reply has [claive-handoff] on line {line}, not on the first nonblank line. claive counted no handoff."
+
 PREAMBLE = """[claive budget] The previous session of this worker reached its context budget and wrote the
 handoff below. This is a new session with an empty context. Continue the assignment from the
 handoff's Next step. The original assignment follows the handoff for reference."""
@@ -72,6 +74,13 @@ def gate_deny_message(tokens, values):
 def is_handoff(text):
     first = next((line for line in text.splitlines() if line.strip()), "")
     return first.strip() == "[claive-handoff]"
+
+
+def late_marker_line(text):
+    if is_handoff(text):
+        return None
+    return next((number for number, line in enumerate(text.splitlines(), 1)
+                 if line.strip() == "[claive-handoff]"), None)
 
 
 def next_step(text):

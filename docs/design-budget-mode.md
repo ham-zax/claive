@@ -219,7 +219,8 @@ On a handoff:
    handoff, then the parent's message. `pending_handoff` is cleared once delivered. A one-shot
    worker cannot take an answer: claive sets no `pending_handoff`, the question ends "Start a new
    worker from that handoff to continue.", its result text is the handoff, and the parent starts a
-   new worker from it.
+   new worker from it. If the parent closes the worker instead, claive clears needs_parent and
+   pending_handoff. The handoff file stays on disk.
 5. Otherwise claive continues inside the same turn, like the fallback loop in `supervise`: a new
    session ID from `engine.resolve_session_id(None, session_logging)`, a continuation prompt, a
    rebuilt command, `attempt += 1`.
@@ -258,7 +259,9 @@ original assignment, not the previous continuation.
 - `show` prints: `Context budget: on | context 87k | warn 85k | stop 95k | compact 115k |
   handoffs 2 (this turn 1) | missed 0`, or `Context budget: off (output schema)`.
 - `show --json` exposes `budget` (launch values or null, off reason), `context_tokens`,
-  `handoffs`, `turn_handoffs`, `budget_missed`, `pending_handoff`.
+  `handoffs`, `turn_handoffs`, `budget_missed`, `pending_handoff`, `budget_warning`.
+  claive sets `budget_warning` when a completed stop-phase reply has the handoff marker below its
+  first nonblank line.
 
 ### Tests
 

@@ -49,7 +49,7 @@ The margin only reduces the risk. Run d028e6320ef0 session 2 (17k result) alread
 Note: a PostToolUse hook (the seamless-claude method) does NOT help. The hook reads the same
 usage number and its message enters at the same point, after the tool result.
 
-Fix built (uncommitted): the "budget gate". Claive passes a `PreToolUse` hook with `--settings`.
+Fix built (commit 5613b74): the "budget gate". Claive passes a `PreToolUse` hook with `--settings`.
 The hook runs the hidden `claive _budget_gate` command. The supervisor writes
 `<job>/budget-gate.json` when the context reaches `stop`. The hook waits up to 2.0 s for that
 file, then denies every tool call with a short factual reason. Claive still sends the stdin stop
@@ -86,7 +86,8 @@ Old: a one-shot worker (`claive start`/`run`) at the limit had the question
 ("worker is not waiting for a parent decision").
 New: for one-shot workers the question ends "Start a new worker from that handoff to continue.",
 no `pending_handoff` is set, and `show` prints no "Pending handoff" line.
-Reusable workers (`claive open`) keep the old text and `pending_handoff`. Verified live:
+Reusable workers (`claive open`) keep the old text and `pending_handoff`. Verified live for the
+reusable path only:
 `claive answer` started turn 2 from the handoff, `prompt-0002.md` = preamble + handoff +
 original assignment + parent message, `pending_handoff` cleared.
 

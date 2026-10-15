@@ -351,6 +351,7 @@ def load(path, check_alive=True):
         # Public reads expose a null value without restoring a cleared marker on internal reads.
         if check_alive:
             state.setdefault("pending_handoff", None)
+            state.setdefault("budget_warning", None)
     return state
 
 
@@ -537,7 +538,7 @@ def event_update(state, event):
 
 FALLBACKABLE_FAILURES = {"timeout", "quota", "worker", "protocol"}
 
-PER_TURN_RESET_KEYS = ("ended_at", "error", "terminal", "terminal_reason", "quota_exhausted",
+PER_TURN_RESET_KEYS = ("ended_at", "error", "terminal", "terminal_reason", "budget_warning", "quota_exhausted",
                        "quota_reset_at", "fallback_requires_user_approval", "report", "report_state",
                        "report_error", "needs_parent", "failure_kind", "active_tools")
 
@@ -840,6 +841,11 @@ def supervise(job_id, control=None):
                     state["failure_kind"] = "worker"
             else:
                 state["status"] = "completed"
+            if (state["status"] == "completed" and budget_values is not None
+                    and state.get("budget_phase") == "stopping"):
+                late_marker = budget.late_marker_line(final_text)
+                if late_marker is not None:
+                    state["budget_warning"] = budget.LATE_MARKER.format(line=late_marker)
             if state["status"] == "completed" and budget_values is not None and budget.is_handoff(final_text):
                 state["handoffs"] += 1
                 state["turn_handoffs"] += 1
@@ -1227,6 +1233,8 @@ def reusable_worker(job_id):
                     pending[0].unlink()
                 break
             if (path / "close.request").exists():
+                state.pop("needs_parent", None)
+                state.pop("pending_handoff", None)
                 state.update(status=state["last_turn_status"], phase="session closed", ended_at=time.time())
                 release_worktree(state)
                 save(path / "state.json", state)
@@ -1597,6 +1605,8 @@ def report(state):
                   f"warn {values['warn'] // 1000}k | stop {values['stop'] // 1000}k | "
                   f"compact {values['compact'] // 1000}k | handoffs {state.get('handoffs', 0)} "
                   f"(this turn {state.get('turn_handoffs', 0)}) | missed {state.get('budget_missed', 0)}")
+            if state.get("budget_warning"):
+                print(f"Budget warning: {clean(state['budget_warning'])}")
         else:
             reason = launch.get("budget_off_reason") or "not set at launch"
             print(f"Context budget: off ({clean(reason)})")

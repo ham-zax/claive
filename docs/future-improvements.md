@@ -161,15 +161,14 @@ with the "never poll" rule unless the user starts it on purpose.
 ### C1. Warn when a stop reply holds the marker below the first line
 
 In live run 37c07187a9fc, the worker wrote a preface and then `[claive-handoff]` on line 22.
-claive counted no handoff and gave no warning. **Proposal:** in phase `stopping`, if the reply
-holds the marker below the first nonblank line, record a `budget_missed` reason that names the
-line. Accepting the marker anywhere is a separate decision.
+claive counted no handoff and gave no warning. **Done:** claive records budget_warning and claive show prints it.
+Accepting the marker anywhere is a separate decision.
 
 ### C2. `claive list` shows ASK for a closed worker
 
 After `claive close` on a worker with `needs_parent: budget_limit`, `claive show` reports
-`completed | session closed`, but `claive list` still shows `ASK`. **Proposal:** clear or
-ignore `needs_parent` when the session is closed, and add a test for the list state.
+`completed | session closed`, but `claive list` still shows `ASK`. **Done:** closing a reusable
+worker clears needs_parent and pending_handoff.
 
 ### C3. Live budget tests use a scratch config
 

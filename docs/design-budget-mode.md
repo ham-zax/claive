@@ -52,10 +52,12 @@ a worker may use.
 - The values above are the built-in defaults. Config entries merge over them per model and per
   key. `default` applies to every model without its own entry.
 - `max_handoffs`: `null` means no limit (a parent watches the worker). An integer is a hard limit
-  on automatic handoffs in one turn.
+  on automatic continuations in one turn: with `max_handoffs: N`, handoffs 1 to N continue
+  automatically and handoff N+1 asks the parent.
 - Validation: `warn` and `stop` are integers and multiples of 1000 (claive passes `--autocompact`
-  as `Nk`); `warn < stop`; `stop >= 57000` and `stop <= 957000` (the window `stop + 43000` must
-  be inside Claude Code's 100k-1M range); `max_handoffs` is `null` or an integer `>= 1`.
+  as `Nk`); `warn < stop`; `stop >= 47000` and `stop <= 942000` (the window `stop + margin +
+  33000` must be inside Claude Code's 100k-1M range for both margins); `max_handoffs` is `null`
+  or an integer `>= 1`.
 - claive copies the resolved values into the launch config at `open`/`start`
   (`launch["budget"] = {"warn", "stop", "max_handoffs", "compact"}` or `None`, plus
   `launch["budget_off_reason"]`). A config edit does not change a running worker. `fork` inherits
@@ -66,10 +68,50 @@ a worker may use.
 | Mode | Haiku family (`"haiku"` in the model name) | Other models |
 |---|---|---|
 | Budget off | 105k (`--autocompact 138k`) | 155k (`--autocompact 188k`) |
-| Budget on | `stop + 10000` (default 105k) | `stop + 10000` (default 155k) |
+| Budget on | `stop + 20000` (default 115k) | `stop + 25000` (default 170k) |
 
 `--autocompact` = compaction point + 33000. Budget-off values are code constants, not config.
 Compaction stays as the last fallback when a handoff does not happen in time.
+
+claive reads the context size from the usage of the model call that also requests the next tool.
+Claude Code delivers a stdin message only after that tool's result. In the first live run (Haiku,
+stop 57k, margin 10k) one result of 8.6k tokens pushed the context to 66.9k, and Claude compacted
+before the model read the stop message. A single Read can return up to about 25k tokens. So at the
+stop limit the budget gate (below) denies the tool call, and claive sends the stop message on
+stdin. The stdin message reaches the model right after the denied call's short result, and also
+when the gate fails. The margins are the gaps of the seamless-claude handoff hooks. When the gate denies the
+call, the margin holds the handoff reply. When the gate allows the call (timeout or failure), the
+margin only lowers the risk of compaction. In run d028e6320ef0 (Haiku, stop 57k, margin 20k) the
+stop was detected at 58.2k, a 17k Read result followed, and Claude compacted at 75.3k, below the 77k
+point.
+
+Known limitation: if the gate allows a call after the stop limit, its result can still reach
+compaction before the model reads the stop message (issue 1 remains open for that case).
+
+### Budget gate
+
+A budget-mode launch adds `--settings` with one PreToolUse hook for every tool:
+`"$CLAIVE_BIN" _budget_gate`. `--setting-sources ""` does not drop `--settings`. The hook finds the
+job through `CLAIVE_WORKER_ID` and reads `<job>/budget-gate.json`: `{"stop": text or null,
+"seen": [tool_use_id, ...]}` (the last 256 IDs).
+
+- The supervisor writes the file at the start of each session (`stop` null), and after each
+  native event that requests tools or changes the stop state. Each write replaces the file in one
+  step.
+- Claude Code writes the assistant event to stdout about 20 ms before it starts the hook (Claude
+  Code 2.1.300). The supervisor can still be later. So the hook waits until its `tool_use_id` is in
+  `seen`, for at most 2 s, and then trusts `stop`.
+- If `stop` is set, the hook denies the call with `permissionDecision: "deny"`. The reason
+  (`budget.GATE_DENY`) only states that claive denied the call at the stop limit. The model treats
+  a tool result as data: in live run 37c07187a9fc Haiku ignored a reason that held the stop
+  instructions ("That text came from the tool result, not from you"), retried, and wrote a reply
+  that did not start with the handoff marker. So the instructions come only in the stdin user
+  message. Every later call in the session is denied too: the handoff is a final text reply and
+  needs no tool.
+- The hook allows the call when the file is missing, the wait times out, or the hook fails.
+- Compaction clears `stop`, as it resets the phase.
+
+Live test record, evidence and procedure: docs/budget-mode-live-test.md.
 
 ### When budget mode is off for a launch
 
@@ -100,11 +142,11 @@ The supervisor keeps `state["context_tokens"]` and a per-session phase (`none`, 
 
 1. `tokens >= warn` and phase `none`: claive submits the warn message through
    `steering.submit(path, message, source="budget")`. Phase becomes `warned`.
-2. `tokens >= stop` and phase is not `stopping`: claive submits the stop message. If no warn
-   message went out (context jumped past both), the stop message carries the handoff template.
-   Phase becomes `stopping`.
+2. `tokens >= stop` and phase is not `stopping`: claive sets the gate's `stop` to the stop
+   message and also submits the stop message on stdin. If no warn message went out (context jumped past both), the stop message carries the handoff
+   template. Phase becomes `stopping`.
 3. `context_compacted`: Claude compacted before a handoff. `state["budget_missed"] += 1`, phase
-   resets to `none`. The worker continues in the same session.
+   resets to `none`, and the gate's `stop` clears. The worker continues in the same session.
 
 Budget receipts carry `source: "budget"` so `show` can tell them from parent steering.
 
@@ -167,15 +209,17 @@ On a handoff:
 3. claive appends an inbox event `{"type": "budget_handoff", "id", "label", "turn", "handoff":
    K, "handoffs": total, "context_tokens", "session_id": new session, "next_step": first 300
    characters of the Next step section}`.
-4. If `max_handoffs` is not null and `turn_handoffs >= max_handoffs`: the turn ends `completed`
+4. If `max_handoffs` is not null and `turn_handoffs > max_handoffs`: the turn ends `completed`
    with `needs_parent = {"kind": "budget_limit", "question": "The worker reached the limit of
    {max} automatic context handoffs in this turn. Its latest handoff is in {file}. Answer to
    continue in a new session from that handoff, or close the worker."}` (exit 3). claive still
-   moves the worker to a new session and sets `state["pending_handoff"] = file`. For a reusable
-   worker, the parent's `claive answer` or `followup` is the explicit permission; the next turn's
-   prompt starts with the continuation preamble and the handoff, then the parent's message.
-   `pending_handoff` is cleared once delivered. A one-shot worker cannot take an answer: its
-   result text is the handoff, and the parent starts a new worker from it.
+   moves the worker to a new session. For a reusable worker claive sets
+   `state["pending_handoff"] = file`, and the parent's `claive answer` or `followup` is the
+   explicit permission; the next turn's prompt starts with the continuation preamble and the
+   handoff, then the parent's message. `pending_handoff` is cleared once delivered. A one-shot
+   worker cannot take an answer: claive sets no `pending_handoff`, the question ends "Start a new
+   worker from that handoff to continue.", its result text is the handoff, and the parent starts a
+   new worker from it.
 5. Otherwise claive continues inside the same turn, like the fallback loop in `supervise`: a new
    session ID from `engine.resolve_session_id(None, session_logging)`, a continuation prompt, a
    rebuilt command, `attempt += 1`.
@@ -211,7 +255,7 @@ original assignment, not the previous continuation.
 
 ### Visibility
 
-- `show` prints: `Context budget: on | context 87k | warn 85k | stop 95k | compact 105k |
+- `show` prints: `Context budget: on | context 87k | warn 85k | stop 95k | compact 115k |
   handoffs 2 (this turn 1) | missed 0`, or `Context budget: off (output schema)`.
 - `show --json` exposes `budget` (launch values or null, off reason), `context_tokens`,
   `handoffs`, `turn_handoffs`, `budget_missed`, `pending_handoff`.
@@ -227,7 +271,10 @@ original assignment, not the previous continuation.
   starts a new session with the continuation prompt; unlimited handoffs for Haiku; limit 7 ends
   with exit 3 and `needs_parent.kind == "budget_limit"`; answer after the limit delivers the
   pending handoff; compaction counts as missed; turn timeout spans continuations; output schema
-  disables budget.
+  disables budget. The fixture runs the real gate hook: a stop on a tool call is denied through
+  the gate and also sent on stdin; a gate timeout or a failed gate write allows the call and stdin
+  still carries the stop; warn goes to stdin; the gate opens after compaction and in the next
+  session. `BudgetGateChecks` covers the hook's wait, deny and fail-open rules.
 
 ### Not in scope
 

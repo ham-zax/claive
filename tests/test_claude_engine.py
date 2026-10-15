@@ -124,17 +124,24 @@ class ClaudeChecks(unittest.TestCase):
                 (CLAUDE_MODEL, None, 105000, "138k"),
                 ("CLAUDE-HAIKU-custom", None, 105000, "138k"),
                 ("claude-sonnet-5-5", None, 155000, "188k"),
-                (CLAUDE_MODEL, {"stop": 95000}, 105000, "138k"),
-                ("claude-sonnet-5-5", {"stop": 145000}, 155000, "188k"),
-                (CLAUDE_MODEL, {"stop": 200000}, 210000, "243k"),
-                ("claude-sonnet-5-5", {"stop": 200000}, 210000, "243k")):
+                (CLAUDE_MODEL, {"stop": 95000}, 115000, "148k"),
+                ("claude-sonnet-5-5", {"stop": 145000}, 170000, "203k"),
+                (CLAUDE_MODEL, {"stop": 200000}, 220000, "253k"),
+                ("claude-sonnet-5-5", {"stop": 200000}, 225000, "258k")):
             with self.subTest(model=model, budget=budget):
                 command = self.engine.build_command(self.request(model=model, budget=budget))
                 self.assertEqual(compaction_point(model, budget), point)
                 self.assertEqual(command[command.index("--autocompact") + 1], window)
 
+    def test_budget_adds_the_budget_gate_hook_only_with_budget(self):
+        command = self.engine.build_command(self.request(budget={"stop": 95000}))
+        settings = json.loads(command[command.index("--settings") + 1])
+        self.assertEqual(settings, {"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
+            {"type": "command", "command": '"$CLAIVE_BIN" _budget_gate'}]}]}})
+        self.assertNotIn("--settings", self.engine.build_command(self.request()))
+
     def test_budget_launch_forces_steering_and_retains_budget(self):
-        budget = {"warn": 85000, "stop": 95000, "max_handoffs": None, "compact": 105000}
+        budget = {"warn": 85000, "stop": 95000, "max_handoffs": None, "compact": 115000}
         launch = self.engine.resolve_launch(budget=budget, steering=False)
         self.assertTrue(launch["steering"])
         self.assertEqual(launch["budget"], budget)

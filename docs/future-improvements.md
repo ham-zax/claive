@@ -156,6 +156,26 @@ it changes a file. claive has `mission` and a Muse-to-Pi quota fallback. **Propo
 Consider it only after B1 works. It needs a reader that runs during the night, so it conflicts
 with the "never poll" rule unless the user starts it on purpose.
 
+## C. From the budget gate live tests (2026-10-15)
+
+### C1. Warn when a stop reply holds the marker below the first line
+
+In live run 37c07187a9fc, the worker wrote a preface and then `[claive-handoff]` on line 22.
+claive counted no handoff and gave no warning. **Proposal:** in phase `stopping`, if the reply
+holds the marker below the first nonblank line, record a `budget_missed` reason that names the
+line. Accepting the marker anywhere is a separate decision.
+
+### C2. `claive list` shows ASK for a closed worker
+
+After `claive close` on a worker with `needs_parent: budget_limit`, `claive show` reports
+`completed | session closed`, but `claive list` still shows `ASK`. **Proposal:** clear or
+ignore `needs_parent` when the session is closed, and add a test for the list state.
+
+### C3. Live budget tests use a scratch config
+
+The live tests edited `~/.config/claive/config.json` and needed a manual restore.
+`CLAIVE_CONFIG` already exists. **Done:** docs/budget-mode-live-test.md now sets CLAIVE_CONFIG to a scratch config.
+
 ## Order
 
 1. A1, A4 (small, they catch real bugs).

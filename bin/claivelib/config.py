@@ -233,8 +233,8 @@ def _validate_claude_budget(budget, where):
                 raise ValueError(f"{entry_where}.{key} must be an integer and a multiple of 1000")
         if values["warn"] >= values["stop"]:
             raise ValueError(f"{entry_where}.warn must be less than stop")
-        if not 57000 <= values["stop"] <= 957000:
-            raise ValueError(f"{entry_where}.stop must be between 57000 and 957000")
+        if not 47000 <= values["stop"] <= 942000:
+            raise ValueError(f"{entry_where}.stop must be between 47000 and 942000")
         maximum = values["max_handoffs"]
         if maximum is not None and (type(maximum) is not int or maximum < 1):
             raise ValueError(f"{entry_where}.max_handoffs must be an integer >= 1 or null")
@@ -248,7 +248,8 @@ def claude_budget(model, data=None):
     if budget is False or (isinstance(budget, dict) and budget.get("enabled") is False):
         return None, "config"
     values = _claude_budget_values(model, budget)
-    values["compact"] = values["stop"] + 10000
+    from claivelib.engines.claude import budget_margin
+    values["compact"] = values["stop"] + budget_margin(model)
     return values, None
 
 

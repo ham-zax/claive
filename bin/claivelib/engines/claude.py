@@ -5,6 +5,7 @@ from pathlib import Path
 import uuid
 from datetime import datetime, timezone
 
+from claivelib.budget import HOOK_SETTINGS
 from claivelib.engine import SteeringCapability, WorkerEngine
 from claivelib.state import launch_config, session_id
 
@@ -13,14 +14,22 @@ CLAUDE_MODELS = ("claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "cl
 CLAUDE_PROVIDER = "anthropic"
 HAIKU_COMPACTION_POINT = 105000
 DEFAULT_COMPACTION_POINT = 155000
-BUDGET_COMPACTION_MARGIN = 10000
+# Room past stop for the handoff reply. When the budget gate does not deny the next tool call,
+# the margin only lowers the risk that its result reaches compaction. Same gaps as the
+# seamless-claude handoff hooks.
+HAIKU_BUDGET_MARGIN = 20000
+BUDGET_COMPACTION_MARGIN = 25000
 # Claude Code 2.1.300 compacts 33000 tokens before the configured window.
 AUTOCOMPACT_OFFSET = 33000
 
 
+def budget_margin(model):
+    return HAIKU_BUDGET_MARGIN if "haiku" in model.lower() else BUDGET_COMPACTION_MARGIN
+
+
 def compaction_point(model, budget):
     if isinstance(budget, dict):
-        return budget["stop"] + BUDGET_COMPACTION_MARGIN
+        return budget["stop"] + budget_margin(model)
     return HAIKU_COMPACTION_POINT if "haiku" in model.lower() else DEFAULT_COMPACTION_POINT
 
 
@@ -142,6 +151,8 @@ class ClaudeEngine(WorkerEngine):
             # Isolate user/project settings so the parent's hooks and permission rules do not run in workers.
             "--setting-sources", "",
         ]
+        if isinstance(request.budget, dict):
+            command += ["--settings", json.dumps(HOOK_SETTINGS)]
         if request.session_logging:
             if not request.session_id:
                 raise ValueError("Claude requires a session ID when session logging is on")

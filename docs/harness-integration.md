@@ -247,16 +247,22 @@ Duplicate context files are refused. Follow-ups keep the retained session.
 ### Claude context budget
 
 `engines.claude.budget` is on by default. Built-in limits: Haiku warns at 85k and stops at 95k
-tokens with no handoff limit. Other models warn at 135k, stop at 145k and allow 7 handoffs per
-turn. Config entries merge over these per model and per key. `budget: false` turns it off.
+tokens with no handoff limit. Other models warn at 135k, stop at 145k and allow 7 automatic
+continuations per turn. Config entries merge over these per model and per key. `budget: false` turns it off.
 At the warn limit claive asks the worker to reach a checkpoint. At the stop limit claive asks it
-to stop. The worker then ends its turn with a reply that starts with `[claive-handoff]`.
+to stop: a PreToolUse hook (`"$CLAIVE_BIN" _budget_gate`, added through `--settings`) denies each
+tool call, so no large tool result enters first, and claive sends the stop message on stdin. If
+the gate fails, that message arrives one tool result late, and compaction is still possible. A
+tool error that starts with `PreToolUse:` and contains `[claive budget]` in the worker log is this
+gate, not a failure.
+The worker then ends its turn with a reply that starts with `[claive-handoff]`.
 claive saves the reply in `<job>/handoffs/` and continues the same turn in a new session.
 The inbox gets a `budget_handoff` event for each handoff.
-At the handoff limit the turn exits 3 with `needs_parent.kind == "budget_limit"`.
-`claive answer` or `followup` is the permission to continue from the pending handoff.
-`--turn-timeout` covers all sessions of the turn. Claude's own compaction at stop + 10k is the
-fallback. `show` counts each compaction as `missed`. Spec: [design-budget-mode.md](design-budget-mode.md).
+At the handoff after the limit, the turn exits 3 with `needs_parent.kind == "budget_limit"`.
+For a reusable worker, `claive answer` or `followup` is the permission to continue from the
+pending handoff. A one-shot worker cannot take an answer: start a new worker from its handoff.
+`--turn-timeout` covers all sessions of the turn. Claude's own compaction is the fallback, at
+stop + 20k for Haiku and stop + 25k for other models. `show` counts each compaction as `missed`. Spec: [design-budget-mode.md](design-budget-mode.md).
 
 ## Forks, schedules, monitors and channels
 

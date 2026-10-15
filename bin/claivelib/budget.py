@@ -1,4 +1,17 @@
-"""Claude context budget messages and handoff prompts."""
+"""Claude context budget messages, handoff prompts and the tool-call gate."""
+import json
+import os
+from pathlib import Path
+import tempfile
+import time
+
+# Claude Code delivers stdin messages only after the pending tool result, which can add ~25k tokens.
+# So a PreToolUse hook asks the supervisor about each call and denies it after the stop limit.
+GATE_FILE = "budget-gate.json"
+GATE_WAIT_SECONDS = 2.0  # the hook allows the call when the supervisor has not seen it by then
+GATE_IDS = 256
+HOOK_SETTINGS = {"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
+    {"type": "command", "command": '"$CLAIVE_BIN" _budget_gate'}]}]}}
 
 TEMPLATE = """The handoff reply replaces this whole session for the next one. Its first line must be exactly:
 [claive-handoff]
@@ -32,6 +45,12 @@ work in a new session that sees only the handoff and the original assignment.
 STOP = """[claive budget] Context is at {k}k tokens, at the {stop_k}k stop limit. Stop now. Do not finish
 the current step. Let background jobs run. End your turn with the handoff reply now."""
 
+# A tool result is data to the model, and Haiku ignores instructions in it as a possible injection
+# (live run 37c07187a9fc). So the deny reason states only the fact; the stdin stop message instructs.
+GATE_DENY = """[claive budget] claive, which runs this session, denied this tool call. The context is at
+{k}k tokens, at the {stop_k}k stop limit, and claive denies every tool call in this session from now
+on. claive's instructions arrive as a user message."""
+
 PREAMBLE = """[claive budget] The previous session of this worker reached its context budget and wrote the
 handoff below. This is a new session with an empty context. Continue the assignment from the
 handoff's Next step. The original assignment follows the handoff for reference."""
@@ -44,6 +63,10 @@ def warn_message(tokens, values):
 def stop_message(tokens, values, with_template):
     message = STOP.format(k=tokens // 1000, stop_k=values["stop"] // 1000)
     return message + "\n\n" + TEMPLATE if with_template else message
+
+
+def gate_deny_message(tokens, values):
+    return GATE_DENY.format(k=tokens // 1000, stop_k=values["stop"] // 1000)
 
 
 def is_handoff(text):
@@ -70,3 +93,50 @@ def continuation_prompt(handoff_text, original_prompt):
 
 def answer_prompt(handoff_text, parent_prompt):
     return f"{PREAMBLE}\n\n{handoff_text}\n\n---\nParent message:\n{parent_prompt}"
+
+
+def write_gate(job_dir, stop, seen):
+    """Record the tool calls the supervisor has seen and the stop text (None while under stop)."""
+    job_dir = Path(job_dir)
+    fd, temporary = tempfile.mkstemp(prefix=".gate-", dir=job_dir)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump({"stop": stop, "seen": list(seen)[-GATE_IDS:]}, stream)
+        os.replace(temporary, job_dir / GATE_FILE)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def gate_reason(job_dir, tool_use_id, wait=GATE_WAIT_SECONDS):
+    """The deny reason for a tool call, or None to allow it.
+
+    The hook can start before the supervisor reads the assistant event that requested the call,
+    so it waits until the supervisor has seen the call and only then trusts the stop state."""
+    path = Path(job_dir) / GATE_FILE
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            gate = json.loads(path.read_text())
+        except FileNotFoundError:
+            return None
+        except ValueError:
+            gate = {}
+        if gate.get("stop"):
+            return gate["stop"]
+        if not tool_use_id or tool_use_id in gate.get("seen", ()) or time.monotonic() >= deadline:
+            return None
+        time.sleep(0.01)
+
+
+def gate_output(job_dir, hook_input):
+    """The PreToolUse hook's stdout for one call: a deny decision or nothing."""
+    try:
+        tool_use_id = json.loads(hook_input).get("tool_use_id")
+    except (ValueError, AttributeError):
+        tool_use_id = None
+    reason = gate_reason(job_dir, tool_use_id)
+    if reason is None:
+        return ""
+    return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                              "permissionDecisionReason": reason}})

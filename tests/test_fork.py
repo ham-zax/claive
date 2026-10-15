@@ -240,7 +240,7 @@ class ClaudeBudgetForkChecks(unittest.TestCase):
         self.assertEqual(fork["launch"]["budget_off_reason"], source["launch"]["budget_off_reason"])
         self.assertTrue(fork["launch"]["steering"])
         self.assertEqual(fork["launch"]["budget"]["stop"], 100000)
-        self.assertEqual(fork["command"][fork["command"].index("--autocompact") + 1], "143k")
+        self.assertEqual(fork["command"][fork["command"].index("--autocompact") + 1], "153k")
         self.assertEqual(fork["command"][fork["command"].index("--resume") + 1], source["session_id"])
         self.assertIn("--fork-session", fork["command"])
         self.assertNotEqual(fork["session_id"], source["session_id"])

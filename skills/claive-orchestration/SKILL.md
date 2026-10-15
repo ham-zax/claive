@@ -48,9 +48,11 @@ pins Muse to `muse-spark-1.3-contributor` and Codex to
 `gpt-6-luna` at `max` (or `gpt-6.1-sol` at `low`, `medium`, `high` or `xhigh`; `medium` when no effort is passed); Pi uses `opencode2api` and its selected model.
 Claude defaults to `claude-haiku-5-5`; `engines.claude.models` in the claive config decides
 which Claude models are allowed. Claude context budget mode is on by default: at its stop limit
-the worker writes a `[claive-handoff]` reply and claive continues the turn in a new session
-(inbox `budget_handoff`). At a handoff limit the turn exits 3 (`budget_limit`): `claive answer`
-continues it. Limits: `engines.claude.budget` (Haiku warn 85k/stop 95k, others 135k/145k;
+claive denies the worker's tool calls (a PreToolUse hook; the denied tool error is expected), the
+worker writes a `[claive-handoff]` reply and claive continues the turn in a new session
+(inbox `budget_handoff`). After `max_handoffs` automatic continuations the next handoff exits 3
+(`budget_limit`): `claive answer` continues a reusable worker; for a one-shot worker, start a new
+worker from the handoff. Limits: `engines.claude.budget` (Haiku warn 85k/stop 95k, others 135k/145k;
 `budget: false` turns it off; `--output-schema` launches run without it). `claive show` prints a
 "Context budget:" line. Spec: `docs/design-budget-mode.md`. `claive-orch` uses only
 Muse/Pi for its implementer/critic ladder; its roster does not authorize Claude/Codex

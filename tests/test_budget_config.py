@@ -41,25 +41,25 @@ class BudgetConfigChecks(unittest.TestCase):
 
     def test_missing_budget_uses_builtins(self):
         self.assertEqual(config.claude_budget(HAIKU),
-                         ({"warn": 85000, "stop": 95000, "max_handoffs": None, "compact": 105000}, None))
+                         ({"warn": 85000, "stop": 95000, "max_handoffs": None, "compact": 115000}, None))
         self.assertEqual(config.claude_budget(SONNET),
-                         ({"warn": 135000, "stop": 145000, "max_handoffs": 7, "compact": 155000}, None))
+                         ({"warn": 135000, "stop": 145000, "max_handoffs": 7, "compact": 170000}, None))
 
     def test_config_default_merges_per_key_over_builtin_model(self):
         self.policy({"models": {"default": {"warn": 80000}}})
-        for model, stop, maximum in ((HAIKU, 95000, None), (SONNET, 145000, 7)):
+        for model, stop, maximum, margin in ((HAIKU, 95000, None, 20000), (SONNET, 145000, 7, 25000)):
             with self.subTest(model=model):
                 self.assertEqual(config.claude_budget(model),
                                  ({"warn": 80000, "stop": stop, "max_handoffs": maximum,
-                                   "compact": stop + 10000}, None))
+                                   "compact": stop + margin}, None))
 
     def test_config_model_overrides_config_default_per_key(self):
         self.policy({"models": {"default": {"warn": 80000, "max_handoffs": 3},
                                 HAIKU: {"warn": 90000}, "custom": {"stop": 200000}}})
         self.assertEqual(config.claude_budget(HAIKU),
-                         ({"warn": 90000, "stop": 95000, "max_handoffs": 3, "compact": 105000}, None))
+                         ({"warn": 90000, "stop": 95000, "max_handoffs": 3, "compact": 115000}, None))
         self.assertEqual(config.claude_budget("custom"),
-                         ({"warn": 80000, "stop": 200000, "max_handoffs": 3, "compact": 210000}, None))
+                         ({"warn": 80000, "stop": 200000, "max_handoffs": 3, "compact": 225000}, None))
 
     def test_boolean_shorthand_and_disabled_object(self):
         self.policy(True)
@@ -75,8 +75,8 @@ class BudgetConfigChecks(unittest.TestCase):
         for entry, message in (
                 ({"warn": 95000}, "warn must be less than stop"),
                 ({"warn": 96000}, "warn must be less than stop"),
-                ({"warn": 50000, "stop": 56000}, "stop must be between"),
-                ({"stop": 958000}, "stop must be between"),
+                ({"warn": 40000, "stop": 46000}, "stop must be between"),
+                ({"stop": 943000}, "stop must be between"),
                 ({"warn": 85500}, "multiple of 1000"),
                 ({"warn": True}, "integer"),
                 ({"stop": True}, "integer"),
@@ -116,12 +116,13 @@ class BudgetConfigChecks(unittest.TestCase):
                     config.load()
 
     def test_valid_threshold_boundaries_and_handoff_limits(self):
-        for stop in (57000, 957000):
+        for stop in (47000, 942000):
             for maximum in (None, 1):
                 with self.subTest(stop=stop, maximum=maximum):
-                    self.policy({"models": {"default": {"warn": 50000, "stop": stop,
-                                                       "max_handoffs": maximum}}})
-                    self.assertEqual(config.claude_budget(SONNET)[0]["compact"], stop + 10000)
+                    entry = {"warn": 40000, "stop": stop, "max_handoffs": maximum}
+                    self.policy({"models": {"default": entry, HAIKU: entry}})
+                    self.assertEqual(config.claude_budget(SONNET)[0]["compact"], stop + 25000)
+                    self.assertEqual(config.claude_budget(HAIKU)[0]["compact"], stop + 20000)
 
     def test_launch_resolves_budget_and_off_reason_precedence(self):
         binary = self.path / "claude"

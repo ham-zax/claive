@@ -632,6 +632,7 @@ def supervise(job_id, control=None):
     timed_out = False
     timeout_start = None
     budget_values = None
+    gate = {"stop": None, "seen": []}
 
     def update_budget(event):
         if budget_values is None or state.get("terminal"):
@@ -639,6 +640,7 @@ def supervise(job_id, control=None):
         if event.get("type") == "context_compacted":
             state["budget_missed"] += 1
             state["budget_phase"] = "none"
+            gate["stop"] = None
         elif event.get("type") == "context_usage":
             tokens = state["context_tokens"] = event["tokens"]
             phase = state["budget_phase"]
@@ -646,6 +648,8 @@ def supervise(job_id, control=None):
             if tokens >= budget_values["stop"] and phase != "stopping":
                 message = budget.stop_message(tokens, budget_values, with_template=phase == "none")
                 state["budget_phase"] = "stopping"
+                # The gate denies tool calls early; stdin still delivers the stop if the gate fails.
+                gate["stop"] = budget.gate_deny_message(tokens, budget_values)
             elif tokens >= budget_values["warn"] and phase == "none":
                 message = budget.warn_message(tokens, budget_values)
                 state["budget_phase"] = "warned"
@@ -655,6 +659,24 @@ def supervise(job_id, control=None):
                     steering.submit(path, message, source="budget")
                 except ValueError as error:
                     state["budget_error"] = str(error)
+
+    def apply_events(normalized):
+        """Apply one native event; then publish its tool calls and any stop change to the budget gate."""
+        tool_ids = [item["tool_id"] for item in normalized if item.get("type") == "tool_started" and item.get("tool_id")]
+        stop_before = gate["stop"]
+        for normalized_event in normalized:
+            event_update(state, normalized_event)
+            update_budget(normalized_event)
+            if transport:
+                transport.observe(normalized_event)
+                if state.get("terminal"):
+                    transport.close()
+        if budget_values is not None and (tool_ids or gate["stop"] != stop_before):
+            gate["seen"] = (gate["seen"] + tool_ids)[-budget.GATE_IDS:]
+            try:
+                budget.write_gate(path, gate["stop"], gate["seen"])
+            except OSError as error:
+                state["budget_error"] = str(error)
 
     def stop_requested(_signum, _frame):
         nonlocal stopping
@@ -675,6 +697,9 @@ def supervise(job_id, control=None):
             budget_values = values if engine.name == "claude" and isinstance(values, dict) else None
             state["context_tokens"] = 0
             state["budget_phase"] = "none"
+            gate.update(stop=None, seen=[])
+            if budget_values is not None:
+                budget.write_gate(path, None, [])
             if attempt > 0:
                 for key in PER_TURN_RESET_KEYS:
                     state.pop(key, None)
@@ -764,13 +789,7 @@ def supervise(job_id, control=None):
                                         event = json.loads(line)
                                         if not isinstance(event, dict):
                                             raise ValueError("event is not an object")
-                                        for normalized_event in engine.normalize_event(event):
-                                            event_update(state, normalized_event)
-                                            update_budget(normalized_event)
-                                            if transport:
-                                                transport.observe(normalized_event)
-                                                if state.get("terminal"):
-                                                    transport.close()
+                                        apply_events(engine.normalize_event(event))
                                     except (ValueError, UnicodeDecodeError):
                                         state["malformed_events"] += 1
                         if time.monotonic() - last_save > 0.25:
@@ -781,11 +800,7 @@ def supervise(job_id, control=None):
                         event = json.loads(pending)
                         if not isinstance(event, dict):
                             raise ValueError("event is not an object")
-                        for normalized_event in engine.normalize_event(event):
-                            event_update(state, normalized_event)
-                            update_budget(normalized_event)
-                            if transport:
-                                transport.observe(normalized_event)
+                        apply_events(engine.normalize_event(event))
                     except (ValueError, UnicodeDecodeError):
                         state["malformed_events"] += 1
                 if transport:
@@ -839,15 +854,19 @@ def supervise(job_id, control=None):
                 state["command"] = build_command(engine, turn_request(state))
                 (path / "steering" / f"turn-{state['turn']:04}.closed").unlink(missing_ok=True)
                 maximum = budget_values["max_handoffs"]
-                limit_reached = maximum is not None and number >= maximum
+                limit_reached = maximum is not None and number > maximum
                 if limit_reached:
+                    if state.get("reusable"):
+                        action = ("Answer to continue in a new session from that handoff, "
+                                  "or close the worker.")
+                        state["pending_handoff"] = str(handoff_file)
+                    else:
+                        action = "Start a new worker from that handoff to continue."
                     state["needs_parent"] = {
                         "kind": "budget_limit",
                         "question": f"The worker reached the limit of {maximum} automatic context handoffs in this turn. "
-                                    f"Its latest handoff is in {handoff_file}. Answer to continue in a new session "
-                                    "from that handoff, or close the worker.",
+                                    f"Its latest handoff is in {handoff_file}. {action}",
                     }
-                    state["pending_handoff"] = str(handoff_file)
                 save(path / "state.json", state)
                 inbox_mod.append(inbox_mod.budget_event(
                     job_id, state.get("label", ""), state["turn"], number, state["handoffs"],
@@ -2234,6 +2253,16 @@ def parser():
     return result
 
 
+def run_budget_gate():
+    """PreToolUse hook of a budget-mode Claude worker. An error allows the call."""
+    from claivelib import budget
+    try:
+        sys.stdout.write(budget.gate_output(job_path(os.environ["CLAIVE_WORKER_ID"]), sys.stdin.read()))
+    except Exception as error:  # A gate failure must not stop the worker's tool calls.
+        print(f"claive budget gate: {error}", file=sys.stderr)
+    return 0
+
+
 def main(launcher=None):
     if launcher is not None:
         set_launcher_path(launcher)
@@ -2241,6 +2270,8 @@ def main(launcher=None):
         return run_supervisor(sys.argv[2], reusable=False)
     if len(sys.argv) == 3 and sys.argv[1] == "_reusable":
         return run_supervisor(sys.argv[2], reusable=True)
+    if len(sys.argv) == 2 and sys.argv[1] == "_budget_gate":
+        return run_budget_gate()
     if len(sys.argv) == 3 and sys.argv[1] == "_batch":
         from claivelib import batch as batch_mod
         return batch_mod.runner(sys.argv[2])

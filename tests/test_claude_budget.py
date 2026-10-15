@@ -46,7 +46,15 @@ else:
 record(dict(prompt=prompt))
 for action in plan:
     if "usage" in action:
-        emit(dict(type="assistant", message=dict(content=[], usage=dict(input_tokens=action["usage"]))))
+        content = [dict(type="tool_use", id=action["tool"], name="Read", input={})] if "tool" in action else []
+        emit(dict(type="assistant", message=dict(content=content, usage=dict(input_tokens=action["usage"]))))
+    elif "gate" in action:
+        import subprocess
+        settings = json.loads(sys.argv[sys.argv.index("--settings") + 1])
+        hook = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        done = subprocess.run(hook, shell=True, capture_output=True, text=True, input=json.dumps(dict(
+            hook_event_name="PreToolUse", tool_name="Read", tool_use_id=action["gate"])))
+        record(dict(gate=action["gate"], output=done.stdout))
     elif "read" in action:
         for _ in range(action["read"]):
             read_user()
@@ -107,6 +115,48 @@ class BudgetTextChecks(unittest.TestCase):
                          f"{budget.PREAMBLE}\n\n{HANDOFF}\n\n---\nParent message:\nContinue")
 
 
+class BudgetGateChecks(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="claive-gate-")
+        self.addCleanup(temp.cleanup)
+        self.job = Path(temp.name)
+
+    def test_missing_gate_file_allows_at_once(self):
+        started = time.monotonic()
+        self.assertIsNone(budget.gate_reason(self.job, "t1"))
+        self.assertLess(time.monotonic() - started, 0.5)
+
+    def test_seen_call_without_stop_is_allowed(self):
+        budget.write_gate(self.job, None, ["t1"])
+        self.assertIsNone(budget.gate_reason(self.job, "t1"))
+
+    def test_unseen_call_waits_then_allows(self):
+        budget.write_gate(self.job, None, [])
+        started = time.monotonic()
+        self.assertIsNone(budget.gate_reason(self.job, "t1", wait=0.2))
+        self.assertGreaterEqual(time.monotonic() - started, 0.2)
+
+    def test_stop_denies_any_call(self):
+        budget.write_gate(self.job, "Stop now.", ["t1"])
+        self.assertEqual(budget.gate_reason(self.job, "t2", wait=0), "Stop now.")
+        output = json.loads(budget.gate_output(self.job, json.dumps({"tool_use_id": "t1"})))
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecisionReason"], "Stop now.")
+
+    def test_seen_ids_are_bounded(self):
+        budget.write_gate(self.job, None, [f"t{index}" for index in range(budget.GATE_IDS + 10)])
+        seen = json.loads((self.job / budget.GATE_FILE).read_text())["seen"]
+        self.assertEqual(len(seen), budget.GATE_IDS)
+        self.assertEqual(seen[-1], f"t{budget.GATE_IDS + 9}")
+
+    def test_hook_input_without_tool_id_follows_the_stop_state_without_waiting(self):
+        budget.write_gate(self.job, None, [])
+        started = time.monotonic()
+        self.assertEqual(budget.gate_output(self.job, "not json"), "")
+        self.assertLess(time.monotonic() - started, 0.5)
+        budget.write_gate(self.job, "Stop now.", [])
+        self.assertIn("Stop now.", budget.gate_output(self.job, "not json"))
+
+
 class ClaudeBudgetChecks(unittest.TestCase):
     def test_show_budget_on_after_handoff_in_text_and_json(self):
         self.plan([{"result": HANDOFF}], [{"usage": 87999}, {"read": 1}, {"result": "done"}])
@@ -120,7 +170,7 @@ class ClaudeBudgetChecks(unittest.TestCase):
         index = next(index for index, line in enumerate(lines) if line.startswith("Live steering:"))
         self.assertEqual(lines[index], "Live steering: True | pending 0 | acknowledged 0")
         self.assertEqual(lines[index + 1], "Context budget: on | context 87k | warn 85k | stop 95k | "
-                         "compact 105k | handoffs 1 (this turn 1) | missed 0")
+                         "compact 115k | handoffs 1 (this turn 1) | missed 0")
         shown = subprocess.run([str(REPO / "bin/claive"), "show", state["id"], "--json"], env=self.env,
                                text=True, capture_output=True, timeout=5)
         self.assertEqual(shown.returncode, 0, shown.stderr)
@@ -154,20 +204,21 @@ class ClaudeBudgetChecks(unittest.TestCase):
         self.assertIsNone(data["pending_handoff"])
         self.assertFalse(data["steering"]["enabled"])
 
-    def test_show_pending_handoff_path_after_limit(self):
-        self.plan([{"result": HANDOFF}])
+    def test_one_shot_limit_has_no_pending_handoff_and_says_start_a_new_worker(self):
+        self.plan([{"result": HANDOFF}], [{"result": HANDOFF}])
         state = self.create()
         state["launch"]["budget"]["max_handoffs"] = 1
         cli.save(self.path / "state.json", state)
         code, state = self.supervise()
         self.assertEqual(code, 3, state)
+        self.assertIsNone(state.get("pending_handoff"))
+        handoff_file = self.path / "handoffs/turn-0001-2.md"
+        self.assertTrue(state["needs_parent"]["question"].endswith(
+            f"Its latest handoff is in {handoff_file}. Start a new worker from that handoff to continue."))
         shown = subprocess.run([str(REPO / "bin/claive"), "show", state["id"]], env=self.env,
                                text=True, capture_output=True, timeout=5)
         self.assertEqual(shown.returncode, 0, shown.stderr)
-        self.assertIn(f"Pending handoff: {state['pending_handoff']} (answer or followup continues from it)\n",
-                      shown.stdout)
-        data = cli.load(self.path)
-        self.assertEqual(data["pending_handoff"], state["pending_handoff"])
+        self.assertNotIn("Pending handoff:", shown.stdout)
 
     def test_show_pre_budget_worker_has_defaults_and_launch_reason(self):
         state = self.create()
@@ -276,6 +327,81 @@ class ClaudeBudgetChecks(unittest.TestCase):
         self.assertEqual(self.calls("input")[1:], [budget.stop_message(100000, state["launch"]["budget"], True)])
         self.assertEqual(len(self.receipts()), 1)
 
+    def gates(self):
+        return {record["gate"]: json.loads(record["output"]) if record["output"].strip() else None
+                for record in map(json.loads, (self.workspace / "calls.jsonl").read_text().splitlines())
+                if "gate" in record}
+
+    @staticmethod
+    def deny(reason):
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                       "permissionDecisionReason": reason}}
+
+    def test_stop_on_a_tool_call_is_denied_by_the_gate_and_sent_on_stdin(self):
+        self.plan([{"usage": 50000, "tool": "t1"}, {"gate": "t1"},
+                   {"usage": 100000, "tool": "t2"}, {"gate": "t2"}, {"gate": "t3"}, {"read": 1},
+                   {"result": "done"}])
+        self.create()
+        code, state = self.supervise()
+        self.assertEqual(code, 0, state)
+        message = budget.stop_message(100000, state["launch"]["budget"], True)
+        deny = self.deny(budget.gate_deny_message(100000, state["launch"]["budget"]))
+        self.assertEqual(self.gates(), {"t1": None, "t2": deny, "t3": deny})
+        self.assertNotIn("Stop now", deny["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertEqual(self.calls("input")[1:], [message])
+        self.assertEqual(state["budget_phase"], "stopping")
+
+    def stop_with_broken_gate(self, write_gate):
+        self.plan([{"usage": 100000, "tool": "t1"}, {"gate": "t1"}, {"read": 1}, {"result": "done"}])
+        self.create()
+        with patch.object(budget, "write_gate", side_effect=write_gate):
+            code, state = self.supervise()
+        self.assertEqual(code, 0, state)
+        self.assertEqual(self.gates(), {"t1": None})
+        self.assertEqual(self.calls("input")[1:], [budget.stop_message(100000, state["launch"]["budget"], True)])
+        return state
+
+    def test_gate_timeout_allows_the_call_and_stdin_still_carries_stop(self):
+        write = budget.write_gate
+
+        def slow(job_dir, stop, seen):
+            if stop:
+                time.sleep(budget.GATE_WAIT_SECONDS + 0.4)
+            write(job_dir, stop, seen)
+        self.stop_with_broken_gate(slow)
+
+    def test_gate_write_failure_allows_the_call_and_stdin_still_carries_stop(self):
+        write = budget.write_gate
+
+        def failing(job_dir, stop, seen):
+            if stop:
+                raise OSError("disk full")
+            write(job_dir, stop, seen)
+        state = self.stop_with_broken_gate(failing)
+        self.assertEqual(state["budget_error"], "disk full")
+
+    def test_warn_on_a_tool_call_still_arrives_on_stdin(self):
+        self.plan([{"usage": 85000, "tool": "t1"}, {"gate": "t1"}, {"read": 1}, {"result": "done"}])
+        self.create()
+        code, state = self.supervise()
+        self.assertEqual(code, 0, state)
+        self.assertEqual(self.gates(), {"t1": None})
+        self.assertEqual(self.calls("input")[1:], [budget.warn_message(85000, state["launch"]["budget"])])
+
+    def test_gate_opens_after_compaction_and_in_the_next_session(self):
+        self.plan([{"usage": 100000, "tool": "t1"}, {"gate": "t1"}, {"compact": True},
+                   {"usage": 50000, "tool": "t2"}, {"gate": "t2"}, {"usage": 100000, "tool": "t3"},
+                   {"gate": "t3"}, {"result": HANDOFF}],
+                  [{"usage": 10000, "tool": "t4"}, {"gate": "t4"}, {"result": "done"}])
+        self.create()
+        code, state = self.supervise()
+        self.assertEqual(code, 0, state)
+        gates = self.gates()
+        self.assertEqual((gates["t2"], gates["t4"]), (None, None))
+        self.assertEqual(gates["t1"]["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(gates["t3"]["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(state["handoffs"], 1)
+
     def test_handoff_changes_session_and_checks_only_final_report(self):
         self.plan([{"usage": 85000}, {"read": 1}, {"result": HANDOFF}],
                   [{"usage": 95000}, {"read": 1}, {"result": FINAL}])
@@ -316,8 +442,8 @@ class ClaudeBudgetChecks(unittest.TestCase):
         self.assertEqual(len(list((self.path / "handoffs").glob("*.md"))), 3)
         self.assertEqual(self.calls("prompt")[-1], budget.continuation_prompt(HANDOFF, self.prompt.read_text()))
 
-    def test_handoff_limit_returns_parent_decision_with_pending_file(self):
-        self.plan([{"result": HANDOFF}], [{"result": HANDOFF}])
+    def test_handoff_limit_counts_automatic_continuations_then_asks_parent(self):
+        self.plan([{"result": HANDOFF}], [{"result": HANDOFF}], [{"result": HANDOFF}])
         state = self.create("--report")
         state["launch"]["budget"]["max_handoffs"] = 2
         cli.save(self.path / "state.json", state)
@@ -326,10 +452,10 @@ class ClaudeBudgetChecks(unittest.TestCase):
         self.assertEqual(code, 3, state)
         self.assertEqual(state["status"], "completed")
         self.assertEqual(state["needs_parent"]["kind"], "budget_limit")
-        self.assertEqual(state["pending_handoff"], str(self.path / "handoffs/turn-0001-2.md"))
-        self.assertIn(state["pending_handoff"], state["needs_parent"]["question"])
-        self.assertEqual(Path(state["pending_handoff"]).read_text(), HANDOFF)
-        self.assertEqual((state["handoffs"], state["turn_handoffs"]), (2, 2))
+        handoff_file = self.path / "handoffs/turn-0001-3.md"
+        self.assertIn(str(handoff_file), state["needs_parent"]["question"])
+        self.assertEqual(handoff_file.read_text(), HANDOFF)
+        self.assertEqual((state["handoffs"], state["turn_handoffs"]), (3, 3))
         self.assertEqual(report.call_count, 0)
         self.assertEqual((self.path / "result.txt").read_text(), HANDOFF)
         last_command = self.calls("command")[-1]
@@ -402,7 +528,7 @@ class ClaudeBudgetChecks(unittest.TestCase):
     def test_answer_after_limit_delivers_handoff_and_resets_turn_count(self):
         self.plan([{"result": HANDOFF}], [{"result": HANDOFF}], [{"result": FINAL}])
         Path(self.env["CLAIVE_CONFIG"]).write_text(json.dumps({"engines": {"claude": {"budget": {
-            "models": {"claude-haiku-5-5": {"max_handoffs": 2}}}}}}))
+            "models": {"claude-haiku-5-5": {"max_handoffs": 1}}}}}}))
         launcher = str(REPO / "bin/claive")
         process = subprocess.Popen([launcher, "open", "--engine", "claude", "--workspace", str(self.workspace),
                                     "--prompt-file", str(self.prompt), "--report"], env=self.env,
@@ -430,7 +556,15 @@ class ClaudeBudgetChecks(unittest.TestCase):
             self.fail(f"turn {turn} did not become idle")
         first = idle(1)
         self.assertEqual(first["needs_parent"]["kind"], "budget_limit")
+        self.assertEqual(first["pending_handoff"], str(self.path / "handoffs/turn-0001-2.md"))
+        self.assertTrue(first["needs_parent"]["question"].endswith(
+            "Answer to continue in a new session from that handoff, or close the worker."))
         self.assertEqual(cli.outcome_code(first), 3)
+        shown = subprocess.run([launcher, "show", first["id"]], env=self.env,
+                               text=True, capture_output=True, timeout=5)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn(f"Pending handoff: {first['pending_handoff']} (answer or followup continues from it)\n",
+                      shown.stdout)
         answer = subprocess.run([launcher, "answer", first["id"], "--message", "Continue with the next step."],
                                 env=self.env, text=True, capture_output=True, timeout=5)
         self.assertEqual(answer.returncode, 0, answer.stderr)

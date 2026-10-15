@@ -11,7 +11,7 @@ claive-worker --engine pi \
   --provider opencode2api --model mimo-v2.6-flash-free --reasoning-effort max
 ```
 
-Pi uses `opencode2api` and high thinking. The initial model is
+Pi uses `opencode2api`. Default thinking is `max`, subject to role or config overrides. The initial model is
 `muse-spark-1.3-contributor-free`. When `--model` is omitted, new workers read
 Pi's global `defaultModel` for this provider. An explicit `--model ID` is saved
 after launch-option validation, so later agents inherit that selection, including
@@ -34,18 +34,25 @@ that turn and keep the supervisor available.
 
 ## Options and isolation
 
-- `--read-only` selects exactly `read,grep,find,ls`. Normal workers also enable
-  `bash,edit,write`.
-- Discovered extensions are disabled and project-local Pi resources are not
-  approved. This makes the tool selection predictable. Context instructions
-  such as AGENTS.md still load according to Pi's behavior.
+- Write and read-only turns use `--tools '*'`, Pi's full default tool set.
+  Bash remains available in both modes.
+- Pi has no CLI read-only mode. `--read-only` adds an instruction through
+  `--append-system-prompt` and repeats it after the task text.
+  This is a request to the model, not enforcement.
+- Pi passes `--no-extensions --no-prompt-templates --no-themes --no-approve`.
+  Skills, MCP tools and context files, including AGENTS.md, still load.
 - `--offline` disables Pi startup network operations, while model requests still
   reach the configured provider.
-- Pi has no Muse filesystem/network sandbox. Tool selection and working directory
-  do not create an OS isolation boundary.
+- Pi has no Muse filesystem/network sandbox. The instruction and working
+  directory do not create an OS isolation boundary. Ownership checks find
+  unauthorized changes after a turn.
 - `--max-model-steps`, `--output-schema`, `--web`, and worktree-management options
   are rejected. Pi has no implicit step cap in this adapter. For an isolated lane,
   create a worktree separately and supply its path as `--workspace`.
+- `engines.pi.extra_args` adds opt-in engine arguments. Claive refuses `--`
+  and its owned flags. See the README config section.
+- Pi supports steering with `--enable-steering` and forks from idle reusable
+  sessions with `claive fork ID --prompt '...'`.
 - `--no-session-log` maps to Pi's `--no-session` for a single turn. Reusable workers
   still require retained sessions.
 

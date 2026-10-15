@@ -11,14 +11,15 @@ output and exit code, it can orchestrate workers.
   (`Batch <id> | ...` for batches, `Mission <id> | ...` for missions). Add
   `--json` to `list`, `show`, `inbox`, `batch ...`, `mission ...` for
   machine-readable output.
-- Exit codes, everywhere:
+- Common exit codes (see [command reference](command-reference.md) for exceptions):
 
   | code | meaning |
   |---|---|
   | 0 | completed |
-  | 1 | failed or usage error (`failure_kind` says why: quota, protocol, worker, launch, supervisor, rejected, interrupted) |
+  | 1 | failed or refused (`failure_kind` says why: quota, protocol, worker, launch, supervisor, rejected, interrupted) |
+  | 2 | argument parsing error, failed verification, or runtime drift/smoke failure |
   | 3 | a worker needs a parent decision (`claive answer ID --message ...`) |
-  | 124 | `--timeout` expired; the work is still running |
+  | 124 | wait deadline expired, or ask/conversation deadline expired |
   | 130 | cancelled |
 
 - All state is under `$CLAIVE_DIR` (default `~/.local/state/claive`). A new
@@ -176,14 +177,100 @@ stages that did not finish, use `claive batch retry ID`. A batch whose
 runner process died is reported as `failed`; retry keeps any stage whose
 worker is still running and waits for it.
 
-## Optional Codex user MCP configuration
+## Engine capabilities and configuration
 
-Claive Codex workers default to `--ignore-user-config` so user-level tools cannot unexpectedly enter an isolated worker. To authorize a specific deployment's pre-registered Codex MCP servers and installed user skills, set `CLAIVE_CODEX_USE_USER_CONFIG=1` **only** for that worker's environment. It omits `--ignore-user-config` while retaining `--ignore-rules` and all other engine/model/sandbox controls. Register external tools explicitly with `codex mcp add`; enabling the flag alone does not install or start a browser. Disable the flag to restore the default hermetic config behavior. Neither Claive nor Codex assumes a particular browser implementation.
+Workers use the engine's default tools. Claive passes no restricted tool list.
+
+| Engine | Read-only mechanism | Web | Steering | Fork | Step cap |
+|---|---|---|---|---|---|
+| Claude | `--tools default --permission-mode plan` | Always on | Stream JSON | Yes | Refused |
+| Codex | Read-only sandbox | Live search every turn | App Server | Yes | Refused |
+| Muse | `--permission-profile :read-only --disable-write`, shell on | Always on | Refused | Refused | Opt-in |
+| Pi | Full tools and a read-only instruction | `--web` refused | RPC | Yes | Refused |
+
+Steering needs `--enable-steering` at launch. Fork needs an idle reusable session.
+`--web` is accepted and has no effect on Claude, Codex and Muse.
+
+Claude write turns use `--permission-mode bypassPermissions`.
+`--setting-sources ""` keeps the parent's hooks and permission rules out.
+MCP servers and skills load. Claive does not pass `--strict-mcp-config` or
+`--disable-slash-commands`. WebSearch and WebFetch remain available.
+Live check, 2026-10-15: `ExitPlanMode` is unavailable in `--print` mode.
+The model refused writes itself. A harness-level write block remains unproven.
+
+Codex write turns have full access by default. `CLAIVE_CODEX_YOLO=0` selects
+workspace-write. Read-only exec turns set `sandbox_mode="read-only"` through `-c`.
+The App Server path links `auth.json`, sessions and skills into a private
+`CODEX_HOME` and reads the repo's `AGENTS.md`. Skills load by default.
+The user's `config.toml`, including MCP configuration, is opt-in:
+`engines.codex.user_config: true` or `CLAIVE_CODEX_USE_USER_CONFIG=1`.
+Exec turns pass `--ignore-rules`. The App Server wrapper does not pass that flag.
+Every turn sets `web_search="live"`. Config opt-in installs no tools.
+
+Muse read-only turns omit `--disable-approval`, which conflicts with a permission
+profile. Write turns pass it. Neither mode has a default model-step cap.
+Only a flag or role/config value adds `--max-model-steps`.
+
+Pi uses `--tools '*'` in both modes. It has no CLI read-only mode.
+The instruction enters through `--append-system-prompt` and after the task text.
+This requests model compliance and does not enforce write protection.
+Pi passes `--offline --no-extensions --no-prompt-templates --no-themes --no-approve`.
+Skills, MCP and context files load. See [Pi engine](pi-engine.md).
+
+Claive reloads config when commands need policy. `engines.<name>` accepts
+`enabled`, `reason`, `default_model`, `default_reasoning_effort`,
+`disabled_models`, `disabled_reasoning_efforts`, `models`, and `extra_args`.
+`user_config` applies only to Codex. `enabled: false` refuses the whole engine.
+Defaults and allowlists cannot expand the engine's supported models or efforts.
+
+`extra_args` is an opt-in list of nonempty strings. Claive inserts them before
+`--`, or at the end. It refuses `--` and the flags in `OWNED_FLAGS` in
+`bin/claivelib/config.py`, including `--flag=value`.
+Codex steering and fork turns refuse nonempty `engines.codex.extra_args`.
+
+Custom `roles.<name>` need `engine`, `read_only`, and `preamble` or an absolute
+`prompt_file`. Built-in overrides inherit omitted values. Explicit flags win.
+All built-in roles default to `max_model_steps: null`.
+A built-in role cap applies only when its selected engine supports caps.
+Unsupported explicit or custom-role caps are refused.
+Teams map members to roles and add collaboration/project files.
+Use `--team NAME --member NAME`, without `--role`.
+`--project-file` replaces the team's project file for that launch.
+`claive team list|show` reads team configuration and member aliases.
+
+First-prompt order is role, team header, collaboration, project, context files,
+task, report contract. `--context-file` repeats up to ten times, in order.
+Layer files must be absolute, nonempty UTF-8 text, and at most 256 KiB.
+Duplicate context files are refused. Follow-ups keep the retained session.
+
+## Forks, schedules, monitors and channels
+
+`claive fork ID --prompt '...'` starts an independent reusable worker with a
+native copy of an idle Pi, Codex or Claude session. It reuses the workspace and
+launch policy. It does not create an isolated worktree.
+
+`claive send ID --message '...' --at +30m [--every 1h]` schedules a wake.
+`--every` needs `--at` and must be at least 30 seconds. `--mode now` cannot schedule.
+Use `claive schedule list ID` and `claive schedule cancel ID SCHEDULE_ID`.
+
+`claive monitor add ID --command 'git status --short' --every 5m` registers a
+parent command in the worker workspace. Cadence is 30s through 24h.
+Commands must be read-only. Claive does not sandbox them.
+Use `monitor list [ID]`, `monitor cancel MONITOR_ID`, or `monitor run-due`.
+
+`claive channel open NAME ID1 ID2` enables bounded peer messages for two to four
+active reusable workers. Defaults: 20 messages, six per pair, 900 seconds.
+Members can use `claive send PEER --message '...' --mode note|wake`.
+Workers cannot open channels or use peer `ask`, `now`, or scheduled sends.
+Use `channel show NAME` or `channel close NAME`.
+
+Exact options and examples: [command reference](command-reference.md).
 
 ## Safety
 
-- Workers get `CLAIVE_WORKER_ID` and cannot launch workers or batches (this
-  prevents recursive orchestration when a worker reads claive's own skills).
+- Workers get `CLAIVE_WORKER_ID` and cannot launch claive workers or batches (this
+  prevents recursive claive orchestration when a worker reads these skills).
+  Claude's default tools can start native subagents. Claive does not track them.
   `CLAIVE_ALLOW_NESTED=1` overrides this; use it only on purpose.
 - `claive engines [--json]` reports the user's engine policy (enabled state and
   reason, default and disabled models and efforts, steering transport). Launches,
@@ -242,7 +329,8 @@ state and checks not executed are `not_run`. The Git workspace snapshot includes
 tracked files, deletions, and all untracked files, including ignored build output.
 It compares content against the dirty baseline rather than trusting a file list
 in the worker's report. Ownership validation is retrospective; use isolated
-worktrees for writers and the engine sandbox for filesystem restrictions.
+worktrees for writers. Muse and Codex provide native read-only restrictions.
+Pi requests read-only behavior from the model and supplies no enforcement.
 Concurrent writers with declared ownership must use separate worktrees.
 Managed worktrees with a verification/ownership contract are retained for the
 parent to verify and integrate; remove them after that workflow ends.
@@ -282,8 +370,8 @@ size; cache reuse alone does not establish efficiency.
 content drift, and smoke checks; detected drift exits nonzero. `doctor` also
 shows these checks as advisory warnings. Synchronize a stale runtime with this
 project's `install.sh`, which backs up changed destinations and copies the whole
-package. User config opt-in for Codex does not enable rules: `--ignore-rules`
-remains supplied. Missing provenance/source is reported explicitly.
+package. Codex exec turns retain `--ignore-rules` when user config is enabled.
+The App Server wrapper does not pass that flag. Missing provenance/source is reported explicitly.
 
 For genuine steering at the next Pi/Codex/Claude model boundary, see [steering.md](steering.md).
 Use `install.sh --runtime-only` when syncing just the runtime; Skillshare owns skills.

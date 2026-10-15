@@ -153,7 +153,7 @@ class WorkerChecks(unittest.TestCase):
         command = state["command"]
         self.assertEqual(command[command.index("--model") + 1], "muse-spark-1.3-contributor")
         self.assertEqual(command[command.index("--reasoning-effort") + 1], "xhigh")
-        self.assertEqual(command[command.index("--max-model-steps") + 1], "100")
+        self.assertNotIn("--max-model-steps", command)
         for option, value in [("--model", "other-model"), ("--reasoning-effort", "low")]:
             result = self.cli("run", "--workspace", str(self.path), "--prompt-file", str(self.prompt), option, value)
             self.assertNotEqual(result.returncode, 0)

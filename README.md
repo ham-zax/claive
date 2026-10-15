@@ -12,19 +12,33 @@ Claude Code is available with `--engine claude` (headless `claude -p`, binary `~
 timeout fallback is refused. Efforts are `low` to `max` (default `xhigh`), auto-compacting at 100k tokens; `--max-model-steps`
 and worktree isolation are unsupported. `--output-schema /abs/schema.json` is passed as Claude's `--json-schema`, so the
 result is the validated JSON object. `--enable-steering` switches to stream-json input for live steering
-(see [docs/steering.md](docs/steering.md)). Settings, hooks, MCP servers and skills are not loaded;
-read-only workers get `Read,Grep,Glob`.
+(see [docs/steering.md](docs/steering.md)). Workers use `--tools default`.
+Write turns use `--permission-mode bypassPermissions`. Read-only turns use
+`--permission-mode plan`. `--setting-sources ""` keeps the parent's hooks and
+permission rules out. MCP servers and skills load. WebSearch and WebFetch stay on.
+Live check, 2026-10-15: `ExitPlanMode` is unavailable in `--print` mode.
+The model refused writes itself, so that check did not prove a harness-level write block.
 
 Codex is available with `--engine codex` (`codex exec --json`, binary from `CODEX_WORKER_BINARY` or the nvm install).
 It is strictly locked to these model and reasoning-effort pairs: `gpt-6-luna` at `max` (the default), and `gpt-6.1-sol` at `low`, `medium`, `high` or `xhigh` (`--model gpt-6.1-sol` with no effort runs at `medium`; `max` and `ultra` are refused for it). Any other `--model` or `--reasoning-effort` is refused.
 Compaction is left at Codex's own behaviour. Codex chooses its own thread ID,
-so the job's session ID is replaced by it once the thread starts. Workers default to `--ignore-user-config` so user-level tools cannot unexpectedly enter an isolated worker; set `CLAIVE_CODEX_USE_USER_CONFIG=1` only for a deployment with pre-registered Codex MCP servers and installed user skills to omit that flag while retaining `--ignore-rules`. Read-only workers
+so the job's session ID is replaced by it once the thread starts. Skills load by default.
+Workers omit the user's `config.toml` unless `engines.codex.user_config` is `true`
+or `CLAIVE_CODEX_USE_USER_CONFIG=1`. This opt-in includes configured MCP servers.
+Exec turns retain `--ignore-rules`. Read-only workers
 use the read-only sandbox, writers run with `--dangerously-bypass-approvals-and-sandbox` by default (`CLAIVE_CODEX_YOLO=0` restores the `workspace-write` sandbox with approvals off; read-only workers are always sandboxed). `--max-model-steps`, `--output-schema` and
 worktree isolation are unsupported.
 
 Codex workers with `--enable-steering` use a separate App Server transport for
 turn-bound in-flight instructions; see [steering.md](docs/steering.md). Ordinary
-Codex exec launches are unchanged.
+Codex exec launches use the ordinary transport.
+The App Server path links the user's `auth.json`, sessions and skills into a
+private `CODEX_HOME`. It reads the repo's `AGENTS.md`.
+Every Codex turn sets `web_search="live"`.
+
+Workers use their engine's default tools. Claive supplies no restricted tool list.
+`--web` is accepted and has no effect on Claude, Codex and Muse. Pi refuses it.
+See the [command reference](docs/command-reference.md) for every subcommand.
 
 ## Send a message to a worker
 
@@ -33,12 +47,12 @@ Use `claive send ID --message "..."` to leave a note for a reusable worker's nex
 opted-in running turn (it falls back to wake when steering is unavailable). `--message-file`
 accepts an absolute file path, `--id` makes a send retry-safe, and `--json` prints the receipt.
 Messages arrive as a `<parent-message>` envelope with the message ID and sender (set
-`CLAIVE_PARENT` to name your harness). A worker cannot message itself or other workers, and
+`CLAIVE_PARENT` to name your harness). A worker cannot message itself. Peer messages require a parent-opened channel, and
 `wake` is refused while the worker waits for `claive answer`.
 
-`claive ask ID --message "..." [--timeout 120]` asks a question and waits for the answer:
+`claive ask ID --message "..." [--timeout 120] [--schema /abs/reply.schema.json]` asks a question and waits for the answer:
 the worker replies with `claive reply MSG_ID --message "..."`, or the final text of that
-turn counts. A question that has not arrived by the deadline is withdrawn. Exit codes: 0
+turn counts. A schema requires a valid JSON reply. A question that has not arrived by the deadline is withdrawn. Exit codes: 0
 answered, 124 withdrawn or expired, 3 the worker needs the parent, 1 refused.
 
 `claive peek ID [--steps 5] [--start N] [--json]` shows numbered recent steps of a worker
@@ -230,13 +244,13 @@ claive serve --stop | --resume | --status     # stop switch, clear it, show stat
 
 On a server there is no parent session to launch, wait for, and answer workers, so `claive serve` plays that role for a durable queue in `$CLAIVE_DIR/goals/`. Each goal runs as an ordinary reusable worker (`claive open --detach --report`) on any engine, so `claive show/logs/wait` work on it; goals are read-only unless added with `--write` and must pass the `workspaces` allowlist both when added and at launch. One goal runs at a time by default (`--max-parallel`). A worker question parks the goal, records the question, posts a `goal` event to `claive inbox`, and the queue moves on; `claive goal answer` resumes the same worker, or the same session in a new worker if that worker was stopped. A goal past its wall-clock budget (default 2h; time parked does not count) is cancelled and marked `timed_out`. Quota, protocol and launch failures pause all launches with exponential backoff (30 s doubling to 30 min); a failed goal retries after a growing delay up to `--max-attempts` (default 3); launches refused by config or the allowlist fail at once. The stop switch `$CLAIVE_DIR/supervisor/stop` (set by `claive serve --stop`) is checked between turns: serve cancels its workers, requeues running goals, and exits 0, and nothing launches until `--resume`. SIGTERM leaves workers running and the next serve adopts or harvests them. Logs: `$CLAIVE_DIR/supervisor/serve.log` and stdout. A lock allows one serve per state directory. [systemd/claive-serve.service](systemd/claive-serve.service) is a user unit (`KillMode=process`, `Restart=on-failure`, explicit `PATH` and `PI_WORKER_BINARY`) with install steps in its header.
 
-The default Muse engine supplies `--workspace`, `--trust-workspace`, `--disable-approval`, and `--json`, and keeps Muse's sandbox enabled. `--read-only` disables both non-shell writes and shell execution. `--worktree` isolates the worker in a linked worktree at `--worktree-base` (default `HEAD`; uncommitted changes are not included). Muse 1.4.3 cannot create one itself (its sandbox makes `.git` read-only before `-w create` runs `git worktree add`), so claive creates it in the worker's state directory (`$CLAIVE_DIR/<id>/worktree`) and passes it as `-w existing`. It lasts for all turns of a reusable worker. Read-only workers get a detached worktree; writers get branch `claive/<id>`. When the worker closes, is cancelled or finishes, claive removes the worktree (and branch) unless a writer left changes (including untracked and ignored files other than tool caches such as `__pycache__` and dependency trees such as `node_modules` or `.venv`) or commits, or git refuses the removal (a locked worktree); then it keeps them, prints the `git worktree remove` command and records `retained_worktree` in `show --json`. A supervisor killed with SIGKILL skips this cleanup. Use `--worktree-existing /absolute/worktree` for a worktree you manage yourself. File ownership must remain disjoint. Run heavy builds and test suites one at a time.
+The default Muse engine supplies `--workspace`, `--trust-workspace` and `--json`, and keeps Muse's sandbox enabled. Write turns also pass `--disable-approval`. Read-only turns use `--permission-profile :read-only --disable-write`, keep the shell on, and omit `--disable-approval`. Web tools stay on. Claive passes `--max-model-steps` only when a flag or role sets a cap. `--worktree` isolates the worker in a linked worktree at `--worktree-base` (default `HEAD`; uncommitted changes are not included). Muse 1.4.3 cannot create one itself (its sandbox makes `.git` read-only before `-w create` runs `git worktree add`), so claive creates it in the worker's state directory (`$CLAIVE_DIR/<id>/worktree`) and passes it as `-w existing`. It lasts for all turns of a reusable worker. Read-only workers get a detached worktree; writers get branch `claive/<id>`. When the worker closes, is cancelled or finishes, claive removes the worktree (and branch) unless a writer left changes (including untracked and ignored files other than tool caches such as `__pycache__` and dependency trees such as `node_modules` or `.venv`) or commits, or git refuses the removal (a locked worktree); then it keeps them, prints the `git worktree remove` command and records `retained_worktree` in `show --json`. A supervisor killed with SIGKILL skips this cleanup. Use `--worktree-existing /absolute/worktree` for a worktree you manage yourself. File ownership must remain disjoint. Run heavy builds and test suites one at a time.
 
-Web tools are disabled by default; `--web` enables them. `--model` accepts only `muse-spark-1.3-contributor`. Other options include `--output-schema` and `--session-id`. `--no-session-log` is available only for deliberate single-turn runs, and is rejected for reusable workers. Run `claive-worker --help` for the full list. `--provider echo` is for transport checks and does not contact a live model; Muse does not accept reasoning effort with that provider, so the launcher omits model and effort options in that case.
+Web tools stay on. `--web` is accepted and has no effect on Muse. `--model` accepts only `muse-spark-1.3-contributor`. Other options include `--output-schema` and `--session-id`. `--no-session-log` is available only for deliberate single-turn runs, and is rejected for reusable workers. Run `claive-worker --help` for the full list. `--provider echo` is for transport checks and does not contact a live model; Muse does not accept reasoning effort with that provider, so the launcher omits model and effort options in that case.
 
 ## Model, reasoning, and caching
 
-Every live Muse worker uses **`muse-spark-1.3-contributor`**. Default reasoning is **`high`** for normal work; use **`medium`** only for trivial tasks such as commit-message generation, and **`xhigh`/`max`** for complex work. The default step cap is 100; raise it when necessary. No alternate Muse model override or automatic helper fallback is permitted. Echo is an offline transport fixture.
+Every live Muse worker uses **`muse-spark-1.3-contributor`**. Default reasoning is **`xhigh`**. Use **`max`** for very complicated tasks and **`high`/`medium`** only when suitable. Muse has no default step cap. Set `--max-model-steps` only when a task needs a cap. No alternate Muse model override or automatic helper fallback is permitted. Echo is an offline transport fixture.
 
 Default effort is `xhigh` for Muse (`max` for very complicated tasks; `high`/`medium` only rarely) and `max` for Pi, which clamps it to each model's highest level. The orchestrator can override effort and step cap on each `followup`, or change future defaults with `effort`. Per-turn overrides do not replace the future default. Changes do not alter an in-flight request. Follow-ups run sequentially with the same workspace/tool policy and Muse session UUID. A `--worktree` worktree is created by claive and lasts for all turns of the worker, so isolated follow-ups keep their files.
 
@@ -353,8 +367,30 @@ Hosts without Muse (for example a Pi-only server) set the default engine and rol
  "roles": {"worker": {"engine": "pi", "model": "muse-spark-1.3-contributor-free"}}}
 ```
 
-Role keys: `engine`, `model`, `reasoning_effort`, `read_only`, `max_model_steps` (ignored by Pi, which has no step cap), `preamble`. Stored workers keep the engine they were launched with.
+Role keys: `engine`, `model`, `reasoning_effort`, `read_only`,
+`max_model_steps`, and either `preamble` or `prompt_file`. A prompt file must be absolute.
+A new role requires `engine`, `read_only`, and `preamble` or `prompt_file`.
+Built-in overrides inherit omitted values. Explicit launch flags win.
+All built-in roles default to `max_model_steps: null`.
+A built-in role cap applies only when its selected engine supports caps.
+Pi refuses explicit caps and custom-role caps.
+Stored workers keep their launch engine.
 
+Teams live under `teams.<name>`. Each team has `members`, mapping member names to
+roles, and optional absolute `collaboration` and `project` files.
+`--team NAME --member NAME` selects the member's role and cannot use `--role`.
+`--project-file /abs/project.md` replaces that team's project file for one launch.
+A launch binds `@TEAM-MEMBER`. An active binding prevents another launch.
+`claive team list` and `claive team show NAME` display configuration and aliases.
+They do not start workers.
+
+First-prompt order: role, team header, collaboration, project, context files,
+task, then report contract. `--context-file` repeats up to ten times, in order.
+Each layer file must be nonempty UTF-8 text, absolute, and at most 256 KiB.
+Duplicate context files are refused. Follow-ups do not reload those layers.
+See [the command reference](docs/command-reference.md) for launch options.
+
+Claive reads config again when a command needs policy. It does not cache config across commands.
 The same file holds the user's per-engine policy under `engines`. claive enforces it in code on every launch, follow-up, effort change, model fallback and batch stage, including workers that were already open when the file changed:
 
 ```json
@@ -376,9 +412,24 @@ The same file holds the user's per-engine policy under `engines`. claive enforce
   "claude": {"models": {"claude-haiku-5-5": {"efforts": ["high", "xhigh"]}}}}}
 ```
 
+`engines.codex.user_config: true` loads the user's `config.toml`.
+`CLAIVE_CODEX_USE_USER_CONFIG=1` also enables it. Skills load without this opt-in.
+The exec transport still passes `--ignore-rules`.
+
+`engines.<name>.extra_args` is an opt-in list of nonempty strings.
+Claive adds it before the engine command's `--`, or at the end when no `--` exists.
+It refuses `--` and flags in `OWNED_FLAGS` in `bin/claivelib/config.py`,
+including `--flag=value`. Those sets reserve output, model and session controls.
+Codex steering and fork turns refuse nonempty `engines.codex.extra_args`.
+For example, a user can select Claude tools explicitly:
+
+```json
+{"engines": {"claude": {"extra_args": ["--tools", "Read,Grep,Glob,Bash"]}}}
+```
+
 A host whose `opencode2api` runs locally can route Pi turns over loopback instead of the public URL in `models.json` with `{"providers": {"opencode2api": {"base_url": "http://127.0.0.1:PORT/v1"}}}`. Only `localhost` and loopback addresses are accepted. Pi reads the URL only from `models.json`, so claive gives Pi turns an overlay agent directory (`$CLAIVE_DIR/pi-agent-overlay`: links to every entry of the real one plus a mode-600 `models.json` differing only in `baseUrl`), rebuilt each turn. The real `models.json` is never edited; `doctor` times both URLs, and workers record and print `Provider override:`.
 
-On a host where workers run unattended, `{"workspaces": [{"path": "~/repo/site", "write": false}, {"path": "~/repo/site/drafts", "write": true}]}` limits where workers may run. With the key present, `run`/`start`/`open`/`batch` refuse a `--workspace` or `--worktree-existing` whose real path (symlinks resolved) is outside every entry, and the deepest matching entry decides the mode: `write: false` requires `--read-only` or a read-only role. Without the key any workspace is allowed, as before. This limits the worker's cwd and write mode only; Pi has no OS sandbox, so its read tool can still open absolute paths elsewhere. `doctor` reports the entry counts.
+On a host where workers run unattended, `{"workspaces": [{"path": "~/repo/site", "write": false}, {"path": "~/repo/site/drafts", "write": true}]}` limits where workers may run. With the key present, `run`/`start`/`open`/`batch` refuse a `--workspace` or `--worktree-existing` whose real path (symlinks resolved) is outside every entry, and the deepest matching entry decides the mode: `write: false` requires `--read-only` or a read-only role. Without the key any workspace is allowed, as before. This limits the worker's cwd and requested write mode. Pi has no OS sandbox. Its read-only instruction does not enforce write protection, and tools can access absolute paths elsewhere. `doctor` reports the entry counts.
 
 Run checks from the repository root. The suite is hermetic: `tests/hermetic.py` hides the host config, `CLAIVE_*` variables and installed Muse/Pi binaries. `CLAIVE_LIVE_TESTS=1` also runs the checks that drive the real Muse binary.
 

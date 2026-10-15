@@ -49,6 +49,7 @@ class WorkerEngine:
     supports_fork = False
     default_reasoning_effort = "high"
     default_max_model_steps = None
+    supports_max_model_steps = False
 
     def default_effort_for(self, model):
         """Effort for a turn that names none; an engine with per-model defaults overrides this."""

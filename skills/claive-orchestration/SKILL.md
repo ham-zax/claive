@@ -54,6 +54,36 @@ workers. Engine sandbox, settings and option limits: `README.md` and
 enabled state, the user's reason, default and disabled models and efforts, and steering
 transport. A launch the user disabled is refused: do not retry or work around it.
 
+## Capability map
+
+Workers use the engine's default tools. Claive supplies no restricted tool list.
+
+| Engine | Read-only | Web | Steering | Fork | Step cap | `extra_args` |
+|---|---|---|---|---|---|---|
+| Claude | `--permission-mode plan`, default tools | Always on | Stream JSON | Yes | Refused | Yes |
+| Codex | Read-only sandbox | Live every turn | App Server | Yes | Refused | Exec only |
+| Muse | `:read-only` profile, `--disable-write`, shell on | Always on | Refused | Refused | Opt-in | Yes |
+| Pi | Full tools and an instruction, no enforcement | `--web` refused | RPC | Yes | Refused | Yes |
+
+Steering needs `--enable-steering`. Fork needs an idle reusable session.
+`--web` has no effect on Claude, Codex and Muse.
+Claude write turns use `bypassPermissions`. `--setting-sources ""` keeps parent
+hooks and permission rules out. MCP servers and skills load.
+Live check, 2026-10-15: `ExitPlanMode` is unavailable in `--print`.
+Model refusals did not prove a harness-level write block.
+Codex skills and repo `AGENTS.md` load, including on App Server turns.
+The App Server path links user auth, sessions and skills.
+User `config.toml` is opt-in through `engines.codex.user_config: true` or
+`CLAIVE_CODEX_USE_USER_CONFIG=1`. Exec retains `--ignore-rules`.
+Muse read-only omits `--disable-approval`, which conflicts with its profile.
+
+Config `engines.<name>.extra_args` accepts nonempty strings. Claive inserts them
+before `--`, or at the end. It refuses `--` and its owned flags, including
+`--flag=value`. Codex steering and fork turns refuse this setting.
+`enabled: false` plus optional `reason` disables an engine.
+Claive reloads config when a command needs policy. See the README config section
+and `docs/command-reference.md` for the exact options.
+
 ## Roles and roster
 
 | Role | Default | Why |
@@ -84,7 +114,10 @@ a 40-minute turn in hidden reasoning and wrote nothing.
 **Pi rules.** Always pass `--model` (an explicit model also becomes Pi's global
 default, and omitting it inherits whatever was used last), plus `--engine pi
 --provider opencode2api`. Pi has no `--max-model-steps`, `--output-schema`,
-`--web`, or worktree flags, and Pi read-only has **no bash**. The gateway models are
+`--web`, or worktree flags. Both modes use `--tools '*'`, including bash.
+Read-only adds an instruction before and after the task, not a write barrier.
+Pi passes `--offline --no-extensions --no-prompt-templates --no-themes --no-approve`.
+Skills, MCP and context files load. The gateway models are
 free tiers: on a rate limit or an error, retry once, then pick another family and
 mention it in your report.
 
@@ -94,8 +127,10 @@ The same protocol works in every host; only how you wait differs. Full protocol:
 `docs/harness-integration.md`.
 
 All paths must be absolute. The ID is the 12-hex value on the first output
-line: `Worker <id> | label | path`. Exit codes everywhere: 0 completed, 1 failed,
-3 needs a parent decision, 124 `--timeout` expired (still running), 130 cancelled.
+line: `Worker <id> | label | path`. Common worker exit codes: 0 completed, 1 failed,
+3 needs a parent decision, 124 wait deadline expired, 130 cancelled.
+Argument parsing exits 2. Runtime and verification commands also use 2.
+See `docs/command-reference.md` for command-specific codes.
 
 - **Launch without blocking:** `claive start ...` (one turn),
   `claive open --detach ...` (reusable; returns at once),
@@ -116,11 +151,17 @@ line: `Worker <id> | label | path`. Exit codes everywhere: 0 completed, 1 failed
   `claive mission close ID`.
 - **Questions:** a turn asking for a decision exits 3, shows `ASK`, and records
   `needs_parent`; reply with `claive answer ID --message ...` (reusable workers only).
-- **Roles and reports:** `--role scout|worker|reviewer|oracle` sets engine, model,
-  effort, read-only and step-cap defaults and requests a `claive-report` block;
+- **Roles and reports:** `--role NAME` selects a built-in or custom role.
+  It sets engine, model, effort, read-only and step-cap defaults and requests a
+  `claive-report` block. Built-in roles default to no step cap.
+  Custom roles need `engine`, `read_only`, and `preamble` or `prompt_file`.
+  `--team NAME --member NAME` selects a configured role and binds `@TEAM-MEMBER`.
+  It cannot use `--role`. `--project-file` replaces the team's project context.
+  Repeated `--context-file` adds up to ten bounded UTF-8 layers to the first turn.
   `--report` requests it without a role. `--output-schema /abs/schema.json` (Muse,
   Claude) makes the result schema-shaped JSON.
-- Workers cannot launch workers (`CLAIVE_WORKER_ID` guard).
+- Workers cannot launch claive workers (`CLAIVE_WORKER_ID` guard).
+  Claude native subagents remain available through its default tools.
 
 Host specifics:
 - **Claude Code:** plain Bash for launches. Wait either in the foreground
@@ -134,6 +175,12 @@ Host specifics:
 - **Pi agent or shell:** the same commands through bash. Consumer
   `pi-<name>` or `shell`. Optional push: `CLAIVE_NOTIFY_CMD` gets the event JSON
   on stdin.
+
+Other capabilities: `fork ID --prompt '...'`, scheduled wakes through
+`send --at +30m [--every 1h]`, `schedule list|cancel`, parent `monitor` commands,
+and bounded peer `channel open|show|close`. A channel lets its members send
+`note|wake` messages to peers. Workers cannot open a channel.
+Exact syntax: `docs/command-reference.md`.
 
 Common commands: `claive show ID --json`, `logs ID [--stderr]`,
 `usage ID --json`, `followup ID --prompt-file F`, `close ID`, `cancel ID`.

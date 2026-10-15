@@ -21,7 +21,8 @@ class MuseEngine(WorkerEngine):
     name = "muse"
     default_model = MUSE_MODEL
     default_reasoning_effort = "xhigh"
-    default_max_model_steps = 100
+    default_max_model_steps = None  # no cap unless the user, a role or config.json sets one
+    supports_max_model_steps = True
 
     def __init__(self):
         self._tool_tasks = {}
@@ -34,7 +35,7 @@ class MuseEngine(WorkerEngine):
     def validate_turn(self, request):
         if request.reasoning_effort not in {"medium", "high", "xhigh", "max"}:
             raise ValueError(f"unsupported Muse reasoning effort: {request.reasoning_effort}")
-        if request.max_model_steps is None or request.max_model_steps < 1:
+        if request.max_model_steps is not None and request.max_model_steps < 1:
             raise ValueError("--max-model-steps must be positive")
 
     def steering_capability(self):
@@ -248,7 +249,8 @@ class MuseEngine(WorkerEngine):
             request.binary, "exec", "--workspace", request.workspace, "--trust-workspace",
             # Muse refuses --disable-approval with a permission profile (read-only turns).
             *([] if request.read_only else ["--disable-approval"]), "--json", "--provider", request.provider,
-            "--max-model-steps", str(request.max_model_steps), "--user-input-auto-resolve",
+            *(["--max-model-steps", str(request.max_model_steps)] if request.max_model_steps is not None else []),
+            "--user-input-auto-resolve",
             "--prompt-file", request.prompt_file,
         ]
         if request.session_id:

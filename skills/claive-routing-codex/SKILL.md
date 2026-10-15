@@ -22,18 +22,37 @@ Select an engine deliberately and follow the parent's current authorization poli
 | --- | --- |
 | `muse` (default) | Pinned `muse-spark-1.3-contributor`; usual substantive effort `xhigh`; supports managed worktrees and read-only isolation |
 | `pi` | `--engine pi --provider opencode2api`; models selected explicitly or inherited; no managed worktree, `--web`, or model-step cap |
-| `claude` | `--engine claude`; pinned `claude-haiku-5-5`; headless and isolated from user settings, hooks, MCP, and skills; no managed worktree or model-step cap; `--output-schema` returns schema-validated JSON; `--enable-steering` for live steering |
+| `claude` | `--engine claude`; pinned `claude-haiku-5-5`; headless with parent settings/hooks excluded, MCP and skills loaded; no managed worktree or model-step cap; `--output-schema` returns schema-validated JSON; `--enable-steering` for live steering |
 | `codex` | `--engine codex`; pinned `gpt-6-luna` at effort `max` (default) or `gpt-6.1-sol` at `low`, `medium`, `high` or `xhigh` (`medium` when no effort is passed; `max` and `ultra` are refused); writer runs without the Codex sandbox by default, read-only uses the read-only sandbox; no managed worktree, output schema, or model-step cap |
 
 Claude/Codex workers are **available**, not automatically authorized as a
 fallback or as critics for the Muse/Pi arbiter. Do not silently switch engines,
 relax sandboxing, or assume another model's worker permissions carry over.
-For a Codex worker, `CLAIVE_CODEX_USE_USER_CONFIG=1` explicitly opts into that
-worker's existing Codex user MCP/skill configuration; the default is isolated.
-`--ignore-rules` remains supplied in both modes; config opt-in does not enable rules.
+Codex skills load by default. `engines.codex.user_config: true` or
+`CLAIVE_CODEX_USE_USER_CONFIG=1` opts into the user's `config.toml`, including MCP.
+Exec turns retain `--ignore-rules`. App Server turns do not pass that flag.
+The App Server path links user auth, sessions and skills and reads repo `AGENTS.md`.
 A writing Codex worker runs without the Codex sandbox or approvals by default, so
 scope it in the brief; `CLAIVE_CODEX_YOLO=0` restores the workspace-write sandbox. Neither setting installs
 new MCP servers. Consult `docs/harness-integration.md` for the runtime protocol.
+
+| Engine | Read-only | Web | Steering / fork | Step cap | `extra_args` |
+|---|---|---|---|---|---|
+| Claude | Plan mode, default tools | Always on | Yes / yes | Refused | Yes |
+| Codex | Read-only sandbox | Live every turn | Yes / yes | Refused | Exec only |
+| Muse | `:read-only` profile, shell on | Always on | No / no | Opt-in | Yes |
+| Pi | Full tools plus an instruction, no enforcement | `--web` refused | Yes / yes | Refused | Yes |
+
+Steering needs `--enable-steering`. Fork needs an idle reusable session.
+`--web` has no effect on Claude, Codex and Muse.
+Claude keeps `--setting-sources ""` and uses `--tools default`.
+Write turns use `bypassPermissions`, read-only turns use `plan`.
+Live check, 2026-10-15: `ExitPlanMode` is unavailable in `--print`.
+Model refusals did not prove a harness-level write block.
+Config reloads when a command needs policy. `enabled: false` disables an engine.
+`extra_args` is opt-in. It refuses `--` and owned flags, including `--flag=value`.
+Codex steering and fork turns refuse nonempty `extra_args`.
+Exact options: `docs/command-reference.md`.
 
 For routine work from the Codex parent, favor `claive-worker` in Codex's managed
 shell so its session remains visible in `/ps`; use `claive start` or
@@ -51,7 +70,7 @@ Use **only `gpt-6.1-sol`** for Codex workers. Do not substitute a different Code
 - **Pi workers: always `max`** (the Pi engine default). They are free; Pi clamps `max` to each model's highest supported level.
 - **Pi models:** prefer `mimo-v2.6-flash-free`, `big-pickle`, `space-bunny-free`; `longcat-2.5-preview-free` only rarely. Do not use `nemotron-*` or `ling-3.1-flash-free`.
 
-The orchestrator can select effort per turn or change an existing worker's future default at any time. Changes apply to the next request; they cannot change an in-flight API call. Muse defaults to 100 model steps; Pi rejects `--max-model-steps`. Set a cap suitable for the assignment, including a higher cap when needed; a step cap is not a monetary budget or timeout.
+The orchestrator can select effort per turn or change an existing worker's future default at any time. Changes apply to the next request; they cannot change an in-flight API call. Muse has no default step cap. It passes `--max-model-steps` only when a flag or role/config value sets it. Pi rejects this flag. A step cap is not a monetary budget or timeout.
 
 ## Prepare the assignment
 
@@ -59,7 +78,7 @@ Write one narrow task to an absolute scratch prompt-file path. Include:
 
 `mission | inputs | authorized scope | write ownership | required output | stopping condition`
 
-Supply the absolute repository path, relevant files and symbols, existing evidence, constraints, and acceptance criteria. Workers do not automatically inherit the conversation or MCP access. Pass relevant graph findings and coverage gaps when the assignment relies on them.
+Supply the absolute repository path, relevant files and symbols, existing evidence, constraints, and acceptance criteria. Workers do not inherit the parent conversation. MCP access follows the engine configuration above. Pass relevant graph findings and coverage gaps when the assignment relies on them.
 
 Tell the worker it is not alone in the codebase: preserve other edits and accommodate them. Restrict writes to its assigned files. Forbid recursive delegation, commits, pushes, and other external writes unless the assignment explicitly authorizes them. Workers may make local, reversible implementation choices; they must report a blocker rather than expand scope or make a consequential decision outside the assignment.
 
@@ -78,11 +97,15 @@ exec /home/hamza/.local/bin/claive-worker \
   --max-model-steps 100
 ```
 
-For a Muse worker that needs isolation, add `--worktree`; `--worktree-base` selects a base commit (default `HEAD`; uncommitted parent edits are not included). claive creates the worktree itself (Muse 1.4.3's `-w create` fails under its sandbox) at `$CLAIVE_DIR/<id>/worktree`, detached for `--read-only`, on branch `claive/<id>` for writers, and it lasts across a reusable worker's follow-ups. When the worker ends, claive removes it unless a writer changed it; then the worktree and branch are kept, `show --json` lists `retained_worktree`, and you review and integrate from there. For a worktree you manage yourself, pass `--worktree-existing /absolute/worktree`. For enforced read-only workers add `--read-only` (both write and shell are disabled). Web tools are disabled unless `--web` is supplied. The Muse engine accepts only the pinned model. `--output-schema` is forwarded. Reusable workers require session logging; `--no-session-log` is rejected by this launcher. `--provider echo` is for local transport checks, not evidence that the live model works.
+For a Muse worker that needs isolation, add `--worktree`; `--worktree-base` selects a base commit (default `HEAD`; uncommitted parent edits are not included). claive creates the worktree itself (Muse 1.4.3's `-w create` fails under its sandbox) at `$CLAIVE_DIR/<id>/worktree`, detached for `--read-only`, on branch `claive/<id>` for writers, and it lasts across a reusable worker's follow-ups. When the worker ends, claive removes it unless a writer changed it; then the worktree and branch are kept, `show --json` lists `retained_worktree`, and you review and integrate from there. For a worktree you manage yourself, pass `--worktree-existing /absolute/worktree`. For Muse read-only workers add `--read-only`. It passes `--permission-profile :read-only --disable-write`, keeps the shell on, and omits `--disable-approval`. Web tools stay on. The Muse engine accepts only the pinned model. `--output-schema` is forwarded. Reusable workers require session logging; `--no-session-log` is rejected by this launcher. `--provider echo` is for local transport checks, not evidence that the live model works.
 
 Use `exec_command` with a short initial `yield_time_ms` (for example 1000). A returned `session_id` means the shell command is still running: retain it and use `write_stdin` to collect output and final exit status. Independent workers can each have their own managed session; shell yielding lets the parent continue working without detaching the worker. After a turn, the reusable worker remains idle and available in the managed terminal until closed. An idle supervisor makes no model requests.
 
-For Pi, use the same launcher with `--engine pi --provider opencode2api` and omit `--max-model-steps`. Omit `--model` to inherit the last selected Pi model from its global settings; the initial model is `muse-spark-1.3-contributor-free`. An explicit `--model ID` becomes the shared selection after launch-option validation, even if the subsequent model request fails; role models, batch stage models and timeout fallbacks do not. Existing workers and their follow-ups retain their launch model. This preference is separate from Muse's pinned model and never switches engines automatically. Pi supports only `opencode2api` here. Use `--workspace` for an externally retained worktree; Pi rejects worktree-management, `--web`, and `--output-schema`. Pi read-only tools are `read,grep,find,ls`, with extensions disabled; Pi has no Muse OS sandbox. See `/home/hamza/repo/claive/docs/pi-engine.md` for the verified runtime contract.
+For Pi, use the same launcher with `--engine pi --provider opencode2api` and omit `--max-model-steps`. Omit `--model` to inherit the last selected Pi model from its global settings; the initial model is `muse-spark-1.3-contributor-free`. An explicit `--model ID` becomes the shared selection after launch-option validation, even if the subsequent model request fails; role models, batch stage models and timeout fallbacks do not. Existing workers and their follow-ups retain their launch model. This preference is separate from Muse's pinned model and never switches engines automatically. Pi supports only `opencode2api` here. Use `--workspace` for an externally retained worktree; Pi rejects worktree-management, `--web`, and `--output-schema`. Pi uses `--tools '*'` in both modes, including bash.
+Read-only adds an instruction through `--append-system-prompt` and after the task.
+This is a request to the model, not enforcement. Pi has no OS sandbox.
+It passes `--offline --no-extensions --no-prompt-templates --no-themes --no-approve`.
+Skills, MCP and context files load. See `/home/hamza/repo/claive/docs/pi-engine.md` for the verified runtime contract.
 
 The shell session ID and the 12-character worker ID printed by `claive-worker` identify different objects; the retained worker `session_id` (a Codex thread ID for this engine) is a third identifier. Report both when a session is yielded. Keep ownership through the related task chain and final closure. Do not append `&`, use `nohup`/`disown`, or replace the default with `claive start`: those detach the worker from Codex's managed terminal. `start` is available for deliberately detached jobs and returns immediately; such jobs remain visible in the registry dashboard but not in Codex's terminal indicator.
 
@@ -112,14 +135,16 @@ The manager keeps Codex's existing internal status-line configuration intact. It
 
 ### Underlying Muse flags
 
-Always set all four options:
+Set these three options in both modes:
 
 ```text
 --workspace <absolute-repo-path>
 --trust-workspace
---disable-approval
 --json
 ```
+
+Write turns also use `--disable-approval`. Read-only turns use
+`--permission-profile :read-only --disable-write` instead.
 
 Prefer `--prompt-file` over a positional prompt for more than a few lines. Write prompt contents with a file tool or a safely quoted literal heredoc; never interpolate untrusted text into shell code. Quote every path expansion. Capture stdout JSONL and stderr separately in scratch files.
 
@@ -145,11 +170,12 @@ else
 fi
 ```
 
-- Pin `--model gpt-6.1-sol`. The orchestrator chooses the effort per turn: `xhigh` for planning and discussion, `medium` or `low` for mechanical implementation, `high` for complex implementation, never `max` or `ultra`.
-- Set `--max-model-steps` to fit the assignment; the default 100 is not a required ceiling.
+- Pin Muse to `--model muse-spark-1.3-contributor`. Default effort is `xhigh`. Muse supports `medium`, `high`, `xhigh` and `max`.
+- Set `--max-model-steps` only when the assignment needs a cap. Muse has no default cap.
 - `--user-input-auto-resolve` cancels interactive questions automatically. A worker that needs an answer must report a blocker; cancellation is not authorization.
-- For enforced read-only work add **both** `--disable-write --disable-shell`. The first disables only non-shell filesystem writes; leaving shell enabled permits writes through commands. Run any necessary verification commands in the parent or an isolated workspace.
-- Add `--disable-web-tools` when web access is unnecessary.
+- For Muse read-only work use `--permission-profile :read-only --disable-write`.
+  Omit `--disable-approval`, which conflicts with the profile. The shell remains on.
+- Web tools stay on. Claive's `--web` has no effect on Muse.
 - `--output-schema /absolute/schema.json` shapes the final answer for the meta provider and, on `--engine claude`, makes the result the schema-validated JSON object; stdout remains a JSONL event stream. Pi and Codex reject it.
 - Preserve session logging for related follow-ups. `--no-session-log` disables durable history and local messaging, and is allowed only for deliberate single-turn runs.
 
@@ -171,7 +197,7 @@ The API optionally exposes `prompt_cache_key` and Responses retention hints; thi
 - Worktree creation defaults to `HEAD`. Uncommitted parent edits will not automatically be present. Choose a suitable `--worktree-base` or explicitly transfer the required patch before dependent work. A `--worktree` worktree survives across the worker's reusable turns; use `--worktree-existing` for one you manage yourself or to continue a retained one.
 - Give other shell workers their own isolated worktrees before concurrent writes; their relay scripts do not create them.
 - Run heavy builds or test suites one at a time because this WSL environment has limited shared RAM. Independent light workers may run concurrently.
-- The standard flags disable approval prompts but keep Muse's filesystem/network sandbox enabled; network defaults to `proxy-only`. Diagnose access failures from stderr and terminal events. Do not silently add `--yolo` or change sandbox permissions. Any exception must fit the task's authorization and host policy.
+- Write turns disable approval prompts. Read-only turns use the permission profile. Both keep Muse's filesystem/network sandbox enabled; network defaults to `proxy-only`. Diagnose access failures from stderr and terminal events. Do not silently add `--yolo` or change sandbox permissions. Any exception must fit the task's authorization and host policy.
 - Use managed shell sessions for long runs, retain their IDs, and poll with short waits while keeping the user informed. A yielded command is still running. Close workers when their related task chain ends and collect the managed terminal output; retain isolated changes until integration is complete.
 
 ## Validate and integrate

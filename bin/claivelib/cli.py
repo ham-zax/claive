@@ -1258,7 +1258,7 @@ def create_job(args):
         steps = args.max_model_steps
     elif role_def and role not in ROLES:
         steps = role_def.get("max_model_steps")
-    elif role_def and role_def.get("max_model_steps") is not None and engine.default_max_model_steps is not None:
+    elif role_def and role_def.get("max_model_steps") is not None and engine.supports_max_model_steps:
         steps = role_def["max_model_steps"]
     else:
         steps = engine.default_max_model_steps
@@ -1809,7 +1809,7 @@ def parser():
         isolation.add_argument("--worktree", action="store_true")
         isolation.add_argument("--worktree-existing", help="resume a lane in its existing absolute worktree path")
         launch.add_argument("--worktree-base")
-        launch.add_argument("--web", action="store_true", help="enable engine web tools")
+        launch.add_argument("--web", action="store_true", help="compatibility flag; web is always on for Claude, Codex and Muse; Pi refuses it")
         launch.add_argument("--model")
         launch.add_argument("--session-id", help="reuse this engine's session ID with the same workspace and policy")
         launch.add_argument("--output-schema")
@@ -1844,7 +1844,7 @@ def parser():
     monitor_cancel = monitor_sub.add_parser("cancel", help="stop one monitor by its ID")
     monitor_cancel.add_argument("monitor_id")
     monitor_sub.add_parser("run-due", help="run one pass of all due monitors")
-    send = commands.add_parser("send", help="send a parent message to a worker")
+    send = commands.add_parser("send", help="send a parent message, or a peer message through an open channel")
     send.add_argument("id")
     send.add_argument("--mode", choices=("note", "wake", "now"), default="note")
     message = send.add_mutually_exclusive_group(required=True)

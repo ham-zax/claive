@@ -552,7 +552,7 @@ html.film-ready .film .cnav{display:grid}
     <li><strong>Any agent that can run a shell command can drive it.</strong> It is a plain CLI with exit codes and file state.</li>
     <li><strong>It measures itself.</strong> Compute-matched baselines, pass bars fixed before data, and a null result counts as an answer.</li>
   </ul>
-  <p class="apart">Also in the repo: an unattended goal queue (<code>claive goal</code>, <code>claive serve</code>), and <code>stats</code> and <code>pick</code>, which choose a critic from past results.</p>
+  <p class="apart">Also in the repo: plain <code>claive</code> workers outside the ladder, with live steering, <code>fork</code>, questions to the parent (<code>ask</code>/<code>reply</code>), peer channels, teams, scheduled wakes and monitors; an unattended goal queue (<code>claive goal</code>, <code>claive serve</code>); and <code>stats</code> and <code>pick</code>, which choose a critic from past results. Every command: <a href="https://github.com/ham-zax/claive/blob/main/docs/command-reference.md">command reference</a>.</p>
 </section>
 
 <section>
@@ -591,7 +591,7 @@ html.film-ready .film .cnav{display:grid}
 
 <section id="try" class="try">
   <h2>Try it</h2>
-  <p><strong>You need</strong> Linux and Python 3 (standard library only). Muse is the default worker engine; Pi, Claude Code, and Codex are also supported with their own installation and model policies. The optional worker pane needs tmux and Codex.</p>
+  <p><strong>You need</strong> Linux and Python 3 (standard library only). Workers run on Muse, Pi, Claude Code or Codex, each installed separately. Each worker gets its engine's own default tools, and read-only work uses the engine's own read-only mode. The built-in default engine is Muse: <code>default_engine</code> in <code>~/.config/claive/config.json</code> changes it, and <code>engines.&lt;name&gt;.enabled: false</code> turns an engine off. The optional worker pane needs tmux and Codex.</p>
   <p><strong>New to this?</strong> All you need is a repo and one command that currently fails, such as a test. That command is your verifier.</p>
   <h3>Install</h3>
   <pre tabindex="0"><code>git clone https://github.com/ham-zax/claive.git &amp;&amp; cd claive
@@ -599,7 +599,7 @@ html.film-ready .film .cnav{display:grid}
 ./install.sh             # installs the tools and skills for Claude Code and Codex</code></pre>
   <h3>Ask your agent</h3>
   <p>Start a new Claude Code or Codex session and say:</p>
-  <pre tabindex="0"><code>Use the claive-orchestration skill. You have my permission to delegate to Muse/Pi workers.
+  <pre tabindex="0"><code>Use the claive-orchestration skill. You have my permission to delegate to claive workers.
 Repo: /abs/repo. Task: &lt;goal&gt;. Verifier: &lt;command that fails now&gt;. Arm D. Don't commit.</code></pre>
   <h3>Or drive the arbiter yourself</h3>
   <pre tabindex="0"><code>claive-orch init --repo /abs/repo --task-file /abs/task.md --verify 'python3 -m pytest -q' --arm D
@@ -616,13 +616,14 @@ claive-orch integrate RUN  # apply the winner and re-verify in your checkout</co
     <li>Stuck detection inside a single turn.</li>
     <li>A test-author worker for hidden checks.</li>
     <li>Enforced token budgets.</li>
+    <li>An enforced read-only mode for Pi. Pi has none, so a read-only Pi turn gets an instruction, not a block.</li>
     <li>OpenCode as a direct worker engine (Pi uses the separate <code>opencode2api</code> route).</li>
   </ul>
 </section>
 </main>
 <footer>
   <p>claive by Hamza (<a href="https://github.com/ham-zax">ham-zax</a>). MIT licensed.</p>
-  <p><a href="https://github.com/ham-zax/claive">Source</a> · Last updated 2026-10-09</p>
+  <p><a href="https://github.com/ham-zax/claive">Source</a> · Last updated 2026-10-15</p>
 </footer>
 </div>
 

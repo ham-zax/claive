@@ -9,6 +9,7 @@ class FixtureEngine(WorkerEngine):
     name = "fixture"
     supports_fork = True
     default_max_model_steps = 100
+    supports_max_model_steps = True
 
     def resolve_launch(self, **options):
         return {

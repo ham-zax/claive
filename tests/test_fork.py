@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "bin"))
@@ -200,6 +201,77 @@ class ForkChecks(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("model nemotron-test is disallowed by claive policy", result.stderr)
+
+
+class ClaudeBudgetForkChecks(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="claude-budget-fork-")
+        self.addCleanup(temp.cleanup)
+        self.workspace = Path(temp.name)
+        self.config = self.workspace / "config.json"
+        env = patch.dict(os.environ, CLAIVE_DIR=str(self.workspace / "registry"),
+                         CLAIVE_CONFIG=str(self.config), CLAUDE_WORKER_BINARY=FIXTURE_WORKER,
+                         CLAUDE_CONFIG_DIR=str(self.workspace / "claude-config"))
+        env.start()
+        self.addCleanup(env.stop)
+        self.prompt = self.workspace / "source.md"
+        self.prompt.write_text("source assignment")
+
+    def source(self):
+        args = cli.parser().parse_args(["open", "--engine", "claude", "--workspace", str(self.workspace),
+                                        "--prompt-file", str(self.prompt)])
+        path, state = cli.create_job(args)
+        state["status"] = "idle"
+        cli.save(path / "state.json", state)
+        return path, state
+
+    def fork(self, source):
+        args = cli.parser().parse_args(["fork", source["id"], "--prompt", "branch assignment"])
+        return cli.create_fork(args)[1]
+
+    def test_fork_inherits_budget_after_config_disables_it(self):
+        self.config.write_text(json.dumps({"engines": {"claude": {"budget": {"models": {
+            "claude-haiku-5-5": {"warn": 90000, "stop": 100000, "max_handoffs": 2}}}}}}))
+        path, source = self.source()
+        original = (path / "state.json").read_bytes()
+        self.config.write_text(json.dumps({"engines": {"claude": {"budget": False}}}))
+        fork = self.fork(source)
+        self.assertEqual(fork["launch"]["budget"], source["launch"]["budget"])
+        self.assertEqual(fork["launch"]["budget_off_reason"], source["launch"]["budget_off_reason"])
+        self.assertTrue(fork["launch"]["steering"])
+        self.assertEqual(fork["launch"]["budget"]["stop"], 100000)
+        self.assertEqual(fork["command"][fork["command"].index("--autocompact") + 1], "143k")
+        self.assertEqual(fork["command"][fork["command"].index("--resume") + 1], source["session_id"])
+        self.assertIn("--fork-session", fork["command"])
+        self.assertNotEqual(fork["session_id"], source["session_id"])
+        self.assertEqual((path / "state.json").read_bytes(), original)
+
+    def test_fork_inherits_disabled_budget_and_reason_after_config_enables_it(self):
+        self.config.write_text(json.dumps({"engines": {"claude": {"budget": False}}}))
+        _path, source = self.source()
+        self.config.write_text(json.dumps({"engines": {"claude": {"budget": True}}}))
+        fork = self.fork(source)
+        self.assertIsNone(fork["launch"]["budget"])
+        self.assertEqual(fork["launch"]["budget_off_reason"], "config")
+        self.assertFalse(fork["launch"]["steering"])
+
+    def test_fork_of_pre_budget_worker_resolves_current_config(self):
+        path, source = self.source()
+        source["launch"].pop("budget")
+        source["launch"].pop("budget_off_reason")
+        source["launch"]["steering"] = False
+        cli.save(path / "state.json", source)
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                self.config.write_text(json.dumps({"engines": {"claude": {"budget": enabled}}}))
+                fork = self.fork(source)
+                if enabled:
+                    self.assertEqual(fork["launch"]["budget"]["stop"], 95000)
+                    self.assertIsNone(fork["launch"]["budget_off_reason"])
+                else:
+                    self.assertIsNone(fork["launch"]["budget"])
+                    self.assertEqual(fork["launch"]["budget_off_reason"], "config")
+                self.assertEqual(fork["launch"]["steering"], enabled)
 
 
 if __name__ == "__main__":

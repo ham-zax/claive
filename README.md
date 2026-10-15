@@ -8,8 +8,12 @@ Pi model when `--model` is omitted. See [Pi setup, sessions, supported options a
 Muse remains the default engine. Use `claive-worker --engine pi` to select Pi.
 
 Claude Code is available with `--engine claude` (headless `claude -p`, binary `~/.local/bin/claude` or
-`CLAUDE_WORKER_BINARY`). It is strictly locked to `claude-haiku-5-5`: any other `--model`, role model or
-timeout fallback is refused. Efforts are `low` to `max` (default `xhigh`), auto-compacting at 100k tokens; `--max-model-steps`
+`CLAUDE_WORKER_BINARY`). It defaults to `claude-haiku-5-5`. The claive config decides which models it may use:
+set `engines.claude.models` (for example only `claude-haiku-5-5`) and any other `--model`, role model or
+timeout fallback is refused. Efforts are `low` to `max` (default `xhigh`). Context budget mode is on by default:
+at a warn and a stop limit claive asks the worker for a handoff and continues in a new session
+(see [docs/design-budget-mode.md](docs/design-budget-mode.md)). Claude's own compaction is the
+fallback at 105k (Haiku) or 155k (other models) tokens with budget mode off; `--max-model-steps`
 and worktree isolation are unsupported. `--output-schema /abs/schema.json` is passed as Claude's `--json-schema`, so the
 result is the validated JSON object. `--enable-steering` switches to stream-json input for live steering
 (see [docs/steering.md](docs/steering.md)). Workers use `--tools default`.
@@ -167,7 +171,7 @@ claive conversation show CONVERSATION_ID --json
 
 Each round visits participants in the supplied order and passes the previous
 participant's reply to the next. For example, open one Pi worker on
-`mimo-v2.6-flash-free`, another on `big-pickle`, and a Claude worker on its pinned
+`mimo-v2.6-flash-free`, another on `big-pickle`, and a Claude worker on
 `claude-haiku-5-5`, then give them the names above. Muse and Codex workers also
 use the same protocol. Open participants with their own role prompts and
 `--report` (or a role); use `--read-only` for discussion and review. Their

@@ -239,6 +239,7 @@ def turn_request(state, prompt_file=None, reasoning_effort=None, max_model_steps
         session_logging=bool(launch.get("session_logging", True)),
         isolation=isolation if isolation is not None else dict(launch.get("isolation") or {}),
         session_dir=launch.get("session_dir"), steering=bool(launch.get("steering")),
+        budget=launch.get("budget"),
     )
 
 
@@ -338,6 +339,18 @@ def load(path, check_alive=True):
     state["pending_instructions"] = pending_instructions
     state["evidence"] = acceptance.view(path, state)
     state["steering"] = steering.summary(path, state)
+    state["budget"] = None
+    if state.get("engine") == "claude":
+        launch = state.get("launch") if isinstance(state.get("launch"), dict) else {}
+        values = launch.get("budget")
+        values = values if isinstance(values, dict) else None
+        state["budget"] = dict(enabled=values is not None, values=values,
+                               off_reason=launch.get("budget_off_reason"))
+        for key in ("context_tokens", "handoffs", "turn_handoffs", "budget_missed"):
+            state.setdefault(key, 0)
+        # Public reads expose a null value without restoring a cleared marker on internal reads.
+        if check_alive:
+            state.setdefault("pending_handoff", None)
     return state
 
 
@@ -591,6 +604,7 @@ def rebuild_for_fallback(state, engine, new_model):
 
 
 def supervise(job_id, control=None):
+    from claivelib import budget, inbox as inbox_mod
     path = job_path(job_id)
     state = load(path, check_alive=False)
     for key in PER_TURN_RESET_KEYS:
@@ -598,6 +612,10 @@ def supervise(job_id, control=None):
     state["malformed_events"] = 0
     state["turn_task_failures"] = 0
     state["turn_failure_details"] = []
+    state["turn_handoffs"] = 0
+    state["turn_prompt_file"] = state["prompt_file"]
+    state.setdefault("handoffs", 0)
+    state.setdefault("budget_missed", 0)
     acceptance.begin(path, state)
     (path / "result.txt").unlink(missing_ok=True)
     engine = get_engine(state.get("engine", DEFAULT_ENGINE))
@@ -612,6 +630,31 @@ def supervise(job_id, control=None):
     child = None
     transport = None
     timed_out = False
+    timeout_start = None
+    budget_values = None
+
+    def update_budget(event):
+        if budget_values is None or state.get("terminal"):
+            return
+        if event.get("type") == "context_compacted":
+            state["budget_missed"] += 1
+            state["budget_phase"] = "none"
+        elif event.get("type") == "context_usage":
+            tokens = state["context_tokens"] = event["tokens"]
+            phase = state["budget_phase"]
+            message = None
+            if tokens >= budget_values["stop"] and phase != "stopping":
+                message = budget.stop_message(tokens, budget_values, with_template=phase == "none")
+                state["budget_phase"] = "stopping"
+            elif tokens >= budget_values["warn"] and phase == "none":
+                message = budget.warn_message(tokens, budget_values)
+                state["budget_phase"] = "warned"
+            if message is not None:
+                save(path / "state.json", state)
+                try:
+                    steering.submit(path, message, source="budget")
+                except ValueError as error:
+                    state["budget_error"] = str(error)
 
     def stop_requested(_signum, _frame):
         nonlocal stopping
@@ -628,6 +671,10 @@ def supervise(job_id, control=None):
     attempt = 0
     try:
         while True:
+            values = launch_config(state).get("budget")
+            budget_values = values if engine.name == "claude" and isinstance(values, dict) else None
+            state["context_tokens"] = 0
+            state["budget_phase"] = "none"
             if attempt > 0:
                 for key in PER_TURN_RESET_KEYS:
                     state.pop(key, None)
@@ -647,7 +694,6 @@ def supervise(job_id, control=None):
             child = None
             timed_out = False
             kill_at = None
-            turn_start = None
             child_env = dict(os.environ, CLAIVE_WORKER_ID=job_id, CLAIVE_BIN=launcher_path())
             if state.get("engine") == "pi":
                 # Rebuilt every turn so models.json edits and config changes take effect.
@@ -664,7 +710,8 @@ def supervise(job_id, control=None):
                                          bufsize=0, start_new_session=True,
                                          cwd=state["workspace"], env=child_env)
                 transport = steering.Transport(path, state, child.stdin, initial_input) if initial_input is not None else None
-                turn_start = time.monotonic()
+                if timeout_start is None:
+                    timeout_start = time.monotonic()
                 state["worker_pid"] = child.pid
                 state["worker_identity"] = identity(child.pid)
                 state["phase"] = "waiting for first event"
@@ -678,7 +725,7 @@ def supervise(job_id, control=None):
                         if transport and not stopping and not timed_out and not state.get("terminal"):
                             transport.pump()
                         if (turn_timeout is not None and not timed_out and not stopping
-                                and child.poll() is None and now - turn_start > turn_timeout):
+                                and child.poll() is None and now - timeout_start > turn_timeout):
                             timed_out = True
                             state["status"] = "cancelling"
                             state["phase"] = "stopping worker"
@@ -719,6 +766,7 @@ def supervise(job_id, control=None):
                                             raise ValueError("event is not an object")
                                         for normalized_event in engine.normalize_event(event):
                                             event_update(state, normalized_event)
+                                            update_budget(normalized_event)
                                             if transport:
                                                 transport.observe(normalized_event)
                                                 if state.get("terminal"):
@@ -735,6 +783,7 @@ def supervise(job_id, control=None):
                             raise ValueError("event is not an object")
                         for normalized_event in engine.normalize_event(event):
                             event_update(state, normalized_event)
+                            update_budget(normalized_event)
                             if transport:
                                 transport.observe(normalized_event)
                     except (ValueError, UnicodeDecodeError):
@@ -776,6 +825,37 @@ def supervise(job_id, control=None):
                     state["failure_kind"] = "worker"
             else:
                 state["status"] = "completed"
+            if state["status"] == "completed" and budget_values is not None and budget.is_handoff(final_text):
+                state["handoffs"] += 1
+                state["turn_handoffs"] += 1
+                number = state["turn_handoffs"]
+                handoff_file = path / "handoffs" / f"turn-{state['turn']:04}-{number}.md"
+                messaging._write_text(handoff_file, final_text)
+                state["session_id"] = engine.resolve_session_id(None, launch_config(state).get("session_logging", True))
+                continuation = path / f"prompt-{state['turn']:04}-h{number}.md"
+                continuation.write_text(budget.continuation_prompt(
+                    final_text, Path(state["turn_prompt_file"]).read_text()))
+                state["prompt_file"] = str(continuation)
+                state["command"] = build_command(engine, turn_request(state))
+                (path / "steering" / f"turn-{state['turn']:04}.closed").unlink(missing_ok=True)
+                maximum = budget_values["max_handoffs"]
+                limit_reached = maximum is not None and number >= maximum
+                if limit_reached:
+                    state["needs_parent"] = {
+                        "kind": "budget_limit",
+                        "question": f"The worker reached the limit of {maximum} automatic context handoffs in this turn. "
+                                    f"Its latest handoff is in {handoff_file}. Answer to continue in a new session "
+                                    "from that handoff, or close the worker.",
+                    }
+                    state["pending_handoff"] = str(handoff_file)
+                save(path / "state.json", state)
+                inbox_mod.append(inbox_mod.budget_event(
+                    job_id, state.get("label", ""), state["turn"], number, state["handoffs"],
+                    state["context_tokens"], state["session_id"], budget.next_step(final_text)))
+                if limit_reached:
+                    break
+                attempt += 1
+                continue
             if state.get("report_contract"):
                 record_report(state, answer)
             if (state["status"] == "failed" and not stopping
@@ -800,6 +880,7 @@ def supervise(job_id, control=None):
                     state["launch"] = fresh_launch
                     state["command"] = fresh_command
                     state["session_id"] = fresh_session
+                    timeout_start = None
                     save(path / "state.json", state)
                     attempt += 1
                     continue
@@ -973,6 +1054,7 @@ def _remove_withdrawn_ask_marker(path, request):
 
 def reusable_worker(job_id):
     """Keep one supervisor and durable worker session available between turns."""
+    from claivelib import budget
     path = job_path(job_id)
     control = {"stopping": False}
     while True:
@@ -1072,9 +1154,12 @@ def reusable_worker(job_id):
                         pending[0].unlink()
                         continue
                     notes = messaging.pending_messages(path)
+                    pending_handoff = state.get("pending_handoff")
+                    handoff_file = Path(pending_handoff) if pending_handoff else None
+                    has_handoff = handoff_file is not None and handoff_file.is_file()
                     if state.get("report_contract"):
                         source = request["prompt_file"]
-                    if state.get("report_contract") or notes or incident:
+                    if state.get("report_contract") or notes or incident or has_handoff:
                         effective = str(path / f"prompt-{new_turn:04}.md")
                         prompt = Path(request["prompt_file"]).read_text()
                         block = messaging.format_block(notes, already_in_prompt=(request.get("message_id"),))
@@ -1083,6 +1168,8 @@ def reusable_worker(job_id):
                             content = f"{incident}\n\n{content}"
                         if state.get("report_contract"):
                             content += "\n\n" + REPORT_CONTRACT
+                        if has_handoff:
+                            content = budget.answer_prompt(handoff_file.read_text(), content)
                         Path(effective).write_text(content)
                     try:
                         next_turn = turn_request(state, prompt_file=effective,
@@ -1114,6 +1201,8 @@ def reusable_worker(job_id):
                         state["request_id"] = request["request_id"]
                     if source:
                         state["source_prompt_file"] = source
+                    if has_handoff:
+                        state.pop("pending_handoff", None)
                     save(path / "state.json", state)
                     messaging.mark_delivered(path, notes, new_turn)
                     pending[0].unlink()
@@ -1182,6 +1271,8 @@ def create_fork(args):
         fork_session_id=source_session_id, fork_session_dir=launch.get("session_dir"),
         forked_from=source_id,
         context_file=getattr(args, "context_file", []),
+        inherit_budget=engine_name == "claude" and "budget" in launch,
+        budget=launch.get("budget"), budget_off_reason=launch.get("budget_off_reason"),
     )
     path, state = create_job(inherited)
 
@@ -1268,12 +1359,25 @@ def create_job(args):
     check_model_policy(effective_model)
     isolation = dict(mode="create" if args.worktree else "existing" if args.worktree_existing else "none",
                      base=args.worktree_base, existing_path=args.worktree_existing)
+    budget_options = {}
+    if engine_name == "claude":
+        if getattr(args, "inherit_budget", False):
+            budget, off_reason = args.budget, args.budget_off_reason
+        else:
+            budget, off_reason = config.claude_budget(effective_model or engine.default_model, data=config_data)
+            if off_reason is None:
+                if args.output_schema:
+                    budget, off_reason = None, "output schema"
+                elif fallback_models:
+                    budget, off_reason = None, "fallback models"
+        budget_options = dict(budget=budget, budget_off_reason=off_reason)
     launch = engine.resolve_launch(
         provider=args.provider, model=effective_model, read_only=read_only, web=args.web,
         output_schema=args.output_schema, session_logging=not args.no_session_log,
         isolation=isolation, session_id=session_id, session_root=str(root() / "sessions"),
         steering=bool(getattr(args, "enable_steering", False)),
         workspace=str(workspace), remember_model=bool(args.model and getattr(args, "remember_model", True)),
+        **budget_options,
     )
     check_model_policy(launch.get("model"))
     if getattr(args, "enable_steering", False) and not engine.steering_capability().supported:
@@ -1286,6 +1390,7 @@ def create_job(args):
         read_only=launch["read_only"], web=launch["web"], output_schema=launch["output_schema"],
         session_logging=launch["session_logging"], isolation=launch["isolation"],
         session_dir=launch.get("session_dir"), steering=bool(launch.get("steering")),
+        budget=launch.get("budget"),
         fork_session_id=getattr(args, "fork_session_id", None),
         fork_session_dir=getattr(args, "fork_session_dir", None),
     )
@@ -1337,6 +1442,7 @@ def create_job(args):
                 read_only=launch["read_only"], web=launch["web"], output_schema=launch["output_schema"],
                 session_logging=launch["session_logging"], isolation=launch["isolation"],
                 session_dir=launch.get("session_dir"), steering=bool(launch.get("steering")),
+                budget=launch.get("budget"),
                 fork_session_id=getattr(args, "fork_session_id", None),
                 fork_session_dir=getattr(args, "fork_session_dir", None),
             )
@@ -1464,6 +1570,19 @@ def report(state):
         print(f"Intent: {clean(state['intent'])}")
     steering_state = steering.summary(path, state)
     print(f"Live steering: {steering_state['enabled']} | pending {steering_state['pending']} | acknowledged {steering_state['acknowledged']}")
+    if state.get("engine") == "claude":
+        launch = state.get("launch") if isinstance(state.get("launch"), dict) else {}
+        values = launch.get("budget")
+        if isinstance(values, dict):
+            print(f"Context budget: on | context {state.get('context_tokens', 0) // 1000}k | "
+                  f"warn {values['warn'] // 1000}k | stop {values['stop'] // 1000}k | "
+                  f"compact {values['compact'] // 1000}k | handoffs {state.get('handoffs', 0)} "
+                  f"(this turn {state.get('turn_handoffs', 0)}) | missed {state.get('budget_missed', 0)}")
+        else:
+            reason = launch.get("budget_off_reason") or "not set at launch"
+            print(f"Context budget: off ({clean(reason)})")
+        if state.get("pending_handoff"):
+            print(f"Pending handoff: {clean(state['pending_handoff'])} (answer or followup continues from it)")
     print(f"Queued follow-ups: {len(list((path / 'requests').glob('*.json')))} (delivered between turns)")
     if state.get("task_failures"):
         print(f"Task failures reported: {state['task_failures']} cumulative; "

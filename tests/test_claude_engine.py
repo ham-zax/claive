@@ -10,7 +10,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "bin"))
 from claivelib.engine import TurnRequest
 from claivelib.engines import get_engine
-from claivelib.engines.claude import CLAUDE_MODEL, ClaudeEngine
+from claivelib.engines.claude import CLAUDE_MODEL, ClaudeEngine, compaction_point
 
 SESSION = "11111111-2222-4333-8444-555555555555"
 
@@ -46,18 +46,20 @@ class ClaudeChecks(unittest.TestCase):
     def test_registry_resolves_the_engine(self):
         self.assertIsInstance(get_engine("claude"), ClaudeEngine)
 
-    def test_model_is_locked_to_haiku(self):
+    def test_engine_defaults_to_haiku_and_leaves_the_model_policy_to_the_config(self):
         launch = self.engine.resolve_launch()
         self.assertEqual(launch["model"], CLAUDE_MODEL)
         self.assertEqual(CLAUDE_MODEL, "claude-haiku-5-5")
         launch["binary"] = str(self.binary)
-        self.engine.validate_launch(launch)
-        for model in ("sonnet", "claude-sonnet-5-5", "claude-opus-5-5", None):
+        for model in ("claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"):
             with self.subTest(model=model):
-                with self.assertRaisesRegex(ValueError, "locked"):
+                self.engine.validate_launch(dict(launch, model=model))
+                command = self.engine.build_command(self.request(model=model))
+                self.assertEqual(command[command.index("--model") + 1], model)
+        for model in (None, ""):
+            with self.subTest(model=model):
+                with self.assertRaisesRegex(ValueError, "needs a model name"):
                     self.engine.validate_launch(dict(launch, model=model))
-                with self.assertRaisesRegex(ValueError, "locked"):
-                    self.engine.build_command(self.request(model=model))
 
     def test_unsupported_options_are_rejected(self):
         launch = dict(self.engine.resolve_launch(), binary=str(self.binary))
@@ -84,7 +86,7 @@ class ClaudeChecks(unittest.TestCase):
         self.assertEqual(command[command.index("--setting-sources") + 1], "")
         self.assertNotIn("--strict-mcp-config", command)
         self.assertNotIn("--disable-slash-commands", command)
-        self.assertEqual(command[command.index("--autocompact") + 1], "100k")
+        self.assertEqual(command[command.index("--autocompact") + 1], "138k")
         self.assertEqual(self.engine.default_reasoning_effort, "xhigh")
         self.assertIn("--session-id", command)
         self.assertEqual(command[-2:], ["--", "--do the thing\n"])
@@ -116,6 +118,73 @@ class ClaudeChecks(unittest.TestCase):
         normalized = self.engine.normalize_event(event)
         self.assertEqual(normalized[0]["type"], "session_bound")
         self.assertEqual(normalized[0]["session_id"], event["session_id"])
+
+    def test_autocompact_window_per_family_and_budget(self):
+        for model, budget, point, window in (
+                (CLAUDE_MODEL, None, 105000, "138k"),
+                ("CLAUDE-HAIKU-custom", None, 105000, "138k"),
+                ("claude-sonnet-5-5", None, 155000, "188k"),
+                (CLAUDE_MODEL, {"stop": 95000}, 105000, "138k"),
+                ("claude-sonnet-5-5", {"stop": 145000}, 155000, "188k"),
+                (CLAUDE_MODEL, {"stop": 200000}, 210000, "243k"),
+                ("claude-sonnet-5-5", {"stop": 200000}, 210000, "243k")):
+            with self.subTest(model=model, budget=budget):
+                command = self.engine.build_command(self.request(model=model, budget=budget))
+                self.assertEqual(compaction_point(model, budget), point)
+                self.assertEqual(command[command.index("--autocompact") + 1], window)
+
+    def test_budget_launch_forces_steering_and_retains_budget(self):
+        budget = {"warn": 85000, "stop": 95000, "max_handoffs": None, "compact": 105000}
+        launch = self.engine.resolve_launch(budget=budget, steering=False)
+        self.assertTrue(launch["steering"])
+        self.assertEqual(launch["budget"], budget)
+        self.assertIsNone(launch["budget_off_reason"])
+        disabled = self.engine.resolve_launch(budget=None, budget_off_reason="config")
+        self.assertFalse(disabled["steering"])
+        self.assertIsNone(disabled["budget"])
+        self.assertEqual(disabled["budget_off_reason"], "config")
+        self.assertTrue(self.engine.resolve_launch(budget=None, steering=True)["steering"])
+
+    def test_context_usage_preserves_existing_events_and_sums_inputs(self):
+        contents = [{"type": "tool_use", "name": "Read", "id": "read1"},
+                    {"type": "text", "text": "done"}]
+        for blocks, expected in ((contents, ["tool_started", "output_delta"]),
+                                 ([], ["model_step"]), (None, ["activity"])):
+            for parent in ({}, {"parent_tool_use_id": None}):
+                with self.subTest(blocks=blocks, parent=parent):
+                    message = {"content": blocks}
+                    event = dict(type="assistant", message=message, **parent)
+                    before = self.engine.normalize_event(event)
+                    message["usage"] = {"input_tokens": 123, "cache_read_input_tokens": 4000,
+                                        "cache_creation_input_tokens": 500, "output_tokens": 999}
+                    result = self.engine.normalize_event(event)
+                    self.assertEqual([item["type"] for item in before], expected)
+                    self.assertEqual(result[:-1], before)
+                    self.assertEqual(result[-1], {"type": "context_usage", "native_kind": "assistant",
+                                                  "tokens": 4623})
+        for usage, total in (({}, 0), ({"input_tokens": 23}, 23)):
+            result = self.engine.normalize_event({"type": "assistant", "message": {"usage": usage}})
+            self.assertEqual(result[-1]["tokens"], total)
+
+    def test_sidechain_usage_does_not_emit_context_usage(self):
+        result = self.engine.normalize_event({
+            "type": "assistant", "parent_tool_use_id": "toolA",
+            "message": {"content": [], "usage": {"input_tokens": 200}}})
+        self.assertEqual(result, [{"type": "model_step", "native_kind": "assistant"}])
+        result = self.engine.normalize_event({"type": "assistant", "message": {"content": [], "usage": None}})
+        self.assertEqual(result, [{"type": "model_step", "native_kind": "assistant"}])
+
+    def test_context_usage_ignores_values_that_are_not_integers(self):
+        for invalid in (None, True, False, 2.5, "100", [], {}):
+            with self.subTest(invalid=invalid):
+                result = self.engine.normalize_event({"type": "assistant", "message": {
+                    "content": [], "usage": {"input_tokens": invalid, "cache_read_input_tokens": 400,
+                                               "cache_creation_input_tokens": invalid}}})
+                self.assertEqual(result[-1], {"type": "context_usage", "native_kind": "assistant", "tokens": 400})
+
+    def test_compact_boundary_emits_context_compacted(self):
+        self.assertEqual(self.engine.normalize_event({"type": "system", "subtype": "compact_boundary"}),
+                         [{"type": "context_compacted", "native_kind": "system"}])
 
     def test_output_schema_becomes_json_schema_and_structured_result(self):
         schema = self.root / "schema.json"

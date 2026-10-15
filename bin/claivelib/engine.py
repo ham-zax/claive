@@ -42,6 +42,7 @@ class TurnRequest:
     steering: bool = False
     fork_session_id: Optional[str] = None
     fork_session_dir: Optional[str] = None
+    budget: Optional[dict] = None
 
 
 class WorkerEngine:

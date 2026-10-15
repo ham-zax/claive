@@ -1,0 +1,456 @@
+"""Run the real supervisor against a deterministic Claude stream-json process."""
+import hermetic  # noqa: F401
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from unittest.mock import patch
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "bin"))
+from claivelib import budget, cli, inbox
+
+HANDOFF = "[claive-handoff]\n## Goal\nFinish the assignment.\n## Next step\nCheck the next step."
+FINAL = 'Done.\n```claive-report\n{"status":"done","summary":"Finished"}\n```'
+
+FIXTURE = '''#!/usr/bin/env python3
+import json, os, select, sys, time
+from pathlib import Path
+root = Path(os.environ["BUDGET_FIXTURE_DIR"])
+counter = root / "count"
+index = int(counter.read_text()) if counter.exists() else 0
+counter.write_text(str(index + 1))
+plan = json.loads((root / "plan.json").read_text())[index]
+def record(value):
+    with (root / "calls.jsonl").open("a") as stream:
+        stream.write(json.dumps(dict(session=index, **value)) + "\\n")
+def emit(value):
+    print(json.dumps(value), flush=True)
+def read_user():
+    assert select.select([sys.stdin], [], [], 1.5)[0], "stdin message did not arrive"
+    frame = json.loads(sys.stdin.readline())
+    record(dict(input=frame["message"]["content"]))
+    emit(dict(frame, isReplay=True))
+    return frame["message"]["content"]
+record(dict(command=sys.argv))
+emit(dict(type="system", subtype="init"))
+if "--input-format" in sys.argv:
+    prompt = read_user()
+else:
+    prompt = sys.argv[-1]
+record(dict(prompt=prompt))
+for action in plan:
+    if "usage" in action:
+        emit(dict(type="assistant", message=dict(content=[], usage=dict(input_tokens=action["usage"]))))
+    elif "read" in action:
+        for _ in range(action["read"]):
+            read_user()
+    elif "compact" in action:
+        emit(dict(type="system", subtype="compact_boundary"))
+    elif "sleep" in action:
+        time.sleep(action["sleep"])
+    elif "cancel" in action:
+        import signal
+        os.kill(os.getppid(), signal.SIGTERM)
+        time.sleep(2)
+    elif "result" in action:
+        emit(dict(type="result", subtype=action.get("subtype", "success"), result=action["result"]))
+    elif "exit" in action:
+        sys.exit(action["exit"])
+'''
+
+
+class BudgetTextChecks(unittest.TestCase):
+    def test_inbox_formats_budget_handoff_as_one_trimmed_line(self):
+        event = inbox.budget_event("123456789abc", "worker\nlabel", 3, 2, 5, 87999, "session", "  Check\n next step.  ")
+        self.assertEqual(inbox.format_text([event]),
+                         "123456789abc worker label | turn 3 | handoff 2 (total 5) | context 87k | next step: Check next step.")
+        event["next_step"] = "x" * 350
+        self.assertTrue(inbox.format_text([event]).endswith("next step: " + "x" * 300))
+
+    def test_handoff_marker_is_the_exact_first_nonblank_line(self):
+        self.assertTrue(budget.is_handoff("\n \n" + HANDOFF))
+        self.assertTrue(budget.is_handoff(" [claive-handoff]"))
+        self.assertTrue(budget.is_handoff("[claive-handoff] "))
+        for text in ("", "prefix\n" + HANDOFF, "[claive-handoff] extra"):
+            with self.subTest(text=text):
+                self.assertFalse(budget.is_handoff(text))
+
+    def test_handoff_marker_accepts_surrounding_whitespace(self):
+        self.assertTrue(budget.is_handoff("\n\t\n \t[claive-handoff]\t \n## Next step\nContinue."))
+
+    def test_next_step_body_is_stripped_and_limited(self):
+        self.assertEqual(budget.next_step(HANDOFF + "\n\n## Later\nIgnore"), "Check the next step.")
+        self.assertEqual(budget.next_step("## Next step\n\n  " + "x" * 350), "x" * 300)
+        self.assertEqual(budget.next_step("## Goal\nNothing"), "")
+
+    def test_message_texts_match_the_spec(self):
+        spec = (REPO / "docs/design-budget-mode.md").read_text()
+        def block_after(label):
+            return spec.split(label, 1)[1].split("```", 2)[1].strip("\n")
+        self.assertEqual(budget.TEMPLATE, block_after("Template:"))
+        values = {"stop": 95000}
+        self.assertEqual(budget.warn_message(85999, values), block_after("Warn:").format(
+            k=85, stop_k=95, template=budget.TEMPLATE))
+        self.assertEqual(budget.stop_message(95999, values, False), block_after("Stop:").format(k=95, stop_k=95))
+        self.assertEqual(budget.stop_message(95000, values, True),
+                         budget.stop_message(95000, values, False) + "\n\n" + budget.TEMPLATE)
+        continuation = block_after("Continuation prompt (`<job>/prompt-NNNN-hK.md`):")
+        self.assertEqual(budget.continuation_prompt(HANDOFF, "Task"),
+                         continuation.replace("{handoff text}", HANDOFF).replace("{original turn prompt}", "Task"))
+        self.assertEqual(budget.answer_prompt(HANDOFF, "Continue"),
+                         f"{budget.PREAMBLE}\n\n{HANDOFF}\n\n---\nParent message:\nContinue")
+
+
+class ClaudeBudgetChecks(unittest.TestCase):
+    def test_show_budget_on_after_handoff_in_text_and_json(self):
+        self.plan([{"result": HANDOFF}], [{"usage": 87999}, {"read": 1}, {"result": "done"}])
+        self.create()
+        code, state = self.supervise()
+        self.assertEqual(code, 0, state)
+        text = subprocess.run([str(REPO / "bin/claive"), "show", state["id"]], env=self.env,
+                              text=True, capture_output=True, timeout=5)
+        self.assertEqual(text.returncode, 0, text.stderr)
+        lines = text.stdout.splitlines()
+        index = next(index for index, line in enumerate(lines) if line.startswith("Live steering:"))
+        self.assertEqual(lines[index], "Live steering: True | pending 0 | acknowledged 0")
+        self.assertEqual(lines[index + 1], "Context budget: on | context 87k | warn 85k | stop 95k | "
+                         "compact 105k | handoffs 1 (this turn 1) | missed 0")
+        shown = subprocess.run([str(REPO / "bin/claive"), "show", state["id"], "--json"], env=self.env,
+                               text=True, capture_output=True, timeout=5)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        data = json.loads(shown.stdout)
+        self.assertEqual(data["budget"], {"enabled": True, "values": state["launch"]["budget"], "off_reason": None})
+        self.assertEqual((data["context_tokens"], data["handoffs"], data["turn_handoffs"], data["budget_missed"]),
+                         (87999, 1, 1, 0))
+        self.assertIsNone(data["pending_handoff"])
+        self.assertEqual((data["steering"]["pending"], data["steering"]["acknowledged"], data["steering"]["budget"]),
+                         (0, 0, 1))
+
+    def test_show_output_schema_budget_off_in_text_and_json(self):
+        self.plan([{"result": "done"}])
+        schema = self.workspace / "schema.json"
+        schema.write_text('{"type": "object"}')
+        self.create("--output-schema", str(schema))
+        code, state = self.supervise()
+        self.assertEqual(code, 0, state)
+        text = subprocess.run([str(REPO / "bin/claive"), "show", state["id"]], env=self.env,
+                              text=True, capture_output=True, timeout=5)
+        self.assertEqual(text.returncode, 0, text.stderr)
+        self.assertIn("Live steering: False | pending 0 | acknowledged 0\nContext budget: off (output schema)\n",
+                      text.stdout)
+        shown = subprocess.run([str(REPO / "bin/claive"), "show", state["id"], "--json"], env=self.env,
+                               text=True, capture_output=True, timeout=5)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        data = json.loads(shown.stdout)
+        self.assertEqual(data["budget"], {"enabled": False, "values": None, "off_reason": "output schema"})
+        self.assertEqual([data[key] for key in ("context_tokens", "handoffs", "turn_handoffs", "budget_missed")],
+                         [0, 0, 0, 0])
+        self.assertIsNone(data["pending_handoff"])
+        self.assertFalse(data["steering"]["enabled"])
+
+    def test_show_pending_handoff_path_after_limit(self):
+        self.plan([{"result": HANDOFF}])
+        state = self.create()
+        state["launch"]["budget"]["max_handoffs"] = 1
+        cli.save(self.path / "state.json", state)
+        code, state = self.supervise()
+        self.assertEqual(code, 3, state)
+        shown = subprocess.run([str(REPO / "bin/claive"), "show", state["id"]], env=self.env,
+                               text=True, capture_output=True, timeout=5)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn(f"Pending handoff: {state['pending_handoff']} (answer or followup continues from it)\n",
+                      shown.stdout)
+        data = cli.load(self.path)
+        self.assertEqual(data["pending_handoff"], state["pending_handoff"])
+
+    def test_show_pre_budget_worker_has_defaults_and_launch_reason(self):
+        state = self.create()
+        state["launch"].pop("budget")
+        state["launch"].pop("budget_off_reason")
+        cli.save(self.path / "state.json", state)
+        shown = subprocess.run([str(REPO / "bin/claive"), "show", state["id"]], env=self.env,
+                               text=True, capture_output=True, timeout=5)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn("Context budget: off (not set at launch)\n", shown.stdout)
+        shown = subprocess.run([str(REPO / "bin/claive"), "show", state["id"], "--json"], env=self.env,
+                               text=True, capture_output=True, timeout=5)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        data = json.loads(shown.stdout)
+        self.assertEqual(data["budget"], {"enabled": False, "values": None, "off_reason": None})
+        self.assertEqual([data[key] for key in ("context_tokens", "handoffs", "turn_handoffs", "budget_missed")],
+                         [0, 0, 0, 0])
+        self.assertIsNone(data["pending_handoff"])
+
+    def test_other_engines_have_no_budget_enrichment_or_report_line(self):
+        state = self.create()
+        state["engine"] = "codex"
+        cli.save(self.path / "state.json", state)
+        self.assertIsNone(cli.load(self.path)["budget"])
+        shown = subprocess.run([str(REPO / "bin/claive"), "show", state["id"]], env=self.env,
+                               text=True, capture_output=True, timeout=5)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertNotIn("Context budget:", shown.stdout)
+
+    def test_steering_summary_separates_budget_and_parent_receipts_for_current_turn(self):
+        state = self.create()
+        directory = self.path / "steering/receipts"
+        directory.mkdir(parents=True)
+        records = [{"turn": 1, "status": status, **source}
+                   for source in ({}, {"source": "parent"}, {"source": "budget"})
+                   for status in ("pending", "sent", "acknowledged", "not_delivered")]
+        records.append({"turn": 2, "status": "acknowledged", "source": "budget"})
+        for index, record in enumerate(records):
+            (directory / f"{index:032x}.json").write_text(json.dumps(record))
+        summary = cli.steering.summary(self.path, state)
+        self.assertEqual((summary["pending"], summary["acknowledged"], summary["budget"]), (4, 2, 4))
+        self.assertEqual(len(summary["receipts"]), 12)
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="claive-budget-")
+        self.addCleanup(temp.cleanup)
+        self.workspace = Path(temp.name)
+        self.binary = self.workspace / "claude"
+        self.binary.write_text(FIXTURE)
+        self.binary.chmod(0o755)
+        self.prompt = self.workspace / "task.md"
+        self.prompt.write_text("Complete the original assignment.")
+        self.registry = self.workspace / "state"
+        self.env = dict(os.environ, CLAIVE_DIR=str(self.registry), CLAUDE_WORKER_BINARY=str(self.binary),
+                        CLAUDE_CONFIG_DIR=str(self.workspace / "claude-config"),
+                        CLAIVE_CONFIG=str(self.workspace / "config.json"), BUDGET_FIXTURE_DIR=str(self.workspace))
+        env_patch = patch.dict(os.environ, self.env)
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+        previous_launcher = cli.SCRIPT
+        cli.set_launcher_path(REPO / "bin/claive")
+        self.addCleanup(setattr, cli, "SCRIPT", previous_launcher)
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            self.addCleanup(signal.signal, sig, signal.getsignal(sig))
+
+    def plan(self, *sessions):
+        (self.workspace / "plan.json").write_text(json.dumps(sessions))
+
+    def create(self, *extra):
+        args = cli.parser().parse_args(["run", "--engine", "claude", "--workspace", str(self.workspace),
+                                        "--prompt-file", str(self.prompt), *extra])
+        self.path, state = cli.create_job(args)
+        return state
+
+    def supervise(self):
+        code = cli.supervise(self.path.name)
+        return code, json.loads((self.path / "state.json").read_text())
+
+    def calls(self, key):
+        return [record[key] for record in map(json.loads, (self.workspace / "calls.jsonl").read_text().splitlines())
+                if key in record]
+
+    def receipts(self):
+        return [json.loads(file.read_text()) for file in (self.path / "steering/receipts").glob("*.json")]
+
+    def test_warn_and_stop_arrive_once_with_budget_receipts(self):
+        self.plan([{"usage": 85000}, {"usage": 86000}, {"read": 1},
+                   {"usage": 95000}, {"usage": 96000}, {"read": 1}, {"result": "done"}])
+        self.create()
+        code, state = self.supervise()
+        self.assertEqual(code, 0, state)
+        messages = self.calls("input")[1:]
+        self.assertEqual(messages, [budget.warn_message(85000, state["launch"]["budget"]),
+                                    budget.stop_message(95000, state["launch"]["budget"], False)])
+        receipts = self.receipts()
+        self.assertEqual(len(receipts), 2)
+        self.assertTrue(all(item["source"] == "budget" and item["status"] == "acknowledged" for item in receipts))
+        self.assertEqual((state["context_tokens"], state["budget_phase"]), (96000, "stopping"))
+        self.assertNotIn("budget_error", state)
+
+    def test_jump_to_stop_carries_template_without_warn(self):
+        self.plan([{"usage": 100000}, {"read": 1}, {"result": "done"}])
+        self.create()
+        code, state = self.supervise()
+        self.assertEqual(code, 0, state)
+        self.assertEqual(self.calls("input")[1:], [budget.stop_message(100000, state["launch"]["budget"], True)])
+        self.assertEqual(len(self.receipts()), 1)
+
+    def test_handoff_changes_session_and_checks_only_final_report(self):
+        self.plan([{"usage": 85000}, {"read": 1}, {"result": HANDOFF}],
+                  [{"usage": 95000}, {"read": 1}, {"result": FINAL}])
+        initial = self.create("--report")
+        original = Path(initial["prompt_file"]).read_text()
+        with patch.object(cli, "record_report", wraps=cli.record_report) as report:
+            code, state = self.supervise()
+        self.assertEqual(code, 0, state)
+        self.assertEqual(report.call_count, 1)
+        self.assertEqual(report.call_args.args[1], FINAL)
+        self.assertEqual(state["report_state"], "ok")
+        commands = self.calls("command")
+        sessions = [command[command.index("--session-id") + 1] for command in commands]
+        self.assertEqual(len(set(sessions)), 2)
+        self.assertEqual(sessions[-1], state["session_id"])
+        self.assertEqual(self.calls("prompt")[1], budget.continuation_prompt(HANDOFF, original))
+        self.assertEqual((self.path / "handoffs/turn-0001-1.md").read_text(), HANDOFF)
+        self.assertEqual((self.path / "result.txt").read_text(), FINAL)
+        self.assertEqual((self.path / "results/turn-0001.txt").read_text(), FINAL)
+        self.assertEqual((state["handoffs"], state["turn_handoffs"], state["context_tokens"]), (1, 1, 95000))
+        self.assertEqual(len(self.receipts()), 2)
+        self.assertTrue(all(item["status"] == "acknowledged" for item in self.receipts()))
+        events = [json.loads(line) for line in (self.registry / "inbox.jsonl").read_text().splitlines()]
+        event = next(item for item in events if item["type"] == "budget_handoff")
+        expected = inbox.budget_event(state["id"], state["label"], 1, 1, 1, 85000, sessions[1], "Check the next step.")
+        for key in expected.keys() - {"seq", "at"}:
+            self.assertEqual(event[key], expected[key])
+        self.assertIsInstance(event["seq"], int)
+        self.assertTrue(event["at"].endswith("Z"))
+
+    def test_haiku_allows_three_handoffs_in_one_turn(self):
+        self.plan(*([[{"result": HANDOFF}]] * 3), [{"result": "done"}])
+        self.create()
+        code, state = self.supervise()
+        self.assertEqual(code, 0, state)
+        self.assertEqual((state["handoffs"], state["turn_handoffs"]), (3, 3))
+        self.assertNotIn("needs_parent", state)
+        self.assertEqual(len(list((self.path / "handoffs").glob("*.md"))), 3)
+        self.assertEqual(self.calls("prompt")[-1], budget.continuation_prompt(HANDOFF, self.prompt.read_text()))
+
+    def test_handoff_limit_returns_parent_decision_with_pending_file(self):
+        self.plan([{"result": HANDOFF}], [{"result": HANDOFF}])
+        state = self.create("--report")
+        state["launch"]["budget"]["max_handoffs"] = 2
+        cli.save(self.path / "state.json", state)
+        with patch.object(cli, "record_report", wraps=cli.record_report) as report:
+            code, state = self.supervise()
+        self.assertEqual(code, 3, state)
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(state["needs_parent"]["kind"], "budget_limit")
+        self.assertEqual(state["pending_handoff"], str(self.path / "handoffs/turn-0001-2.md"))
+        self.assertIn(state["pending_handoff"], state["needs_parent"]["question"])
+        self.assertEqual(Path(state["pending_handoff"]).read_text(), HANDOFF)
+        self.assertEqual((state["handoffs"], state["turn_handoffs"]), (2, 2))
+        self.assertEqual(report.call_count, 0)
+        self.assertEqual((self.path / "result.txt").read_text(), HANDOFF)
+        last_command = self.calls("command")[-1]
+        self.assertNotEqual(state["session_id"], last_command[last_command.index("--session-id") + 1])
+
+    def test_compaction_counts_missed_and_resets_phase(self):
+        self.plan([{"usage": 85000}, {"read": 1}, {"compact": True},
+                   {"usage": 85000}, {"read": 1}, {"result": "done"}])
+        self.create()
+        code, state = self.supervise()
+        self.assertEqual(code, 0, state)
+        self.assertEqual(state["budget_missed"], 1)
+        self.assertEqual(len(self.receipts()), 2)
+        self.assertEqual(state["budget_phase"], "warned")
+
+    def test_submit_value_error_is_recorded_without_failing_turn(self):
+        self.plan([{"usage": 85000}, {"result": "done"}])
+        self.create()
+        with patch.object(cli.steering, "submit", side_effect=ValueError("transport unavailable")):
+            code, state = self.supervise()
+        self.assertEqual(code, 0, state)
+        self.assertEqual(state["budget_error"], "transport unavailable")
+
+    def test_failed_session_does_not_count_as_handoff(self):
+        self.plan([{"result": HANDOFF}, {"exit": 1}])
+        self.create()
+        code, state = self.supervise()
+        self.assertEqual(code, 1, state)
+        self.assertEqual(state["handoffs"], 0)
+        self.assertFalse((self.path / "handoffs").exists())
+
+    def test_turn_timeout_spans_budget_continuations(self):
+        self.plan([{"sleep": 0.6}, {"result": HANDOFF}], [{"sleep": 2}, {"result": "too late"}])
+        self.create("--turn-timeout", "1")
+        started = time.monotonic()
+        code, state = self.supervise()
+        elapsed = time.monotonic() - started
+        self.assertEqual(code, 1, state)
+        self.assertEqual(state["failure_kind"], "timeout")
+        self.assertEqual(state["handoffs"], 1)
+        self.assertLess(elapsed, 1.55)
+
+    def test_model_fallback_still_restarts_the_timeout(self):
+        self.plan([{"sleep": 0.4}, {"result": "retry", "subtype": "error"}, {"exit": 1}],
+                  [{"sleep": 0.4}, {"result": "done"}])
+        self.create("--turn-timeout", "0.7", "--fallback-models", "claude-sonnet-5-5")
+        code, state = self.supervise()
+        self.assertEqual(code, 0, state)
+        self.assertEqual(state["model"], "claude-sonnet-5-5")
+        self.assertEqual(len(state["fallbacks"]), 1)
+        self.assertEqual(state["handoffs"], 0)
+
+    def test_cancelled_session_does_not_count_as_handoff(self):
+        self.plan([{"result": HANDOFF}, {"cancel": True}])
+        self.create()
+        code, state = self.supervise()
+        self.assertEqual(code, 130, state)
+        self.assertEqual(state["status"], "cancelled")
+        self.assertEqual(state["handoffs"], 0)
+
+    def test_budget_continues_without_session_logging(self):
+        self.plan([{"result": HANDOFF}], [{"result": "done"}])
+        self.create("--no-session-log")
+        code, state = self.supervise()
+        self.assertEqual(code, 0, state)
+        self.assertIsNone(state["session_id"])
+        self.assertEqual(state["handoffs"], 1)
+        self.assertTrue(all("--no-session-persistence" in command for command in self.calls("command")))
+
+    def test_answer_after_limit_delivers_handoff_and_resets_turn_count(self):
+        self.plan([{"result": HANDOFF}], [{"result": HANDOFF}], [{"result": FINAL}])
+        Path(self.env["CLAIVE_CONFIG"]).write_text(json.dumps({"engines": {"claude": {"budget": {
+            "models": {"claude-haiku-5-5": {"max_handoffs": 2}}}}}}))
+        launcher = str(REPO / "bin/claive")
+        process = subprocess.Popen([launcher, "open", "--engine", "claude", "--workspace", str(self.workspace),
+                                    "--prompt-file", str(self.prompt), "--report"], env=self.env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        def cleanup():
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+        self.addCleanup(cleanup)
+        def idle(turn):
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                for file in self.registry.glob("*/state.json"):
+                    state = json.loads(file.read_text())
+                    if state.get("status") == "idle" and state["turn"] == turn:
+                        self.path = file.parent
+                        return state
+                if process.poll() is not None:
+                    self.fail(f"reusable worker exited: {process.communicate()}")
+                time.sleep(0.02)
+            self.fail(f"turn {turn} did not become idle")
+        first = idle(1)
+        self.assertEqual(first["needs_parent"]["kind"], "budget_limit")
+        self.assertEqual(cli.outcome_code(first), 3)
+        answer = subprocess.run([launcher, "answer", first["id"], "--message", "Continue with the next step."],
+                                env=self.env, text=True, capture_output=True, timeout=5)
+        self.assertEqual(answer.returncode, 0, answer.stderr)
+        second = idle(2)
+        self.assertNotIn("pending_handoff", second)
+        self.assertNotIn("needs_parent", second)
+        self.assertEqual((second["handoffs"], second["turn_handoffs"]), (2, 0))
+        self.assertEqual(second["report_state"], "ok")
+        prompt = self.calls("prompt")[-1]
+        self.assertTrue(prompt.startswith(budget.PREAMBLE + "\n\n" + HANDOFF))
+        self.assertIn("---\nParent message:\n", prompt)
+        self.assertIn("Continue with the next step.", prompt)
+        self.assertTrue(prompt.endswith(cli.REPORT_CONTRACT))
+        self.assertEqual(Path(second["turn_prompt_file"]).read_text(), prompt)
+        closed = subprocess.run([launcher, "close", first["id"]], env=self.env,
+                                text=True, capture_output=True, timeout=5)
+        self.assertEqual(closed.returncode, 0, closed.stderr)
+        process.communicate(timeout=5)
+        self.assertEqual(process.returncode, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

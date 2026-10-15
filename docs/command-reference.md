@@ -653,6 +653,10 @@ Exit codes: 0 on success. Common errors apply.
 
 Example: `claive show @backend --json`.
 
+Claude workers add a `Context budget:` line: context tokens, warn, stop and compaction limits,
+handoffs and missed handoffs, or `off (reason)`. JSON adds `budget`, `context_tokens`, `handoffs`,
+`turn_handoffs`, `budget_missed` and `pending_handoff`.
+
 ## `logs`
 
 Print the last event or stderr lines.
@@ -768,6 +772,9 @@ claive inbox [--consumer CONSUMER] [--peek] [--json]
 Exit codes: 0 on success. Common errors apply.
 
 Example: `claive inbox --consumer codex --peek --json`.
+
+A `budget_handoff` event records a Claude context handoff: turn, handoff number, total,
+context tokens, new session ID and the first 300 characters of the handoff's Next step.
 
 ## `batch`
 

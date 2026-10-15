@@ -303,7 +303,11 @@ identifier = sys.argv[sys.argv.index("--resume") + 1] if "--resume" in sys.argv 
 session = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects/test" / (identifier + ".jsonl")
 session.parent.mkdir(parents=True, exist_ok=True)
 session.touch()
-answer = json.dumps({"prompt": sys.argv[-1], "resumed": "--resume" in sys.argv, "tools": sys.argv[sys.argv.index("--tools") + 1]})
+if "--input-format" in sys.argv:  # budget mode (default on) sends the prompt as a stream-json frame
+    prompt = json.loads(sys.stdin.readline())["message"]["content"]
+else:
+    prompt = sys.argv[-1]
+answer = json.dumps({"prompt": prompt, "resumed": "--resume" in sys.argv, "tools": sys.argv[sys.argv.index("--tools") + 1]})
 print(json.dumps({"type":"result", "subtype":"success", "result":answer}))
 ''')
         fake_claude.chmod(0o700)

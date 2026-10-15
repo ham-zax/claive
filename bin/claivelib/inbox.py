@@ -31,6 +31,12 @@ def batch_event(batch_id, label, status, code, mission):
                 label=label, status=status, code=code, mission=mission)
 
 
+def budget_event(job_id, label, turn, handoff, handoffs, context_tokens, session_id, next_step):
+    return dict(type="budget_handoff", seq=time.time_ns(), at=_now_iso(), id=job_id,
+                label=label, turn=turn, handoff=handoff, handoffs=handoffs,
+                context_tokens=context_tokens, session_id=session_id, next_step=next_step)
+
+
 def append(event):
     line = (json.dumps(event, ensure_ascii=True) + "\n").encode()
     path = _root() / "inbox.jsonl"
@@ -151,6 +157,12 @@ def format_text(events):
         label = event.get("label", "")
         if event.get("type") == "batch":
             line = f"batch {event.get('id')} {badge} code={event.get('code')} {label}"
+        elif event.get("type") == "budget_handoff":
+            label = " ".join(str(label).split())
+            step = " ".join(str(event.get("next_step") or "").split())[:300]
+            line = (f"{event.get('id')} {label} | turn {event.get('turn')} | "
+                    f"handoff {event.get('handoff')} (total {event.get('handoffs')}) | "
+                    f"context {event.get('context_tokens', 0) // 1000}k | next step: {step}")
         elif event.get("type") == "conversation":
             line = f"conversation {event.get('id')} {badge} code={event.get('code')}"
             if event.get("needs_parent"):

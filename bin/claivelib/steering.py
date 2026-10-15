@@ -18,7 +18,7 @@ def receipt(path, identifier):
     return json.loads((path / "steering" / "receipts" / f"{identifier}.json").read_text())
 
 
-def submit(path, message, expires_at=None):
+def submit(path, message, expires_at=None, source=None):
     from claivelib import cli
     if not isinstance(message, str) or not message.strip() or len(message.encode()) > 1024 * 1024:
         raise ValueError("steering requires a nonblank message of at most 1 MiB")
@@ -36,6 +36,8 @@ def submit(path, message, expires_at=None):
             raise ValueError("current steering turn has ended")
         identifier = uuid.uuid4().hex
         record = dict(id=identifier, turn=state.get("turn", 1), status="pending", created_at=time.time())
+        if source is not None:
+            record["source"] = source
         atomic(path / "steering" / "receipts" / f"{identifier}.json", record)
         request = dict(record, message=message)
         if expires_at is not None:
@@ -74,9 +76,11 @@ def summary(path, state):
                 records.append(item)
         except (OSError, ValueError, AttributeError):
             continue
+    parent_records = [item for item in records if item.get("source") != "budget"]
     return dict(capability=capability, enabled=bool(launch.get("steering")), receipts=records,
-                pending=sum(item["status"] in {"pending", "sent"} for item in records),
-                acknowledged=sum(item["status"] == "acknowledged" for item in records))
+                pending=sum(item["status"] in {"pending", "sent"} for item in parent_records),
+                acknowledged=sum(item["status"] == "acknowledged" for item in parent_records),
+                budget=sum(item.get("source") == "budget" for item in records))
 
 
 class Transport:

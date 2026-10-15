@@ -44,7 +44,11 @@ TOP_LEVEL_KEYS = {"default_engine", "roles", "providers", "workspaces", "engines
 ENGINE_KEYS = {
     "enabled": bool, "reason": str, "default_model": str, "default_reasoning_effort": str,
     "disabled_models": (list, dict), "disabled_reasoning_efforts": (list, dict), "models": dict,
-    "user_config": bool, "extra_args": list,
+    "user_config": bool, "extra_args": list, "budget": (bool, dict),
+}
+CLAUDE_BUDGET_DEFAULTS = {
+    "default": {"warn": 135000, "stop": 145000, "max_handoffs": 7},
+    "claude-haiku-5-5": {"warn": 85000, "stop": 95000, "max_handoffs": None},
 }
 # Flags each engine's command builder owns: output format, print mode, model, effort, session, resume.
 OWNED_FLAGS = {
@@ -150,11 +154,15 @@ def load():
         for key, value in policy.items():
             if key == "user_config" and name != "codex":
                 raise ValueError(f"{where}.user_config is only for codex")
+            if key == "budget" and name != "claude":
+                raise ValueError(f"{where}.budget is only for claude")
             expected = ENGINE_KEYS.get(key)
             if expected is None:
                 raise ValueError(f"{where}: unknown key {key}")
             if not isinstance(value, expected):
                 raise ValueError(f"{where}.{key} has the wrong type")
+        if "budget" in policy:
+            _validate_claude_budget(policy["budget"], f"{where}.budget")
         extra = policy.get("extra_args", [])
         if not all(isinstance(item, str) and item for item in extra):
             raise ValueError(f"{where}.extra_args must hold nonempty strings")
@@ -187,6 +195,61 @@ def load():
         raise ValueError(f"invalid claive config {path}: default_engine {engine} is disabled in engines.{engine}")
     _validate_teams(data.get("teams", {}), path, set(BUILTIN_ROLES) | set(roles))
     return data
+
+
+def _claude_budget_values(model, budget):
+    models = budget.get("models", {}) if isinstance(budget, dict) else {}
+    values = dict(CLAUDE_BUDGET_DEFAULTS["default"])
+    values.update(CLAUDE_BUDGET_DEFAULTS.get(model, {}))
+    values.update(models.get("default", {}))
+    values.update(models.get(model, {}))
+    return values
+
+
+def _validate_claude_budget(budget, where):
+    if isinstance(budget, bool):
+        return
+    unknown = sorted(set(budget) - {"enabled", "models"})
+    if unknown:
+        raise ValueError(f"{where}: unknown keys {', '.join(unknown)}")
+    if not isinstance(budget.get("enabled", True), bool):
+        raise ValueError(f"{where}.enabled must be a boolean")
+    models = budget.get("models", {})
+    if not isinstance(models, dict):
+        raise ValueError(f"{where}.models must be an object")
+    for model, entry in models.items():
+        entry_where = f"{where}.models.{model}"
+        if not isinstance(model, str) or not model or not isinstance(entry, dict):
+            raise ValueError(f"{entry_where} must be an object for a nonempty model name")
+        unknown = sorted(set(entry) - {"warn", "stop", "max_handoffs"})
+        if unknown:
+            raise ValueError(f"{entry_where}: unknown keys {', '.join(unknown)}")
+    for model in set(CLAUDE_BUDGET_DEFAULTS) | set(models):
+        entry_where = f"{where}.models.{model}"
+        values = _claude_budget_values(model, budget)
+        for key in ("warn", "stop"):
+            value = values[key]
+            if type(value) is not int or value % 1000:
+                raise ValueError(f"{entry_where}.{key} must be an integer and a multiple of 1000")
+        if values["warn"] >= values["stop"]:
+            raise ValueError(f"{entry_where}.warn must be less than stop")
+        if not 57000 <= values["stop"] <= 957000:
+            raise ValueError(f"{entry_where}.stop must be between 57000 and 957000")
+        maximum = values["max_handoffs"]
+        if maximum is not None and (type(maximum) is not int or maximum < 1):
+            raise ValueError(f"{entry_where}.max_handoffs must be an integer >= 1 or null")
+
+
+def claude_budget(model, data=None):
+    """Resolve the launch budget once, merging each model over the built-in values."""
+    if data is None:
+        data = load()
+    budget = data.get("engines", {}).get("claude", {}).get("budget", True)
+    if budget is False or (isinstance(budget, dict) and budget.get("enabled") is False):
+        return None, "config"
+    values = _claude_budget_values(model, budget)
+    values["compact"] = values["stop"] + 10000
+    return values, None
 
 
 def _validate_teams(teams, path, role_names):

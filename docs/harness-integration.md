@@ -220,7 +220,8 @@ Skills, MCP and context files load. See [Pi engine](pi-engine.md).
 Claive reloads config when commands need policy. `engines.<name>` accepts
 `enabled`, `reason`, `default_model`, `default_reasoning_effort`,
 `disabled_models`, `disabled_reasoning_efforts`, `models`, and `extra_args`.
-`user_config` applies only to Codex. `enabled: false` refuses the whole engine.
+`user_config` applies only to Codex. `budget` applies only to Claude.
+`enabled: false` refuses the whole engine.
 Defaults and allowlists cannot expand the engine's supported models or efforts.
 
 `extra_args` is an opt-in list of nonempty strings. Claive inserts them before
@@ -242,6 +243,20 @@ First-prompt order is role, team header, collaboration, project, context files,
 task, report contract. `--context-file` repeats up to ten times, in order.
 Layer files must be absolute, nonempty UTF-8 text, and at most 256 KiB.
 Duplicate context files are refused. Follow-ups keep the retained session.
+
+### Claude context budget
+
+`engines.claude.budget` is on by default. Built-in limits: Haiku warns at 85k and stops at 95k
+tokens with no handoff limit. Other models warn at 135k, stop at 145k and allow 7 handoffs per
+turn. Config entries merge over these per model and per key. `budget: false` turns it off.
+At the warn limit claive asks the worker to reach a checkpoint. At the stop limit claive asks it
+to stop. The worker then ends its turn with a reply that starts with `[claive-handoff]`.
+claive saves the reply in `<job>/handoffs/` and continues the same turn in a new session.
+The inbox gets a `budget_handoff` event for each handoff.
+At the handoff limit the turn exits 3 with `needs_parent.kind == "budget_limit"`.
+`claive answer` or `followup` is the permission to continue from the pending handoff.
+`--turn-timeout` covers all sessions of the turn. Claude's own compaction at stop + 10k is the
+fallback. `show` counts each compaction as `missed`. Spec: [design-budget-mode.md](design-budget-mode.md).
 
 ## Forks, schedules, monitors and channels
 

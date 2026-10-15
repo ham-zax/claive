@@ -45,6 +45,11 @@ Claude Code 2.1.296 smoke on 2026-10-13 (Haiku 5.5) steered during a 10-second B
 completed the same turn with the steered `CLAIVE_STEER_VERIFIED` marker. An instruction that
 arrives after the last model request of the turn is not replayed and ends `unconfirmed`.
 
+Context budget mode (on by default for Claude) turns steering on without the flag. claive
+then steers the worker itself with the budget warn and stop messages. Their receipts carry
+`source: "budget"`. `show` counts them apart from parent steering. Budget mode is off with
+`--output-schema`, `--fallback-models` or `engines.claude.budget: false`.
+
 `--message-file /abs/instruction.md` reads an instruction from an absolute path.
 This sends a correlated `steer` command into the running agent process. Pi queues
 the instruction after current tool calls finish and before the next model request. It does not change

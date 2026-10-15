@@ -1,4 +1,4 @@
-"""Claude Code engine (headless stream-json), strictly locked to Haiku 5.5."""
+"""Claude Code engine (headless stream-json). The claive config, not this module, decides the allowed models."""
 import json
 import os
 from pathlib import Path
@@ -8,10 +8,20 @@ from datetime import datetime, timezone
 from claivelib.engine import SteeringCapability, WorkerEngine
 from claivelib.state import launch_config, session_id
 
-CLAUDE_MODEL = "claude-haiku-5-5"
+CLAUDE_MODEL = "claude-haiku-5-5"  # the default when the config names no model
+CLAUDE_MODELS = ("claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1")
 CLAUDE_PROVIDER = "anthropic"
-# Claude Code rejects anything below 100k, so this is the earliest compaction it allows.
-AUTOCOMPACT_WINDOW = "100k"
+HAIKU_COMPACTION_POINT = 105000
+DEFAULT_COMPACTION_POINT = 155000
+BUDGET_COMPACTION_MARGIN = 10000
+# Claude Code 2.1.300 compacts 33000 tokens before the configured window.
+AUTOCOMPACT_OFFSET = 33000
+
+
+def compaction_point(model, budget):
+    if isinstance(budget, dict):
+        return budget["stop"] + BUDGET_COMPACTION_MARGIN
+    return HAIKU_COMPACTION_POINT if "haiku" in model.lower() else DEFAULT_COMPACTION_POINT
 
 
 def default_binary():
@@ -30,7 +40,7 @@ class ClaudeEngine(WorkerEngine):
     efforts = {"low", "medium", "high", "xhigh", "max"}
 
     def supported_models(self):
-        return {CLAUDE_MODEL: ("low", "medium", "high", "xhigh", "max")}
+        return {model: ("low", "medium", "high", "xhigh", "max") for model in CLAUDE_MODELS}
 
     def __init__(self):
         self._last_text = ""
@@ -65,7 +75,9 @@ class ClaudeEngine(WorkerEngine):
     def resolve_launch(self, **options):
         return {
             "binary": default_binary(),
-            "steering": bool(options.get("steering")),
+            "steering": bool(options.get("steering")) or isinstance(options.get("budget"), dict),
+            "budget": options.get("budget"),
+            "budget_off_reason": options.get("budget_off_reason"),
             "provider": options.get("provider") or CLAUDE_PROVIDER,
             "model": options.get("model") or CLAUDE_MODEL,
             "read_only": bool(options.get("read_only")),
@@ -101,8 +113,8 @@ class ClaudeEngine(WorkerEngine):
 
     @staticmethod
     def _check_model(model):
-        if model != CLAUDE_MODEL:
-            raise ValueError(f"the claude engine is locked to {CLAUDE_MODEL}, not {model}")
+        if not isinstance(model, str) or not model:
+            raise ValueError("the claude engine needs a model name")
 
     def validate_turn(self, request):
         self._check_model(request.model)
@@ -121,11 +133,12 @@ class ClaudeEngine(WorkerEngine):
 
     def build_command(self, request):
         self.validate_turn(request)
+        point = compaction_point(request.model, request.budget)
         command = [
             request.binary, "--print", "--output-format", "stream-json", "--verbose",
             "--model", request.model, "--effort", request.reasoning_effort,
             "--tools", "default", "--permission-mode", "plan" if request.read_only else "bypassPermissions",
-            "--autocompact", AUTOCOMPACT_WINDOW,
+            "--autocompact", f"{(point + AUTOCOMPACT_OFFSET) // 1000}k",
             # Isolate user/project settings so the parent's hooks and permission rules do not run in workers.
             "--setting-sources", "",
         ]
@@ -231,11 +244,13 @@ class ClaudeEngine(WorkerEngine):
             self._last_text = ""
             if isinstance(event.get("session_id"), str):
                 return [{"type": "session_bound", "native_kind": kind, "session_id": event["session_id"]}]
+        elif kind == "system" and event.get("subtype") == "compact_boundary":
+            return [{"type": "context_compacted", "native_kind": kind}]
         elif kind == "assistant":
             message = event.get("message")
             blocks = message.get("content") if isinstance(message, dict) else None
+            result = []
             if isinstance(blocks, list):
-                result = []
                 for block in blocks:
                     if not isinstance(block, dict):
                         continue
@@ -245,7 +260,16 @@ class ClaudeEngine(WorkerEngine):
                     elif block.get("type") == "text":
                         self._last_text = block.get("text", "")
                         result.append({"type": "output_delta", "native_kind": kind})
-                return result or [{"type": "model_step", "native_kind": kind}]
+                result = result or [{"type": "model_step", "native_kind": kind}]
+            else:
+                result = [{"type": "activity", "native_kind": kind}]
+            usage = message.get("usage") if isinstance(message, dict) else None
+            if isinstance(usage, dict) and event.get("parent_tool_use_id") is None:
+                tokens = sum(value for key in
+                             ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+                             if isinstance(value := usage.get(key), int) and not isinstance(value, bool))
+                result.append({"type": "context_usage", "native_kind": kind, "tokens": tokens})
+            return result
         elif kind == "user" and event.get("isReplay"):
             identifier = str(event.get("uuid") or "").replace("-", "")
             return [{"type": "control_response", "native_kind": kind, "id": identifier, "command": "steer",

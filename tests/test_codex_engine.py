@@ -1,9 +1,11 @@
 import hermetic  # noqa: F401  (must run before claivelib reads the environment)
+import json
 import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "bin"))
@@ -114,7 +116,7 @@ class CodexChecks(unittest.TestCase):
         self.assertFalse([part for part in command if "compact" in part])
         self.assertIn('model_reasoning_effort="max"', command)
         self.assertIn('sandbox_mode="read-only"', command)
-        self.assertIn('web_search="disabled"', command)
+        self.assertIn('web_search="live"', command)
         self.assertEqual(command[-2:], ["--", "--do the thing\n"])
         writer = self.engine.build_command(self.request(web=True))
         self.assertIn(YOLO, writer)
@@ -124,15 +126,37 @@ class CodexChecks(unittest.TestCase):
         rollout.write_text("")
         resumed = self.engine.build_command(self.request())
         self.assertEqual(resumed[1:3], ["exec", "resume"])
-        self.assertEqual(resumed[resumed.index(THREAD) - 1], 'web_search="disabled"')
+        self.assertEqual(resumed[resumed.index(THREAD) - 1], 'web_search="live"')
         self.assertIn("--ephemeral", self.engine.build_command(
             self.request(session_id=None, session_logging=False)))
+
+    def test_fork_uses_app_server_thread_fork_for_both_turn_modes(self):
+        forked = self.engine.build_command(self.request(fork_session_id=THREAD))
+        self.assertIn("--fork", forked)
+        self.assertEqual(forked[forked.index("--fork") + 1], THREAD)
+        self.assertIn("--initial-prompt-file", forked)
+        self.assertNotIn("--resume", forked)
+
+        steered = self.engine.build_command(self.request(fork_session_id=THREAD, steering=True))
+        self.assertIn("--fork", steered)
+        self.assertNotIn("--resume", steered)
+        self.assertNotIn("--initial-prompt-file", steered)
+
+    def test_extra_args_are_refused_on_app_server_turns(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.json"
+            config.write_text(json.dumps({"engines": {"codex": {"extra_args": ["--profile", "p"]}}}))
+            with patch.dict(os.environ, {"CLAIVE_CONFIG": str(config)}):
+                command = cli.build_command(self.engine, self.request())
+                self.assertLess(command.index("--profile"), command.index("--"))
+                with self.assertRaisesRegex(ValueError, "codex exec turns only"):
+                    cli.build_command(self.engine, self.request(steering=True))
 
     def test_yolo_opt_out_keeps_the_sandboxed_command(self):
         expected = [str(self.binary), "exec", "--json", "--skip-git-repo-check", "--ignore-user-config",
                     "--ignore-rules", "-m", CODEX_MODEL, "-c", 'model_reasoning_effort="max"',
                     "-c", 'sandbox_mode="workspace-write"', "-c", 'approval_policy="never"',
-                    "-c", 'web_search="disabled"', "--cd", str(self.root), "--", "--do the thing\n"]
+                    "-c", 'web_search="live"', "--cd", str(self.root), "--", "--do the thing\n"]
         for value in ("0", "no", "off", "FALSE"):
             with self.subTest(value=value):
                 os.environ["CLAIVE_CODEX_YOLO"] = value
@@ -183,6 +207,19 @@ class CodexChecks(unittest.TestCase):
         self.assertEqual(yolo[1:1 + len(shape)], shape)
         self.assertEqual(yolo, plain[:start] + [YOLO] + plain[start + 4:])
         self.assertFalse([part for part in yolo if "sandbox_mode" in part or "approval_policy" in part])
+
+    def test_user_config_policy_or_environment_applies_to_both_paths(self):
+        config = self.root / "config.json"
+        for enabled, env_value in ((False, "0"), (True, "0"), (False, "1"), (True, "1")):
+            config.write_text(json.dumps({"engines": {"codex": {"user_config": enabled}}}))
+            with self.subTest(enabled=enabled, env_value=env_value), patch.dict(
+                    os.environ, CLAIVE_CONFIG=str(config), CLAIVE_CODEX_USE_USER_CONFIG=env_value):
+                opted = enabled or env_value == "1"
+                plain = self.engine.build_command(self.request())
+                self.assertEqual("--ignore-user-config" not in plain, opted)
+                self.assertIn("--ignore-rules", plain)
+                steered = self.engine.build_command(self.request(steering=True))
+                self.assertEqual("--user-config" in steered, opted)
 
     def test_yolo_write_turn_bypasses_sandbox_on_exec(self):
         self.assert_yolo_swaps_the_sandbox_overrides(["exec"])

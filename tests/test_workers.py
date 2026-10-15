@@ -407,7 +407,8 @@ class WorkerChecks(unittest.TestCase):
         before = set(self.registry.iterdir()) if self.registry.exists() else set()
         result = self.cli("start", "--workspace", str(repo), "--prompt-file", str(prompt), "--worktree", "--report")
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(set(self.registry.iterdir()) - before, set())
+        after = set(self.registry.iterdir()) if self.registry.exists() else set()
+        self.assertEqual(after - before, set())
         trees = subprocess.check_output(["git", "worktree", "list", "--porcelain"], cwd=repo, text=True)
         self.assertEqual(trees.count("worktree "), 1, trees)
         branches = subprocess.check_output(["git", "branch", "--list", "claive/*"], cwd=repo, text=True)
@@ -461,15 +462,85 @@ class WorkerChecks(unittest.TestCase):
         self.assertNotEqual(usage.returncode, 0)
         self.assertIn("Muse engine is unavailable", usage.stderr)
 
+    def test_human_show_and_logs_render_parent_message_without_rewriting_files(self):
+        from claivelib import messaging
+
+        result, state = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path = self.registry / state["id"]
+        identifier = "e" * 32
+        envelope = messaging.delivered_text(dict(
+            id=identifier, kind="note", message="Keep the final check focused.",
+            sender="parent (codex)"))
+        expected = f"parent -> worker [note {identifier}]: Keep the final check focused."
+        result_file = path / "result.txt"
+        result_file.write_text(envelope)
+        log_file = path / "events.jsonl"
+        event_line = json.dumps({"type": "user", "message": {"content": [
+            {"type": "text", "text": envelope}]}}) + "\n"
+        log_file.write_text(event_line)
+
+        shown = self.cli("show", state["id"])
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn(expected, shown.stdout)
+        self.assertNotIn("<parent-message>", shown.stdout)
+
+        logged = self.cli("logs", state["id"])
+        self.assertEqual(logged.returncode, 0, logged.stderr)
+        self.assertIn(expected, logged.stdout)
+        self.assertNotIn("<parent-message>", logged.stdout)
+
+        json_shown = self.cli("show", state["id"], "--json")
+        self.assertEqual(json_shown.returncode, 0, json_shown.stderr)
+        self.assertEqual(json.loads(json_shown.stdout)["id"], state["id"])
+        self.assertEqual(result_file.read_text(), envelope)
+        self.assertEqual(log_file.read_text(), event_line)
+
+    def test_show_includes_latest_redacted_intent_for_running_workers(self):
+        result, state = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path = self.registry / state["id"]
+        token = "sk-" + "show-" + "B7" * 10
+        event = {"payload_type": "run.terminal.completed", "payload": {
+            "terminal": "completed", "text": f"**Review {token} now**\nsecond line"}}
+        events = path / "events.jsonl"
+        events.write_text(json.dumps(event) + "\n")
+
+        shown_json = self.cli("show", state["id"], "--json")
+        self.assertEqual(shown_json.returncode, 0, shown_json.stderr)
+        self.assertEqual(json.loads(shown_json.stdout)["intent"], "Review [redacted] now")
+
+        completed = self.cli("show", state["id"])
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertNotIn("Intent:", completed.stdout)
+
+        state_file = path / "state.json"
+        saved_state = state_file.read_text()
+        running_state = dict(state, status="running", started_at=time.time())
+        running_state.pop("supervisor_pid", None)
+        running_state.pop("supervisor_identity", None)
+        state_file.write_text(json.dumps(running_state))
+        before_show = state_file.stat().st_mtime_ns
+        try:
+            running = self.cli("show", state["id"])
+            self.assertEqual(running.returncode, 0, running.stderr)
+            self.assertIn("Current phase:", running.stdout)
+            self.assertIn("Intent: Review [redacted] now", running.stdout)
+            self.assertNotIn(token, running.stdout)
+            self.assertEqual(state_file.stat().st_mtime_ns, before_show)
+        finally:
+            state_file.write_text(saved_state)
+
     def test_success_and_safe_arguments(self):
         result, state = self.launch(extra=("--read-only",))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(state["status"], "completed")
         self.assertEqual(state["steps"], 1)
         self.assertIn("--disable-write", state["command"])
-        self.assertIn("--disable-shell", state["command"])
-        self.assertIn("--disable-approval", state["command"])
-        self.assertIn("--disable-web-tools", state["command"])
+        self.assertEqual(state["command"][state["command"].index("--permission-profile") + 1], ":read-only")
+        self.assertNotIn("--disable-shell", state["command"])
+        self.assertNotIn("--disable-approval", state["command"])
+        self.assertNotIn("--disable-web-tools", state["command"])
         self.assertNotIn("--yolo", state["command"])
         self.assertIn(str(self.prompt), state["command"])
         self.assertFalse((self.path / "INJECTED").exists())

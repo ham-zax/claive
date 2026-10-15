@@ -22,6 +22,12 @@ import json,os,sys
 THREAD="01a12e77-d81b-7c61-8ceb-22cbea15eb32"
 TURN="01a12e77-d81b-7c61-8ceb-22cbea15eb33"
 MODEL=os.environ.get("CODEX_FIXTURE_MODEL","gpt-6-luna")
+assert not any("project_doc_max_bytes" in arg for arg in sys.argv)
+if "CODEX_FIXTURE_USER_CONFIG" in os.environ:
+ from pathlib import Path
+ home=Path(os.environ["CODEX_HOME"])
+ assert (home/"skills").is_symlink()
+ assert (home/"config.toml").is_symlink()==(os.environ["CODEX_FIXTURE_USER_CONFIG"]=="1")
 def emit(v):print(json.dumps(v),flush=True)
 for line in sys.stdin:
  m=json.loads(line);method=m.get("method");identifier=m.get("id")
@@ -157,6 +163,7 @@ class CodexSteeringChecks(unittest.TestCase):
         home_for_server(source, False, default)
         self.assertTrue((default / "auth.json").is_symlink())
         self.assertTrue((default / "sessions").is_symlink())
+        self.assertTrue((default / "skills").is_symlink())
         self.assertFalse((default / "config.toml").exists())
         self.assertFalse((default / "rules").exists())
         opted = self.workspace / "opted-home"
@@ -165,6 +172,22 @@ class CodexSteeringChecks(unittest.TestCase):
         self.assertTrue((opted / "config.toml").is_symlink())
         self.assertTrue((opted / "skills").is_symlink())
         self.assertFalse((opted / "rules").exists())
+
+    def test_bridge_links_skills_and_only_opted_user_config(self):
+        (self.home / "skills").mkdir()
+        (self.home / "config.toml").write_text("fixture config")
+        config = self.workspace / "config.json"
+        self.env["CLAIVE_CONFIG"] = str(config)
+        for enabled, env_value in ((False, "0"), (True, "0"), (False, "1")):
+            with self.subTest(enabled=enabled, env_value=env_value):
+                config.write_text(json.dumps({"engines": {"codex": {"user_config": enabled}}}))
+                self.env["CLAIVE_CODEX_USE_USER_CONFIG"] = env_value
+                self.env["CODEX_FIXTURE_USER_CONFIG"] = "1" if enabled or env_value == "1" else "0"
+                identifier = self.launch()
+                result = self.cli("steer", identifier, "--message", "done", "--wait", "5")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                result = self.cli("wait", identifier, "--timeout", "5")
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_command_switches_transport_only_with_opt_in(self):
         engine = CodexEngine()

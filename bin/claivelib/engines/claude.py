@@ -12,8 +12,6 @@ CLAUDE_MODEL = "claude-haiku-5-5"
 CLAUDE_PROVIDER = "anthropic"
 # Claude Code rejects anything below 100k, so this is the earliest compaction it allows.
 AUTOCOMPACT_WINDOW = "100k"
-READ_TOOLS = "Read,Grep,Glob"
-WRITE_TOOLS = "Read,Edit,Write,Bash,Grep,Glob"
 
 
 def default_binary():
@@ -26,12 +24,17 @@ def _config_dir():
 
 class ClaudeEngine(WorkerEngine):
     name = "claude"
+    supports_fork = True
     default_model = CLAUDE_MODEL
     default_reasoning_effort = "xhigh"
     efforts = {"low", "medium", "high", "xhigh", "max"}
 
+    def supported_models(self):
+        return {CLAUDE_MODEL: ("low", "medium", "high", "xhigh", "max")}
+
     def __init__(self):
         self._last_text = ""
+        self._last_api_error_text = None
 
     def steering_capability(self):
         return SteeringCapability(True, "claude-stream-json", notes=(
@@ -118,20 +121,20 @@ class ClaudeEngine(WorkerEngine):
 
     def build_command(self, request):
         self.validate_turn(request)
-        tools = READ_TOOLS if request.read_only else WRITE_TOOLS
-        if request.web:
-            tools += ",WebSearch,WebFetch"
         command = [
             request.binary, "--print", "--output-format", "stream-json", "--verbose",
             "--model", request.model, "--effort", request.reasoning_effort,
-            "--tools", tools, "--permission-mode", "bypassPermissions", "--autocompact", AUTOCOMPACT_WINDOW,
-            # No user/project settings, hooks, CLAUDE.md-driven config, MCP servers or skills.
-            "--setting-sources", "", "--strict-mcp-config", "--disable-slash-commands",
+            "--tools", "default", "--permission-mode", "plan" if request.read_only else "bypassPermissions",
+            "--autocompact", AUTOCOMPACT_WINDOW,
+            # Isolate user/project settings so the parent's hooks and permission rules do not run in workers.
+            "--setting-sources", "",
         ]
         if request.session_logging:
             if not request.session_id:
                 raise ValueError("Claude requires a session ID when session logging is on")
-            if self._session_file(request.session_id):
+            if request.fork_session_id:
+                command += ["--resume", request.fork_session_id, "--fork-session"]
+            elif self._session_file(request.session_id):
                 command += ["--resume", request.session_id]
             else:
                 command += ["--session-id", request.session_id]
@@ -153,12 +156,36 @@ class ClaudeEngine(WorkerEngine):
 
         kind = event.get("type")
         if not isinstance(kind, str):
+            self._last_api_error_text = None
             return super().describe_event(event)
+        if kind == "result":
+            matching_error_text = self._last_api_error_text
+            self._last_api_error_text = None
+        else:
+            self._last_api_error_text = None
         if kind in {"assistant", "user"}:
             if kind == "user" and event.get("isReplay"):
                 return []
             message = event.get("message")
             blocks = message.get("content") if isinstance(message, dict) else None
+            if kind == "assistant":
+                api_error_blocks = [block for block in blocks if isinstance(block, dict)
+                                    and block.get("isApiErrorMessage") is True] if isinstance(blocks, list) else []
+                api_error = (event.get("error") or event.get("isApiErrorMessage") is True
+                             or (isinstance(message, dict) and
+                                 (message.get("error") or message.get("isApiErrorMessage") is True))
+                             or bool(api_error_blocks))
+                if api_error:
+                    error_text = content_text(api_error_blocks or blocks)
+                    if not error_text:
+                        error = event.get("error")
+                        if not error and isinstance(message, dict):
+                            error = message.get("error")
+                        if isinstance(error, dict):
+                            error = error.get("message") or error.get("type")
+                        error_text = str(error or "Claude API error")
+                    self._last_api_error_text = error_text
+                    return [{"kind": "error", "text": error_text}]
             if isinstance(blocks, list):
                 steps = []
                 for block in blocks:
@@ -177,10 +204,23 @@ class ClaudeEngine(WorkerEngine):
         if kind == "result":
             if event.get("subtype") == "success" and not event.get("is_error"):
                 return []  # The assistant event already contains the final text.
-            return [{"kind": "error", "text": str(event.get("result") or
-                                                  event.get("subtype") or "Claude turn failed")}]
-        if kind == "system" and event.get("subtype") == "init":
-            return []
+            result_text = str(event.get("result") or event.get("subtype") or "Claude turn failed")
+            if matching_error_text is not None and result_text == matching_error_text:
+                return []
+            return [{"kind": "error", "text": result_text}]
+        if kind == "rate_limit_event":
+            normalized = self.normalize_event(event)
+            quota = next((item for item in normalized if item.get("type") == "quota_exhausted"), None)
+            if quota is None:
+                return []
+            return [{"kind": "error", "text": compact(quota)}]
+        if kind == "system":
+            error = event.get("error")
+            if not error:
+                return []
+            if isinstance(error, dict):
+                error = error.get("message") or compact(error)
+            return [{"kind": "error", "text": str(error)}]
         return super().describe_event(event)
 
     def normalize_event(self, event):
@@ -189,6 +229,8 @@ class ClaudeEngine(WorkerEngine):
             raise ValueError("Claude event has no string type")
         if kind == "system" and event.get("subtype") == "init":
             self._last_text = ""
+            if isinstance(event.get("session_id"), str):
+                return [{"type": "session_bound", "native_kind": kind, "session_id": event["session_id"]}]
         elif kind == "assistant":
             message = event.get("message")
             blocks = message.get("content") if isinstance(message, dict) else None

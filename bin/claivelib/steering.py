@@ -19,7 +19,7 @@ def receipt(path, identifier):
     return json.loads((path / "steering" / "receipts" / f"{identifier}.json").read_text())
 
 
-def submit(path, message):
+def submit(path, message, expires_at=None):
     from claivelib import cli
     if not isinstance(message, str) or not message.strip() or len(message.encode()) > 1024 * 1024:
         raise ValueError("steering requires a nonblank message of at most 1 MiB")
@@ -38,7 +38,10 @@ def submit(path, message):
         identifier = uuid.uuid4().hex
         record = dict(id=identifier, turn=state.get("turn", 1), status="pending", created_at=time.time())
         atomic(path / "steering" / "receipts" / f"{identifier}.json", record)
-        atomic(path / "steering" / "requests" / f"{time.time_ns():020}-{identifier}.json", dict(record, message=message))
+        request = dict(record, message=message)
+        if expires_at is not None:
+            request["expires_at"] = expires_at
+        atomic(path / "steering" / "requests" / f"{time.time_ns():020}-{identifier}.json", request)
         return record
 
 
@@ -107,6 +110,9 @@ class Transport:
                 finally:
                     claimed.unlink(missing_ok=True)
                 identifier = request["id"]
+                if request.get("expires_at") is not None and time.time() >= request["expires_at"]:
+                    self.update(identifier, status="withdrawn", reason="expired before delivery")
+                    continue
                 if request["turn"] != self.state.get("turn", 1):
                     self.update(identifier, status="not_delivered", reason="original turn ended")
                     continue
@@ -164,6 +170,7 @@ class Transport:
                     else:
                         self.update(record["id"], turn_ended=True)
                 requests = self.path / "steering" / "requests"
-                for file in list(requests.glob("*.json")) + list(requests.glob("*.claimed")):
+                for file in (list(requests.glob("*.json")) + list(requests.glob("*.claimed"))
+                             + list(requests.glob("*.withdrawn"))):
                     if json.loads(file.read_text()).get("turn") == self.state.get("turn", 1):
                         file.unlink()

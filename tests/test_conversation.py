@@ -1,4 +1,6 @@
 """Delivery, stopping and real adapter wiring for bounded conversations (no live models)."""
+from contextlib import redirect_stdout
+import io
 import hermetic  # noqa: F401
 import json
 import os
@@ -11,6 +13,7 @@ import time
 import unittest
 
 from test_workers import FIXTURE_CLI, FIXTURE_WORKER, REPO_ROOT, module
+from claivelib import conversation
 
 REPORT_DONE = '```claive-report\n{"status":"done","summary":"Reviewed."}\n```'
 REPORT_ASK = '```claive-report\n{"status":"needs_decision","summary":"Need scope.","question":"Use A or B?"}\n```'
@@ -82,6 +85,25 @@ class ConversationChecks(unittest.TestCase):
             args.extend(["--" + key.replace("_", "-"), str(value)])
         result = self.cli(*args)
         return result, json.loads(result.stdout)
+
+    def test_human_conversation_output_strips_controls_but_json_is_unchanged(self):
+        state = dict(id="012345abcdef", status="failed", code=1,
+                     error="error\x1b[2J text\x07", needs_parent={
+                         "worker": "abcdef012345", "question": "choose\x9b2J café"},
+                     transcript=[dict(answer="answer\x1b[2J text café")])
+        with redirect_stdout(io.StringIO()) as output:
+            conversation._print(state, json_output=False)
+        human = output.getvalue()
+        self.assertNotIn("\x1b", human)
+        self.assertNotIn("\x07", human)
+        self.assertNotIn("\x9b", human)
+        self.assertIn("error text", human)
+        self.assertIn("choose café", human)
+        self.assertIn("answer text café", human)
+
+        with redirect_stdout(io.StringIO()) as output:
+            conversation._print(state, json_output=True)
+        self.assertEqual(json.loads(output.getvalue()), state)
 
     def test_round_robin_keeps_models_sessions_and_records_peer_provenance(self):
         first = self.open("--model", "proposer")

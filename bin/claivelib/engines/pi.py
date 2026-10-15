@@ -10,6 +10,12 @@ from claivelib import provider
 from claivelib.engine import SteeringCapability, WorkerEngine
 from claivelib.state import launch_config, session_id
 
+# Pi has no CLI read-only mode: read-only turns keep the full tools and get this request
+# in the system prompt (before the task) and after the task text. The model, not Pi, enforces it.
+READ_ONLY_NOTE = ("This is a read-only turn. Do not create, change or delete files, and do not run "
+                  "commands that write to the workspace or to git. Read, search and run read-only "
+                  "commands only, then report.")
+
 STALE_LOCK_SECONDS = 10
 
 
@@ -19,6 +25,7 @@ def default_binary():
 
 class PiEngine(WorkerEngine):
     name = "pi"
+    supports_fork = True
     default_reasoning_effort = "max"  # free models; Pi clamps to each model's highest level
     efforts = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
 
@@ -30,7 +37,10 @@ class PiEngine(WorkerEngine):
     def initial_input(self, request):
         if not request.steering:
             return None
-        return json.dumps({"type": "prompt", "id": "claive-initial", "message": Path(request.prompt_file).read_text()}) + "\n"
+        message = Path(request.prompt_file).read_text()
+        if request.read_only:
+            message = message.rstrip("\n") + "\n\n" + READ_ONLY_NOTE + "\n"
+        return json.dumps({"type": "prompt", "id": "claive-initial", "message": message}) + "\n"
 
     def __init__(self):
         self._last_assistant = None
@@ -158,21 +168,31 @@ class PiEngine(WorkerEngine):
         self.validate_turn(request)
         command = [
             request.binary, "--mode", "rpc" if request.steering else "json", *([] if request.steering else ["--print"]), "--offline",
-            "--no-extensions", "--no-approve", "--provider", request.provider,
+            "--no-extensions", "--no-prompt-templates", "--no-themes", "--no-approve", "--provider", request.provider,
             "--model", request.model, "--thinking", request.reasoning_effort,
-            "--tools", "read,grep,find,ls" if request.read_only else "read,bash,edit,write,grep,find,ls",
+            "--tools", "*",
         ]
+        if request.read_only:
+            command += ["--append-system-prompt", READ_ONLY_NOTE]
         if request.session_logging:
             if not request.session_id or not request.session_dir or not Path(request.session_dir).is_absolute():
                 raise ValueError("Pi requires a session ID and absolute session directory")
-            retained = self._session_file(request.session_dir, request.session_id, request.workspace)
             command += ["--session-dir", request.session_dir]
-            command += ["--session", str(retained)] if retained else ["--session-id", request.session_id]
+            if request.fork_session_id:
+                if not request.fork_session_dir:
+                    raise ValueError("Pi fork needs the source session directory")
+                source = self._session_file(request.fork_session_dir, request.fork_session_id, request.workspace)
+                if source is None:
+                    raise ValueError("retained Pi session to fork is unavailable")
+                command += ["--fork", str(source)]
+            else:
+                retained = self._session_file(request.session_dir, request.session_id, request.workspace)
+                command += ["--session", str(retained)] if retained else ["--session-id", request.session_id]
         else:
             command += ["--no-session"]
         # Pi expands @files after '--'; no shell interpolation or prompt argv copying.
         if not request.steering:
-            command += ["--", "@" + request.prompt_file]
+            command += ["--", "@" + request.prompt_file, *([READ_ONLY_NOTE] if request.read_only else [])]
         # Remember only an explicit selection after all command checks pass.
         # Follow-ups keep their original launch model without resetting the default.
         if self._selected_model is not None:
@@ -221,7 +241,11 @@ class PiEngine(WorkerEngine):
             return [{"type": "control_response", "native_kind": kind, "id": event.get("id"),
                      "command": event.get("command"), "success": event.get("success"),
                      "data": event.get("data"), "error": event.get("error")}]
-        if kind in {"session", "agent_start"}:
+        if kind == "session":
+            self._last_assistant = None
+            if isinstance(event.get("id"), str):
+                return [{"type": "session_bound", "native_kind": kind, "session_id": event["id"]}]
+        elif kind == "agent_start":
             self._last_assistant = None
         elif kind == "message_start":
             message = event.get("message")

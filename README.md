@@ -367,6 +367,15 @@ The same file holds the user's per-engine policy under `engines`. claive enforce
 
 `"enabled": false` refuses the engine and tells the caller it is `explicitly disabled by the user`, with the optional `reason`, and not to retry or work around it. `default_model` and `default_reasoning_effort` apply when neither a flag nor a role chooses; the engine still validates them, so they cannot unlock a model an engine is locked against. `disabled_models` and `disabled_reasoning_efforts` are a list of names or an object mapping each name to a reason. A misspelt engine name or key fails every launch instead of silently disabling nothing. `claive engines [--json]` prints the effective policy, defaults and steering support per engine, and `doctor` reports disabled engines.
 
+`models` is an allowlist of models, each with the reasoning efforts it may use. With the key present, a model that is not listed is refused, and so is an effort outside its `efforts` (`{}` allows every effort the engine supports). A turn must then name its model, through `--model`, a role or `default_model` (which must be listed). The allowlist can only narrow the limits in the engine code: a model or effort the engine does not support makes the config invalid, which refuses every launch. Orchestration picks skip models that are not listed. `claive engines` shows the effective models and efforts. For example, Luna only at `max`, Sol below `max`, and Claude at `high` or `xhigh`:
+
+```json
+{"engines": {
+  "codex": {"models": {"gpt-6-luna": {"efforts": ["max"]},
+                       "gpt-6.1-sol": {"efforts": ["low", "medium", "high", "xhigh"]}}},
+  "claude": {"models": {"claude-haiku-5-5": {"efforts": ["high", "xhigh"]}}}}}
+```
+
 A host whose `opencode2api` runs locally can route Pi turns over loopback instead of the public URL in `models.json` with `{"providers": {"opencode2api": {"base_url": "http://127.0.0.1:PORT/v1"}}}`. Only `localhost` and loopback addresses are accepted. Pi reads the URL only from `models.json`, so claive gives Pi turns an overlay agent directory (`$CLAIVE_DIR/pi-agent-overlay`: links to every entry of the real one plus a mode-600 `models.json` differing only in `baseUrl`), rebuilt each turn. The real `models.json` is never edited; `doctor` times both URLs, and workers record and print `Provider override:`.
 
 On a host where workers run unattended, `{"workspaces": [{"path": "~/repo/site", "write": false}, {"path": "~/repo/site/drafts", "write": true}]}` limits where workers may run. With the key present, `run`/`start`/`open`/`batch` refuse a `--workspace` or `--worktree-existing` whose real path (symlinks resolved) is outside every entry, and the deepest matching entry decides the mode: `write: false` requires `--read-only` or a read-only role. Without the key any workspace is allowed, as before. This limits the worker's cwd and write mode only; Pi has no OS sandbox, so its read tool can still open absolute paths elsewhere. `doctor` reports the entry counts.

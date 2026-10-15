@@ -20,7 +20,8 @@ import tempfile
 import time
 import uuid
 
-from claivelib import config, provider, acceptance, steering
+from claivelib import config, provider, acceptance, steering, procname
+from claivelib.ansi import strip_controls
 from claivelib.engine import TurnRequest
 from claivelib.engines import DEFAULT_ENGINE, default_engine, get_engine
 from claivelib.roles import ROLES, resolved_roles
@@ -59,17 +60,38 @@ def check_model_policy(model):
 
 def check_engine_policy(engine_name, model=None, reasoning_effort=None):
     """Enforce the user's engines policy; a misspelt engine name must not silently disable nothing."""
-    for name in config.load().get("engines", {}):
+    for name, policy in config.load().get("engines", {}).items():
         try:
-            get_engine(name)
+            supported = get_engine(name).supported_models()
         except ValueError as error:
             raise ValueError(f"invalid claive config {config.config_path()}: engines.{name}: {error}") from error
+        # The allowlist may only narrow the engine's own limits, never widen them.
+        for model, entry in (policy.get("models") or {}).items() if supported is not None else ():
+            extra = [model] if model not in supported else [
+                effort for effort in entry.get("efforts", []) if effort not in supported[model]]
+            if extra:
+                raise ValueError(f"invalid claive config {config.config_path()}: engines.{name}.models: "
+                                 f"{', '.join(extra)} not supported by the engine for "
+                                 f"{model if model in supported else 'any model'}")
     config.check_engine(engine_name, model, reasoning_effort)
+
+
+def build_command(engine, request):
+    """The engine's command plus the user's engines.<name>.extra_args, placed before any '--'."""
+    command = engine.build_command(request)
+    extra = config.engine_policy(engine.name).get("extra_args") or []
+    if not extra:
+        return command
+    if engine.name == "codex" and (request.steering or request.fork_session_id):
+        raise ValueError("engines.codex.extra_args apply to codex exec turns only, not to steering or fork turns")
+    split = command.index("--") if "--" in command else len(command)
+    return command[:split] + list(extra) + command[split:]
 
 
 def validate_turn(engine_name, request):
     """Apply the user's engines policy, then the engine's own turn rules."""
     check_engine_policy(engine_name, request.model, request.reasoning_effort)
+    config.check_model_named(engine_name, request.model)
     get_engine(engine_name).validate_turn(request)
 
 
@@ -220,13 +242,20 @@ def turn_request(state, prompt_file=None, reasoning_effort=None, max_model_steps
     )
 
 
-def root():
+def root(create=True):
     base = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
     path = Path(os.environ.get("CLAIVE_DIR", str(base / "claive")))
     if not path.is_absolute():
         raise ValueError("CLAIVE_DIR must be absolute")
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if create:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
     return path
+
+
+def run_due_monitors():
+    """Run one parent-owned monitor pass; serve uses the same delivery path."""
+    from claivelib import monitor_runner
+    return monitor_runner.run_due()
 
 
 def save(path, data):
@@ -327,7 +356,7 @@ def jobs(limit=20):
 
 
 def clean(value):
-    return "".join(char for char in str(value) if char.isprintable())
+    return "".join(char for char in strip_controls(str(value)) if char.isprintable())
 
 
 def duration(seconds):
@@ -483,7 +512,9 @@ def event_update(state, event):
         state["answer"] = event.get("text", "")
         state["phase"] = "finishing"
     elif kind == "session_bound":
-        state["session_id"] = event["session_id"]  # engines that choose their own session ID
+        launch = state.get("launch") if isinstance(state.get("launch"), dict) else {}
+        if launch.get("session_logging", state.get("session_logging", True)):
+            state["session_id"] = event["session_id"]  # engines that choose their own session ID
     elif kind == "quota_exhausted":
         state["quota_exhausted"] = True
         state["fallback_requires_user_approval"] = True
@@ -496,6 +527,34 @@ FALLBACKABLE_FAILURES = {"timeout", "quota", "worker", "protocol"}
 PER_TURN_RESET_KEYS = ("ended_at", "error", "terminal", "terminal_reason", "quota_exhausted",
                        "quota_reset_at", "fallback_requires_user_approval", "report", "report_state",
                        "report_error", "needs_parent", "failure_kind", "active_tools")
+
+
+def context_overflow_reason(reason):
+    """Recognize provider errors that say the request context could not continue."""
+    text = str(reason or "").casefold()
+    markers = ("autocompact", "context window", "context length", "context_length_exceeded",
+               "maximum context", "prompt is too long")
+    return any(marker in text for marker in markers)
+
+
+def previous_turn_incident(state):
+    """Format the prior reusable-turn failure once for the next model prompt."""
+    status = state.get("status")
+    if status not in {"failed", "cancelled", "timed_out"}:
+        status = state.get("last_turn_status")
+    if status not in {"failed", "cancelled", "timed_out"}:
+        return None
+    turn = state.get("turn")
+    if isinstance(turn, bool) or not isinstance(turn, int) or turn < 1:
+        return None
+    if state.get("incident_noted_turn") == turn:
+        return None
+    default_kind = {"failed": "worker", "cancelled": "cancelled", "timed_out": "timeout"}[status]
+    failure_kind = " ".join(str(state.get("failure_kind") or default_kind).split()) or default_kind
+    error = " ".join(str(state.get("terminal_reason") or state.get("error") or "").split())
+    error = error[:200] if error else "unknown error"
+    return (f"[claive] The previous turn ({turn}) ended {status} ({failure_kind}): {error}. "
+            "This message did not cause it.")
 
 
 def rebuild_for_fallback(state, engine, new_model):
@@ -527,7 +586,7 @@ def rebuild_for_fallback(state, engine, new_model):
         session_dir=fresh_launch.get("session_dir"), steering=bool(fresh_launch.get("steering")),
     )
     check_engine_policy(engine.name, request.model, request.reasoning_effort)
-    command = engine.build_command(request)
+    command = build_command(engine, request)
     return fresh_launch, command, fresh_session
 
 
@@ -709,6 +768,8 @@ def supervise(job_id, control=None):
                                   f"malformed events={state['malformed_events']}")
                 if state.get("quota_exhausted"):
                     state["failure_kind"] = "quota"
+                elif context_overflow_reason(state.get("terminal_reason")):
+                    state["failure_kind"] = "context_overflow"
                 elif state.get("malformed_events") or state.get("terminal") is None:
                     state["failure_kind"] = "protocol"
                 else:
@@ -810,7 +871,7 @@ def _wait_inbox(events, as_json):
     if as_json:
         return _wait_result("inbox", None, code, events)
     from claivelib import inbox as inbox_mod
-    print(inbox_mod.format_text(events))
+    print(strip_controls(inbox_mod.format_text(events)))
     return code
 
 
@@ -884,6 +945,7 @@ def release_worktree(state):
 
 
 def run_supervisor(job_id, reusable):
+    procname.set_supervisor_process_name(job_id)
     try:
         return reusable_worker(job_id) if reusable else supervise(job_id)
     finally:
@@ -898,6 +960,15 @@ def run_supervisor(job_id, reusable):
                 save(path / "state.json", state)
         except Exception as error:
             print(f"Worker {job_id}: worktree cleanup failed: {error}", file=sys.stderr, flush=True)
+
+
+def _remove_withdrawn_ask_marker(path, request):
+    message_id = request.get("message_id") if isinstance(request, dict) else None
+    if not isinstance(message_id, str) or not re.fullmatch(r"[0-9a-f]{32}", message_id):
+        return
+    stop_file = path / "messages" / "asks" / f"{message_id}.withdrawn"
+    if request.get("stop_file") == str(stop_file):
+        stop_file.unlink(missing_ok=True)
 
 
 def reusable_worker(job_id):
@@ -917,6 +988,10 @@ def reusable_worker(job_id):
               f"idle in session {worker_session_id(state)}", flush=True)
         report(state)
         while not control["stopping"]:
+            from claivelib import wakes
+            wake_result = wakes.deliver_due(path)
+            for error in wake_result["errors"]:
+                print(f"Worker {job_id}: scheduled wake deferred: {clean(error)}", file=sys.stderr, flush=True)
             pending = sorted((path / "requests").glob("*.json"))
             if pending:
                 from claivelib import turns
@@ -936,11 +1011,13 @@ def reusable_worker(job_id):
                     continue
                 if request.get("request_id") and (path / "responses" / f"{request['request_id']}.json").exists():
                     pending[0].unlink()
+                    _remove_withdrawn_ask_marker(path, request)
                     print(f"Worker {job_id}: already completed request {request['request_id']} ignored", flush=True)
                     continue
                 if request.get("stop_file") and Path(request["stop_file"]).exists():
                     turns.complete(path, state, request.get("request_id"), "conversation stopped before delivery")
                     pending[0].unlink()
+                    _remove_withdrawn_ask_marker(path, request)
                     continue
                 if request.get("requires_no_parent") and state.get("needs_parent"):
                     turns.complete(path, state, request.get("request_id"), "worker is waiting for a parent decision", 3)
@@ -980,6 +1057,7 @@ def reusable_worker(job_id):
                     state["actual_workspace"] = actual
                 engine = get_engine(state.get("engine", DEFAULT_ENGINE))
                 new_turn = state["turn"] + 1
+                incident = previous_turn_incident(state)
                 effective = request["prompt_file"]
                 source = None
                 from claivelib import messaging
@@ -987,6 +1065,7 @@ def reusable_worker(job_id):
                     if request.get("stop_file") and Path(request["stop_file"]).exists():
                         turns.complete(path, state, request.get("request_id"), "conversation stopped before delivery")
                         pending[0].unlink()
+                        _remove_withdrawn_ask_marker(path, request)
                         continue
                     if request.get("expires_at") is not None and time.time() >= request["expires_at"]:
                         turns.complete(path, state, request.get("request_id"), "queued follow-up expired before delivery", 124)
@@ -995,11 +1074,13 @@ def reusable_worker(job_id):
                     notes = messaging.pending_messages(path)
                     if state.get("report_contract"):
                         source = request["prompt_file"]
-                    if state.get("report_contract") or notes:
+                    if state.get("report_contract") or notes or incident:
                         effective = str(path / f"prompt-{new_turn:04}.md")
                         prompt = Path(request["prompt_file"]).read_text()
                         block = messaging.format_block(notes, already_in_prompt=(request.get("message_id"),))
                         content = f"{block}\n\n{prompt}" if block else prompt
+                        if incident:
+                            content = f"{incident}\n\n{content}"
                         if state.get("report_contract"):
                             content += "\n\n" + REPORT_CONTRACT
                         Path(effective).write_text(content)
@@ -1008,7 +1089,7 @@ def reusable_worker(job_id):
                                                  reasoning_effort=effort, max_model_steps=steps,
                                                  isolation=isolation)
                         validate_turn(state.get("engine", DEFAULT_ENGINE), next_turn)
-                        command = engine.build_command(next_turn)
+                        command = build_command(engine, next_turn)
                     except ValueError as error:
                         state.update(last_turn_status="failed", error=str(error),
                                      phase="follow-up rejected; ready for another assignment",
@@ -1020,6 +1101,8 @@ def reusable_worker(job_id):
                         print(f"Worker {job_id}: follow-up rejected: {clean(error)}", flush=True)
                         continue
                     state["previous_turn_task_failures"] = state.get("turn_task_failures", 0)
+                    if incident:
+                        state["incident_noted_turn"] = state["turn"]
                     state.update(prompt_file=effective, reasoning_effort=effort,
                                  max_model_steps=steps, command=command,
                                  label=request.get("label") or state["label"], turn=new_turn,
@@ -1049,12 +1132,82 @@ def reusable_worker(job_id):
             return 130
 
 
+def create_fork(args):
+    """Create a reusable worker from a native copy of an idle reusable worker's session."""
+    source_path = job_path(args.id)
+    source = json.loads((source_path / "state.json").read_text())
+    source_id = source_path.name
+    status = source.get("status")
+    if status in {"starting", "running", "cancelling"}:
+        raise ValueError(f"worker {source_id} is running; fork works only on an idle worker")
+    if status != "idle":
+        raise ValueError(f"worker {source_id} is {status or 'unknown'}; fork works only on an idle worker")
+    if not source.get("reusable"):
+        raise ValueError(f"worker {source_id} is not a reusable worker; fork works only on an idle worker")
+    if list((source_path / "requests").glob("*.json")) or (source_path / "close.request").exists():
+        raise ValueError(f"worker {source_id} has queued work; fork works only on an idle worker")
+
+    engine_name = source.get("engine", DEFAULT_ENGINE)
+    try:
+        engine = get_engine(engine_name)
+    except ValueError as error:
+        raise ValueError(f"engine {engine_name} cannot fork a session; start a new worker") from error
+    if not getattr(engine, "supports_fork", False):
+        raise ValueError(f"engine {engine_name} cannot fork a session; start a new worker")
+    launch = launch_config(source)
+    source_session_id = worker_session_id(source)
+    if not launch.get("session_logging", True) or not source_session_id:
+        raise ValueError(f"worker {source_id} has no retained session to fork")
+    try:
+        policy = json.loads((source_path / "policy.json").read_text())
+    except (OSError, ValueError):
+        policy = {}
+
+    workspace = source.get("actual_workspace") or source["workspace"]
+    prompt_text = args.prompt if args.prompt is not None else None
+    prompt_file = None if prompt_text is not None else args.prompt_file
+    inherited = argparse.Namespace(
+        action="open", workspace=workspace, prompt_file=prompt_file, prompt_text=prompt_text,
+        label=args.label or f"{source.get('label') or source_id} fork", engine=engine_name, role=None,
+        enable_steering=bool(launch.get("steering")), checks_file=None, owned_path=None,
+        report=bool(source.get("report_contract")),
+        reasoning_effort=policy.get("reasoning_effort", source.get("reasoning_effort")),
+        max_model_steps=policy.get("max_model_steps", source.get("max_model_steps")),
+        read_only=bool(launch.get("read_only")), worktree=False, worktree_existing=None,
+        worktree_base=None, web=bool(launch.get("web")),
+        model=launch.get("model") or source.get("model"), session_id=None,
+        output_schema=launch.get("output_schema"), no_session_log=False,
+        provider=launch.get("provider"), mission=source.get("mission"),
+        turn_timeout=source.get("turn_timeout"), fallback_models=None, remember_model=False,
+        fork_session_id=source_session_id, fork_session_dir=launch.get("session_dir"),
+        forked_from=source_id,
+        context_file=getattr(args, "context_file", []),
+    )
+    path, state = create_job(inherited)
+
+    latest = json.loads((source_path / "state.json").read_text())
+    if (latest.get("status") != "idle" or list((source_path / "requests").glob("*.json"))
+            or (source_path / "close.request").exists()):
+        discard_job(path, launch_config(state))
+        if latest.get("status") in {"starting", "running", "cancelling"}:
+            raise ValueError(f"worker {source_id} is running; fork works only on an idle worker")
+        raise ValueError(f"worker {source_id} is no longer idle; fork works only on an idle worker")
+    return path, state
+
+
 def create_job(args):
-    workspace, prompt = Path(args.workspace), Path(args.prompt_file)
+    workspace = Path(args.workspace)
     if not workspace.is_absolute() or not workspace.is_dir():
         raise ValueError("--workspace must be an existing absolute directory")
-    if not prompt.is_absolute() or not prompt.is_file() or not prompt.stat().st_size:
-        raise ValueError("--prompt-file must be an existing nonempty absolute file")
+    prompt_text = getattr(args, "prompt_text", None)
+    if prompt_text is None:
+        prompt = Path(args.prompt_file)
+        if not prompt.is_absolute() or not prompt.is_file() or not prompt.stat().st_size:
+            raise ValueError("--prompt-file must be an existing nonempty absolute file")
+    else:
+        if not isinstance(prompt_text, str) or not prompt_text.strip():
+            raise ValueError("--prompt must not be empty")
+        prompt = None
     if args.max_model_steps is not None and args.max_model_steps < 1:
         raise ValueError("--max-model-steps must be positive")
     turn_timeout = parse_turn_timeout(getattr(args, "turn_timeout", None))
@@ -1069,21 +1222,42 @@ def create_job(args):
     if args.session_id and args.no_session_log:
         raise ValueError("--session-id requires retained session logging")
 
-    role = getattr(args, "role", None)
-    roles = resolved_roles()  # validates the whole claive config, even without --role
+    from claivelib import prompts, teams
+    config_data = config.load()
+    roles = resolved_roles(config_data)  # validates the whole claive config, even without --role
+    team_plan = teams.prepare_launch(
+        getattr(args, "team", None), getattr(args, "member", None),
+        getattr(args, "role", None), getattr(args, "project_file", None), config_data=config_data)
+    role = team_plan["role"] if team_plan else getattr(args, "role", None)
     role_def = roles.get(role) if role else None
-    if role and role_def is None:
+    if role is not None and role_def is None:
         raise ValueError(f"unknown role: {role}")
+    context_layers, context_files = prompts.read_context_files(getattr(args, "context_file", []))
+    role_prompt = None
+    if role_def:
+        role_prompt = (prompts.read_role_prompt(role, role_def["prompt_file"])
+                       if role_def.get("prompt_file") else role_def.get("preamble"))
+    report_contract = bool(getattr(args, "report", False) or role)
+    composed_prompt, has_prompt_layers = prompts.compose_first_prompt(
+        prompt_text, body_file=prompt, role_prompt=role_prompt,
+        team_header=team_plan["header"] if team_plan else None,
+        collaboration=team_plan["collaboration"] if team_plan else None,
+        project=team_plan["project"] if team_plan else None,
+        context_layers=context_layers,
+        report_contract=REPORT_CONTRACT if report_contract else None,
+    )
     engine_name = getattr(args, "engine", None) or (role_def["engine"] if role_def else None) or default_engine()
     engine = get_engine(engine_name)
     check_engine_policy(engine_name)
     policy = config.engine_policy(engine_name)
     session_id = engine.resolve_session_id(args.session_id, not args.no_session_log)
-    effective_model = args.model or (role_def["model"] if role_def else None) or policy.get("default_model")
-    effort = (args.reasoning_effort or (role_def["reasoning_effort"] if role_def else None)
+    effective_model = args.model or (role_def.get("model") if role_def else None) or policy.get("default_model")
+    effort = (args.reasoning_effort or (role_def.get("reasoning_effort") if role_def else None)
               or policy.get("default_reasoning_effort") or engine.default_effort_for(effective_model))
     if args.max_model_steps is not None:
         steps = args.max_model_steps
+    elif role_def and role not in ROLES:
+        steps = role_def.get("max_model_steps")
     elif role_def and role_def.get("max_model_steps") is not None and engine.default_max_model_steps is not None:
         steps = role_def["max_model_steps"]
     else:
@@ -1106,12 +1280,14 @@ def create_job(args):
         raise ValueError(engine.steering_capability().reason)
     engine.validate_launch(launch)
     initial_turn = TurnRequest(
-        binary=launch["binary"], workspace=str(workspace), prompt_file=str(prompt),
+        binary=launch["binary"], workspace=str(workspace), prompt_file=str(prompt or ""),
         session_id=session_id, provider=launch["provider"], model=launch["model"],
         reasoning_effort=effort, max_model_steps=steps,
         read_only=launch["read_only"], web=launch["web"], output_schema=launch["output_schema"],
         session_logging=launch["session_logging"], isolation=launch["isolation"],
         session_dir=launch.get("session_dir"), steering=bool(launch.get("steering")),
+        fork_session_id=getattr(args, "fork_session_id", None),
+        fork_session_dir=getattr(args, "fork_session_dir", None),
     )
     validate_turn(engine_name, initial_turn)
     mission_id = getattr(args, "mission", None) or os.environ.get("CLAIVE_MISSION") or None
@@ -1139,21 +1315,20 @@ def create_job(args):
     path.mkdir(mode=0o700)
     (path / "requests").mkdir(mode=0o700)
     try:
+        if prompt is None:
+            prompt = path / "prompt-input.md"
+            prompt.write_text(prompt_text, encoding="utf-8")
         launch = engine.prepare_isolation(launch, str(workspace), str(path))
-    except ValueError:
+    except BaseException:
         shutil.rmtree(path, ignore_errors=True)
         raise
     try:
-        initial_turn = dataclasses.replace(initial_turn, isolation=launch["isolation"])
+        initial_turn = dataclasses.replace(initial_turn, prompt_file=str(prompt), isolation=launch["isolation"])
         save(path / "policy.json", dict(reasoning_effort=effort, max_model_steps=steps))
-        report_contract = bool(getattr(args, "report", False) or role)
         effective_prompt, source_prompt = str(prompt), None
-        if report_contract:
+        if has_prompt_layers:
             source_prompt = str(prompt)
-            preamble = role_def["preamble"] if role_def else None
-            body = prompt.read_text()
-            composed = f"{preamble}\n\n{body}\n\n{REPORT_CONTRACT}" if preamble else f"{body}\n\n{REPORT_CONTRACT}"
-            (path / "prompt-0001.md").write_text(composed)
+            (path / "prompt-0001.md").write_text(composed_prompt, encoding="utf-8")
             effective_prompt = str(path / "prompt-0001.md")
             initial_turn = TurnRequest(
                 binary=launch["binary"], workspace=str(workspace), prompt_file=effective_prompt,
@@ -1162,8 +1337,10 @@ def create_job(args):
                 read_only=launch["read_only"], web=launch["web"], output_schema=launch["output_schema"],
                 session_logging=launch["session_logging"], isolation=launch["isolation"],
                 session_dir=launch.get("session_dir"), steering=bool(launch.get("steering")),
+                fork_session_id=getattr(args, "fork_session_id", None),
+                fork_session_dir=getattr(args, "fork_session_dir", None),
             )
-        command = engine.build_command(initial_turn)
+        command = build_command(engine, initial_turn)
         state = dict(schema_version=SCHEMA_VERSION, engine=engine_name, session_id=session_id,
                      id=job_id, label=args.label or prompt.stem, workspace=str(workspace), log_dir=str(path),
                      prompt_file=effective_prompt, command=command, launch=launch, status="starting", phase="starting",
@@ -1180,6 +1357,11 @@ def create_job(args):
             state["report_contract"] = True
         if role:
             state["role"] = role
+        state["context_files"] = context_files
+        if team_plan:
+            state["team"] = team_plan["state"]
+        if getattr(args, "forked_from", None):
+            state["forked_from"] = args.forked_from
         if source_prompt:
             state["source_prompt_file"] = source_prompt
         if launch["isolation"].get("mode") == "existing":
@@ -1208,7 +1390,8 @@ def spawn_supervisor(path, state, entry):
     """Start a detached supervisor (`_supervise` or `_reusable`); discard the job if it cannot start."""
     try:
         with (path / "supervisor.log").open("w") as log:
-            subprocess.Popen([sys.executable, launcher_path(), entry, state["id"]],
+            args = [f"claive-supervisor {state['id']}", launcher_path(), entry, state["id"]]
+            subprocess.Popen(args, executable=sys.executable,
                              stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
     except BaseException:
         discard_job(path, launch_config(state))
@@ -1239,6 +1422,8 @@ def report(state):
     for check in evidence["verification"]["checks"]:
         print(f"Check {clean(check['name'])}: {check['status']} {clean(check.get('reason', ''))}")
     print(f"Current phase: {clean(state.get('phase', 'unknown'))} | last observed: {clean(state.get('last_observed_activity', 'unknown'))}")
+    if state.get("status") == "running" and state.get("intent") is not None:
+        print(f"Intent: {clean(state['intent'])}")
     steering_state = steering.summary(path, state)
     print(f"Live steering: {steering_state['enabled']} | pending {steering_state['pending']} | acknowledged {steering_state['acknowledged']}")
     print(f"Queued follow-ups: {len(list((path / 'requests').glob('*.json')))} (delivered between turns)")
@@ -1283,7 +1468,9 @@ def report(state):
     print(f"Logs: {path}")
     result = path / "result.txt"
     if result.exists():
-        print(result.read_text())
+        from claivelib import messaging
+        text = result.read_text()
+        print(strip_controls(messaging.human_parent_message(text) or text))
     sys.stdout.flush()
 
 
@@ -1518,7 +1705,8 @@ def engines_report(json_output=False):
         try:
             engine = get_engine(name)
             capability = engine.steering_capability()
-            row.update(default_model=policy.get("default_model") or getattr(engine, "default_model", None),
+            row.update(models=config.allowed_models(name, engine.supported_models()),
+                       default_model=policy.get("default_model") or getattr(engine, "default_model", None),
                        default_reasoning_effort=(policy.get("default_reasoning_effort")
                                                  or engine.default_reasoning_effort),
                        steering=capability.mechanism if capability.supported else None)
@@ -1534,9 +1722,12 @@ def engines_report(json_output=False):
             continue
         blocked = [f"no {label} {', '.join(row[key])}" for label, key in
                    (("model", "disabled_models"), ("effort", "disabled_reasoning_efforts")) if row[key]]
+        models = row.get("models")
+        allowed = "" if models is None else "; models " + (", ".join(
+            f"{model}[{','.join(efforts) or 'any'}]" for model, efforts in models.items()) or "none")
         print(f"{row['engine']}{' (default)' if row['default'] else ''} model {row['default_model'] or 'engine default'}"
               f" effort {row['default_reasoning_effort']} steering {row['steering'] or 'no'}"
-              + "".join(f"; {item}" for item in blocked))
+              + allowed + "".join(f"; {item}" for item in blocked))
     return 0
 
 
@@ -1599,14 +1790,19 @@ def parser():
         launch = commands.add_parser(action, help=descriptions[action])
         launch.add_argument("--workspace", required=True)
         launch.add_argument("--prompt-file", required=True)
+        launch.add_argument("--context-file", action="append", default=[],
+                            help="add a bounded UTF-8 context layer to the first prompt (repeatable)")
         launch.add_argument("--label")
         launch.add_argument("--engine", default=None)
-        launch.add_argument("--role", choices=sorted(ROLES))
+        launch.add_argument("--role")
+        launch.add_argument("--team")
+        launch.add_argument("--member")
+        launch.add_argument("--project-file", help="override the team's project context for this launch")
         launch.add_argument("--enable-steering", action="store_true", help="opt into the duplex provider transport (Pi, Codex, Claude)")
         launch.add_argument("--checks-file", help="absolute JSON required-check manifest for parent verification")
         launch.add_argument("--owned-path", action="append", help="workspace-relative allowed path or glob (repeatable)")
         launch.add_argument("--report", action="store_true", help="request a structured claive-report block")
-        launch.add_argument("--reasoning-effort", "--effort", help="engine-specific effort; defaults to xhigh (Muse), max (Pi), max (Claude) or max (Codex)")
+        launch.add_argument("--reasoning-effort", "--effort", help="engine-specific effort; defaults to xhigh (Muse), max (Pi), xhigh (Claude) or max (Codex)")
         launch.add_argument("--max-model-steps", type=int, help="engine step cap, when supported")
         launch.add_argument("--read-only", action="store_true")
         isolation = launch.add_mutually_exclusive_group()
@@ -1626,6 +1822,28 @@ def parser():
                             help="comma-separated fallback models for single-turn workers (run/start only)")
         if action == "open":
             launch.add_argument("--detach", action="store_true", help="run the reusable loop in the background")
+    fork = commands.add_parser("fork", help="start an independent reusable worker from an idle session")
+    fork.add_argument("id", help="idle reusable source worker ID")
+    fork.add_argument("--label")
+    fork_prompt = fork.add_mutually_exclusive_group(required=True)
+    fork_prompt.add_argument("--prompt", help="initial prompt text for the fork")
+    fork_prompt.add_argument("--prompt-file", help="absolute file containing the initial prompt")
+    fork.add_argument("--context-file", action="append", default=[],
+                      help="add a bounded UTF-8 context layer to the fork's first prompt (repeatable)")
+    monitor = commands.add_parser("monitor", help="manage parent-owned read-only worker monitors")
+    monitor_sub = monitor.add_subparsers(dest="monitor_action", required=True)
+    monitor_add = monitor_sub.add_parser("add", help="watch a worker workspace with a read-only command")
+    monitor_add.add_argument("id", help="open reusable worker ID or alias")
+    monitor_add.add_argument("--command", required=True,
+                             help="read-only command only; runs with bash -c on the parent host in the worker workspace")
+    monitor_add.add_argument("--every", required=True, help="interval from 30s through 24h (for example 5m)")
+    monitor_add.add_argument("--label", help="short name shown in change and failure messages")
+    monitor_list = monitor_sub.add_parser("list", help="list a worker's monitors")
+    monitor_list.add_argument("id", nargs="?", help="worker ID or alias; omit to list all workers")
+    monitor_list.add_argument("--json", action="store_true")
+    monitor_cancel = monitor_sub.add_parser("cancel", help="stop one monitor by its ID")
+    monitor_cancel.add_argument("monitor_id")
+    monitor_sub.add_parser("run-due", help="run one pass of all due monitors")
     send = commands.add_parser("send", help="send a parent message to a worker")
     send.add_argument("id")
     send.add_argument("--mode", choices=("note", "wake", "now"), default="note")
@@ -1633,7 +1851,32 @@ def parser():
     message.add_argument("--message")
     message.add_argument("--message-file")
     send.add_argument("--id", dest="message_id", help="32 lowercase hexadecimal message ID")
+    send.add_argument("--at", help="schedule a wake for an ISO-8601 time or +duration such as +30m")
+    send.add_argument("--every", help="repeat a scheduled wake at this duration, such as 1h")
     send.add_argument("--json", action="store_true")
+    channel = commands.add_parser("channel", help="open a bounded peer channel between workers")
+    channel_sub = channel.add_subparsers(dest="channel_action", required=True)
+    channel_open = channel_sub.add_parser("open")
+    channel_open.add_argument("name")
+    channel_open.add_argument("members", nargs="+")
+    channel_open.add_argument("--max-messages", type=int, default=20)
+    channel_open.add_argument("--max-per-pair", type=int, default=6)
+    channel_open.add_argument("--timeout", type=int, default=900)
+    channel_open.add_argument("--json", action="store_true")
+    channel_show = channel_sub.add_parser("show")
+    channel_show.add_argument("name")
+    channel_show.add_argument("--json", action="store_true")
+    channel_close = channel_sub.add_parser("close")
+    channel_close.add_argument("name")
+    schedule = commands.add_parser("schedule", help="list or cancel scheduled wakes for a worker")
+    schedule_commands = schedule.add_subparsers(dest="schedule_action", required=True)
+    schedule_list = schedule_commands.add_parser("list", help="list a worker's scheduled wakes")
+    schedule_list.add_argument("id")
+    schedule_list.add_argument("--json", action="store_true")
+    schedule_cancel = schedule_commands.add_parser("cancel", help="cancel one scheduled wake")
+    schedule_cancel.add_argument("id")
+    schedule_cancel.add_argument("schedule_id")
+    schedule_cancel.add_argument("--json", action="store_true")
     ask = commands.add_parser("ask", help="ask a worker a question and wait for its answer")
     ask.add_argument("id")
     message = ask.add_mutually_exclusive_group(required=True)
@@ -1641,6 +1884,7 @@ def parser():
     message.add_argument("--message-file")
     ask.add_argument("--timeout", type=float, default=120)
     ask.add_argument("--id", dest="message_id", help="32 lowercase hexadecimal message ID")
+    ask.add_argument("--schema", help="existing absolute JSON schema file for the reply")
     ask.add_argument("--json", action="store_true")
     reply = commands.add_parser("reply", help="record an answer to a parent's question")
     reply.add_argument("id")
@@ -1683,6 +1927,13 @@ def parser():
     alias_list = alias_sub.add_parser("list", help="show bindings and current worker status")
     alias_list.add_argument("--json", action="store_true")
     alias_sub.add_parser("remove", help="remove a binding; keep its worker and history").add_argument("name")
+    team_cmd = commands.add_parser("team", help="show configured launch teams and member aliases")
+    team_sub = team_cmd.add_subparsers(dest="team_action", required=True)
+    team_list = team_sub.add_parser("list")
+    team_list.add_argument("--json", action="store_true")
+    team_show = team_sub.add_parser("show")
+    team_show.add_argument("name")
+    team_show.add_argument("--json", action="store_true")
     conversation = commands.add_parser("conversation", help="bounded exchanges between existing workers")
     conversation_sub = conversation.add_subparsers(dest="conversation_action", required=True)
     conversation_start = conversation_sub.add_parser("start")
@@ -1769,7 +2020,7 @@ def parser():
     goal_add.add_argument("--title", required=True)
     goal_add.add_argument("--prompt-file", required=True)
     goal_add.add_argument("--workspace", required=True)
-    goal_add.add_argument("--role", choices=sorted(ROLES))
+    goal_add.add_argument("--role")
     goal_add.add_argument("--engine")
     goal_add.add_argument("--model")
     goal_add.add_argument("--write", action="store_true", help="let the worker edit the workspace")
@@ -1837,9 +2088,13 @@ def main(launcher=None):
         from claivelib import batch as batch_mod
         return batch_mod.runner(sys.argv[2])
     args = parser().parse_args()
+    if args.action == "monitor" and args.monitor_action in {"add", "cancel", "run-due"}:
+        check_nested()
+    if args.action == "monitor" and args.monitor_action in {"add", "list"} and args.id:
+        args.id = job_path(args.id).name
     # Resolve once per command so a concurrent rebind cannot redirect later reads
     # or writes in the same operation. Persisted links and output keep canonical IDs.
-    worker_actions = {"show", "logs", "cancel", "close", "usage", "followup", "effort", "answer", "verify", "accept", "scope", "steer", "send", "peek", "ask"}
+    worker_actions = {"show", "logs", "cancel", "close", "usage", "followup", "effort", "answer", "verify", "accept", "scope", "steer", "send", "peek", "ask", "schedule", "fork"}
     if args.action in worker_actions and (args.id.startswith("@") or not re.fullmatch(r"[0-9a-f]{12}", args.id)):
         args.id = job_path(args.id).name
     elif args.action == "wait":
@@ -1848,6 +2103,9 @@ def main(launcher=None):
     if args.action in {"run", "start", "open"}:
         check_nested()
         path, state = create_job(args)
+        if state.get("team"):
+            from claivelib import teams
+            teams.bind_worker(state["team"], state["id"])
         print(f"Worker {state['id']} | {clean(state['label'])} | {path}", flush=True)
         from claivelib import advice
         for note in advice.launch_notes(state, Path(args.prompt_file).stat().st_size):
@@ -1864,12 +2122,81 @@ def main(launcher=None):
         spawn_supervisor(path, state, "_supervise")
         print(f"Inspect: claive show {state['id']}\nCancel:  claive cancel {state['id']}")
         return 0
+    if args.action == "fork":
+        check_nested()
+        path, state = create_fork(args)
+        print(f"Worker {state['id']} | {clean(state['label'])} | {path}", flush=True)
+        from claivelib import advice
+        prompt_size = (len(args.prompt.encode("utf-8")) if args.prompt is not None
+                       else Path(args.prompt_file).stat().st_size)
+        for note in advice.launch_notes(state, prompt_size):
+            print(note, file=sys.stderr, flush=True)
+        spawn_supervisor(path, state, "_reusable")
+        print(f"Wait: claive wait {state['id']}\nFollow-up: claive followup {state['id']} --prompt-file ...\n"
+              f"Answer: claive answer {state['id']} --message ...\nClose: claive close {state['id']}")
+        return 0
+    if args.action == "monitor":
+        from claivelib import monitor_runner
+        if args.monitor_action == "add":
+            item = monitor_runner.add(args.id, args.command, args.every, args.label)
+            print(f"Monitor {item['id']} added to worker {item['worker_id']} ({item['interval_seconds']}s)")
+            return 0
+        if args.monitor_action == "list":
+            rows = (monitor_runner.list_for(args.id) if args.id else monitor_runner.list_all())
+            if args.json:
+                print(json.dumps(rows, indent=2))
+            elif not rows:
+                print("No monitors")
+            else:
+                for item in rows:
+                    print(f"{item['id']} worker={item['worker_id']} every={item['interval_seconds']}s "
+                          f"{clean(item.get('label') or '')}: {clean(item.get('command') or '')}")
+            return 0
+        if args.monitor_action == "cancel":
+            monitor_id = monitor_runner.cancel(args.monitor_id)
+            print(f"Monitor {monitor_id} cancelled")
+            return 0
+        result = run_due_monitors()
+        print("Monitors checked: {checked}, changes: {changed}, failures: {failed}, skipped: {skipped}".format(**result))
+        return 0
     if args.action == "conversation":
         from claivelib import conversation
         if args.conversation_action == "start":
             return conversation.start(args.workers, args.message, args.message_file,
                                       args.rounds, args.timeout, args.json)
         return conversation.show(args.id, args.json)
+    elif args.action == "channel":
+        check_nested()
+        from claivelib import channels
+        if args.channel_action == "open":
+            record = channels.open_channel(args.name, args.members, args.max_messages,
+                                           args.max_per_pair, args.timeout)
+            if args.json:
+                print(json.dumps(record, indent=2))
+            else:
+                print(f"Opened channel {record['name']} for {', '.join(record['members'])}")
+            return 0
+        if args.channel_action == "show":
+            record, channel_summary = channels.show_channel(args.name)
+            if args.json:
+                output = dict(record)
+                if channel_summary is not None:
+                    output["summary"] = channel_summary
+                print(json.dumps(output, indent=2))
+            else:
+                counts = record.get("counts", {})
+                line = f"Channel {record['name']}: {record['status']}; {counts.get('total', 0)} messages"
+                if record.get("status") == "open":
+                    from claivelib.wakes import format_time
+                    line += f"; deadline {format_time(record['deadline'])}"
+                else:
+                    line += f"; reason {record.get('close_reason')}"
+                print(line)
+            return 0
+        record, channel_summary = channels.close_channel(args.name)
+        print(f"Closed channel {record['name']}: {channel_summary['close_reason']}; "
+              f"{channel_summary['counts']['total']} messages; {channel_summary['duration']:.1f}s")
+        return 0
     elif args.action == "alias":
         from claivelib import aliases
         if args.alias_action == "set":
@@ -1877,6 +2204,11 @@ def main(launcher=None):
         if args.alias_action == "remove":
             return aliases.update(args.name)
         return aliases.listing(args.json)
+    elif args.action == "team":
+        from claivelib import teams
+        if args.team_action == "list":
+            return teams.listing(args.json)
+        return teams.show(args.name, args.json)
     elif args.action == "list":
         records = jobs()
         print(json.dumps(records, indent=2) if args.json else render(records, sys.stdout.isatty()))
@@ -1902,6 +2234,10 @@ def main(launcher=None):
             time.sleep(args.interval)
     elif args.action == "show":
         state = load(job_path(args.id))
+        from claivelib import peek
+        state["intent"] = peek.latest_intent(
+            job_path(args.id), get_engine(state.get("engine", DEFAULT_ENGINE)),
+            human_output=not args.json)
         if state["evidence"]["acceptance"]["status"] == "accepted":
             state["evidence"]["freshness"] = acceptance.check_freshness(job_path(args.id), state, state["evidence"])
         if state.get("reusable"):
@@ -1913,7 +2249,13 @@ def main(launcher=None):
     elif args.action == "steer":
         check_nested()
         path = job_path(args.id)
-        message = Path(args.message_file).read_text() if args.message_file else args.message
+        if args.message_file:
+            filename = Path(args.message_file)
+            if not filename.is_absolute() or not filename.is_file():
+                raise ValueError("--message-file must be an existing absolute file")
+            message = filename.read_text()
+        else:
+            message = args.message
         if not 0 <= args.wait <= 3600:
             raise ValueError("--wait must be between 0 and 3600 seconds")
         receipt = steering.submit(path, message)
@@ -1926,12 +2268,25 @@ def main(launcher=None):
         return 1 if receipt["status"] in {"rejected", "not_delivered", "unconfirmed"} else 124 if args.wait and receipt["status"] in {"pending", "sent"} else 0
     elif args.action in {"send", "ask"}:
         path = job_path(args.id)
-        if os.environ.get("CLAIVE_WORKER_ID") == path.name:
+        worker_sender = os.environ.get("CLAIVE_WORKER_ID")
+        if worker_sender == path.name:
             raise ValueError("a worker cannot message itself; put the note in your own answer")
-        check_nested("workers cannot send messages to workers; report to the parent in your final answer")
+        peer_send = False
+        if worker_sender and args.action == "send":
+            try:
+                job_path(worker_sender)
+            except ValueError:
+                check_nested("workers cannot send messages to workers; report to the parent in your final answer")
+            peer_send = True
+        if peer_send:
+            if args.mode not in {"note", "wake"} or args.at is not None or args.every is not None:
+                raise ValueError("workers can send only note or wake to a peer")
+        else:
+            check_nested("workers cannot send messages to workers; report to the parent in your final answer")
         if args.action == "ask":
-            from claivelib import asking
+            from claivelib import ask_schema, asking
             asking.validate_timeout(args.timeout)
+            schema = ask_schema.load_schema(args.schema) if args.schema else None
         if args.message_file:
             filename = Path(args.message_file)
             if not filename.is_absolute() or not filename.is_file():
@@ -1940,9 +2295,39 @@ def main(launcher=None):
         else:
             message_text = args.message
         if args.action == "ask":
-            record, code, notice = asking.ask(path, message_text, args.timeout, args.message_id)
-            print(json.dumps(record, indent=2) if args.json else notice)
+            record, code, notice = asking.ask(path, message_text, args.timeout, args.message_id,
+                                              schema=schema)
+            if args.json:
+                output = dict(record)
+                if code and notice:
+                    output["error"] = notice
+                print(json.dumps(output, indent=2))
+            else:
+                print(notice)
             return code
+        if peer_send:
+            from claivelib import channels
+            receipt, duplicate = channels.send_peer(path, message_text, args.mode, args.message_id)
+            output = dict(receipt)
+            if duplicate:
+                output.update(duplicate=True, notice="duplicate: original receipt returned")
+            print(json.dumps(output, indent=2) if args.json else
+                  ("duplicate: original receipt returned\n" + json.dumps(receipt, indent=2) if duplicate else
+                   f"Message {receipt['id']}: {receipt['result']}"))
+            return 0
+        if args.at is not None or args.every is not None:
+            if args.at is None:
+                raise ValueError("--every requires --at")
+            if args.mode == "now":
+                raise ValueError("--at cannot be combined with --mode now")
+            from claivelib import wakes
+            record = wakes.create(path, message_text, args.at, args.every, args.message_id)
+            if args.json:
+                print(json.dumps(record, indent=2))
+            else:
+                repeat = f"; every {wakes.format_duration(record['every'])}" if record["every"] else ""
+                print(f"Scheduled wake {record['id']} for {wakes.format_time(record['next_at'])}{repeat}")
+            return 0
         from claivelib import messaging
         receipt, duplicate = messaging.send(path, message_text, args.mode, args.message_id)
         output = dict(receipt)
@@ -1951,6 +2336,24 @@ def main(launcher=None):
         print(json.dumps(output, indent=2) if args.json else
               ("duplicate: original receipt returned\n" + json.dumps(receipt, indent=2) if duplicate else
                f"Message {receipt['id']}: {receipt['result']}"))
+        return 0
+    elif args.action == "schedule":
+        from claivelib import wakes
+        path = job_path(args.id)
+        if args.schedule_action == "list":
+            schedules = wakes.list_schedules(path)
+            if args.json:
+                print(json.dumps(schedules, indent=2))
+            elif not schedules:
+                print("No scheduled wakes.")
+            else:
+                for item in schedules:
+                    repeat = f"; every {wakes.format_duration(item['every'])}" if item.get("every") else ""
+                    print(f"{item['id']} {item['status']} at {wakes.format_time(item['next_at'])}"
+                          f"{repeat}: {item['message']}")
+            return 0
+        record = wakes.cancel(path, args.schedule_id)
+        print(json.dumps(record, indent=2) if args.json else f"Cancelled scheduled wake {record['id']}.")
         return 0
     elif args.action == "runtime":
         from claivelib import runtime
@@ -2013,8 +2416,11 @@ def main(launcher=None):
         if not log.exists():
             print("No log output yet.")
         else:
+            from claivelib import messaging
             with log.open(errors="replace") as stream:
-                print("".join(deque(stream, maxlen=args.lines)), end="")
+                for line in deque(stream, maxlen=args.lines):
+                    line = messaging.human_log_line(line, args.stderr)
+                    sys.stdout.write(strip_controls(line) if args.stderr else line)
     elif args.action == "wait":
         ids = args.id
         if not ids and args.inbox is None:
@@ -2172,7 +2578,7 @@ def main(launcher=None):
     elif args.action == "inbox":
         from claivelib import inbox as inbox_mod
         events = inbox_mod.read_new(args.consumer, peek=args.peek)
-        print(json.dumps(events, indent=2) if args.json else inbox_mod.format_text(events))
+        print(json.dumps(events, indent=2) if args.json else strip_controls(inbox_mod.format_text(events)))
     elif args.action == "batch":
         from claivelib import batch as batch_mod
         if args.batch_action == "validate":

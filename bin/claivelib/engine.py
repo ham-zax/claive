@@ -40,16 +40,26 @@ class TurnRequest:
     isolation: dict
     session_dir: Optional[str] = None
     steering: bool = False
+    fork_session_id: Optional[str] = None
+    fork_session_dir: Optional[str] = None
 
 
 class WorkerEngine:
     name = ""
+    supports_fork = False
     default_reasoning_effort = "high"
     default_max_model_steps = None
 
     def default_effort_for(self, model):
         """Effort for a turn that names none; an engine with per-model defaults overrides this."""
         return self.default_reasoning_effort
+
+    def supported_models(self):
+        """Models and the efforts each accepts, or None when the engine takes any model.
+
+        The claive config "models" allowlist may only narrow this; it can never widen it.
+        """
+        return None
 
     def resolve_session_id(self, value, session_logging=True):
         return (value or str(uuid.uuid4())) if session_logging else None
@@ -95,6 +105,10 @@ class WorkerEngine:
     def describe_event(self, event) -> list[dict]:
         """Describe a raw provider event without updating engine state."""
         return [{"kind": "event", "text": str(event.get("type", "unknown"))}]
+
+    def dedupe_key(self, event):
+        """Return a key for adjacent events that should count as one peek step."""
+        return None
 
     def discover_workspace(self, command, stderr_text):
         return None

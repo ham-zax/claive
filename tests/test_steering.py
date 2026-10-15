@@ -114,6 +114,13 @@ class SteeringChecks(unittest.TestCase):
         self.assertEqual(state["status"], "running")
         self.assertEqual(state["queue_depth"], 0)
 
+    def test_steer_message_file_requires_absolute_path(self):
+        identifier = self.start()
+        result = self.run_cli("steer", identifier, "--message-file", "tests/test_steering.py")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("--message-file must be an existing absolute file", result.stderr)
+
     def test_no_ack_terminal_is_unconfirmed(self):
         identifier = self.start()
         result = self.run_cli("steer", identifier, "--message", "no-ack", "--wait", "5", "--json")
@@ -152,6 +159,21 @@ class SteeringChecks(unittest.TestCase):
         result = self.run_cli("start", "--engine", "muse", "--enable-steering", "--workspace", str(self.root), "--prompt-file", str(self.prompt))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no", result.stderr.lower())
+
+    def test_help_and_docs_report_steering_exits_and_engine_effort_defaults(self):
+        help_result = self.run_cli("start", "--help")
+        self.assertEqual(help_result.returncode, 0, help_result.stderr)
+        self.assertIn("xhigh (Claude)", help_result.stdout)
+
+        docs = Path(__file__).resolve().parents[1] / "docs"
+        harness = (docs / "harness-integration.md").read_text()
+        steering = (docs / "steering.md").read_text()
+        messaging = " ".join((docs / "design-messaging-and-roles.md").read_text().split())
+        self.assertIn("1 refused or failed turn", harness)
+        self.assertIn("not_delivered, and unconfirmed receipts exit 1", steering)
+        self.assertIn("`--message-file /abs/instruction.md`", steering)
+        self.assertIn("`withdrawn` (request withdrawn before delivery, including expiry)", steering)
+        self.assertIn("The steering pump marks an expired steering request `withdrawn` before sending it.", messaging)
 
     def test_tool_completion_clears_phase_from_real_normalized_pi_event(self):
         state = dict(steps=0, task_failures=0)

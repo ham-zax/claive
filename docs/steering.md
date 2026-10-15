@@ -45,9 +45,9 @@ Claude Code 2.1.296 smoke on 2026-10-13 (Haiku 5.5) steered during a 10-second B
 completed the same turn with the steered `CLAIVE_STEER_VERIFIED` marker. An instruction that
 arrives after the last model request of the turn is not replayed and ends `unconfirmed`.
 
-`--message-file` can read an instruction from a file. This sends a correlated
-`steer` command into the running agent process. Pi queues the instruction after
-current tool calls finish and before the next model request. It does not change
+`--message-file /abs/instruction.md` reads an instruction from an absolute path.
+This sends a correlated `steer` command into the running agent process. Pi queues
+the instruction after current tool calls finish and before the next model request. It does not change
 the API request already in flight or stop a command. Provider acknowledgements
 are reported as `acknowledged` with their disposition; acknowledgement does not
 prove the model consumed or complied with the instruction. `show --json` exposes
@@ -55,10 +55,11 @@ turn-bound receipts and counts separately from queued follow-ups.
 
 Receipt states are `pending` (local submission), `sent` (written to provider),
 `acknowledged` or `rejected` (provider response), `not_delivered` (turn ended
-before delivery), and `unconfirmed` (sent but no response before turn ended).
+before delivery), `unconfirmed` (sent but no response before turn ended), and
+`withdrawn` (request withdrawn before delivery, including expiry).
 Pending requests cannot spill into another reusable turn. Instructions must be
 nonblank and at most 1 MiB. `--wait` times out with exit 124; it does not cancel
-or withdraw a sent instruction. Rejected/unconfirmed input exits nonzero.
+or withdraw a sent instruction. Rejected, not_delivered, and unconfirmed receipts exit 1.
 
 Existing Pi launches retain JSON print mode. They require a new launch with
 `--enable-steering` to use RPC. `followup` still queues a separate turn; `cancel`

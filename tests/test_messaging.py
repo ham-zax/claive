@@ -1,5 +1,6 @@
 """Parent-to-worker note, wake, and in-flight message delivery."""
 import hermetic  # noqa: F401
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -253,19 +254,47 @@ class MessagingChecks(unittest.TestCase):
         self.assertEqual(receipt["steering_receipt_id"], steering_receipt["id"])
         self.assertEqual(receipt["turn"], 4)
 
-    def test_duplicate_id_returns_receipt_without_a_second_delivery(self):
+    def test_mid_turn_ask_deadline_is_stored_in_steering_request(self):
+        path = self.registry / "expiring-steered-worker"
+        path.mkdir(parents=True)
+        state = dict(id=path.name, engine="fake", status="running", terminal=False,
+                     worker_pid=123, turn=4)
+        engine = mock.Mock()
+        engine.steering_capability.return_value = SimpleNamespace(supported=True, reason="")
+        deadline = time.time() + 30
+
+        with (mock.patch("claivelib.cli.load", return_value=state),
+              mock.patch("claivelib.engines.get_engine", return_value=engine),
+              mock.patch("claivelib.steering.get_engine", return_value=engine),
+              mock.patch("claivelib.state.launch_config", return_value={"steering": True}),
+              mock.patch("claivelib.steering.launch_config", return_value={"steering": True})):
+            receipt, duplicate = messaging.send(path, "Question?", "now", "2" * 32,
+                                                kind="ask", expires_at=deadline)
+
+        self.assertFalse(duplicate)
+        request_file = next((path / "steering/requests").glob("*.json"))
+        self.assertEqual(json.loads(request_file.read_text())["expires_at"], deadline)
+        self.assertEqual(receipt["steering_receipt_id"], json.loads(request_file.read_text())["id"])
+
+    def test_duplicate_id_returns_receipt_only_for_same_message(self):
         _process, worker_id = self.open_worker()
         self.until_idle(worker_id)
         message_id = "b" * 32
         first = self.cli("send", worker_id, "--message", "Original content.", "--id", message_id, "--json")
-        second = self.cli("send", worker_id, "--message", "Changed retry content.", "--id", message_id, "--json")
+        same_retry = self.cli("send", worker_id, "--message", "Original content.", "--id", message_id, "--json")
+        changed_retry = self.cli("send", worker_id, "--message", "Changed retry content.",
+                                 "--id", message_id, "--json")
         empty_retry = self.cli("send", worker_id, "--message", "", "--id", message_id, "--json")
         self.assertEqual(first.returncode, 0, first.stderr)
-        self.assertEqual(second.returncode, 0, second.stderr)
-        self.assertEqual(empty_retry.returncode, 0, empty_retry.stderr)
+        self.assertEqual(same_retry.returncode, 0, same_retry.stderr)
+        self.assertEqual(changed_retry.returncode, 1)
+        self.assertIn(f"message ID {message_id} was already used for a different message",
+                      changed_retry.stderr)
+        self.assertEqual(empty_retry.returncode, 1)
+        self.assertIn(f"message ID {message_id} was already used for a different message",
+                      empty_retry.stderr)
         original = json.loads(first.stdout)
-        duplicate = json.loads(second.stdout)
-        self.assertTrue(json.loads(empty_retry.stdout)["duplicate"])
+        duplicate = json.loads(same_retry.stdout)
         self.assertTrue(duplicate["duplicate"])
         self.assertEqual(duplicate["notice"], "duplicate: original receipt returned")
         self.assertEqual(duplicate["result"], original["result"])
@@ -275,6 +304,38 @@ class MessagingChecks(unittest.TestCase):
         prompt = self.prompt_for_turn(1)
         self.assertEqual(prompt.count("Original content."), 1)
         self.assertNotIn("Changed retry content.", prompt)
+
+    def test_legacy_receipt_without_digest_returns_stored_result(self):
+        path = self.registry / "legacy-worker"
+        path.mkdir(parents=True)
+        identifier = "e" * 32
+        receipt = dict(id=identifier, status="delivered", result="legacy result")
+        messaging._store_receipt(path, receipt)
+
+        duplicate, is_duplicate = messaging.send(path, "retry content", identifier=identifier)
+
+        self.assertTrue(is_duplicate)
+        self.assertEqual(duplicate, receipt)
+
+    def test_steering_acknowledgement_updates_message_receipt(self):
+        path = self.registry / "steered-worker"
+        path.mkdir(parents=True)
+        identifier = "f" * 32
+        steering_id = "1" * 32
+        message = "same content"
+        receipt = dict(id=identifier, status="pending", turn=4, steering_receipt_id=steering_id,
+                       message_digest=hashlib.sha256(message.encode("utf-8")).hexdigest())
+        messaging._store_receipt(path, receipt)
+        steering_file = path / "steering/receipts" / f"{steering_id}.json"
+        steering_file.parent.mkdir(parents=True)
+        steering_file.write_text(json.dumps(dict(id=steering_id, status="acknowledged", turn=4)))
+
+        current, duplicate = messaging.send(path, message, identifier=identifier)
+
+        self.assertTrue(duplicate)
+        self.assertEqual(current["status"], "delivered")
+        self.assertEqual(current["turn"], 4)
+        self.assertEqual(json.loads(messaging._receipt_path(path, identifier).read_text())["status"], "delivered")
 
     def test_refuses_invalid_messages_ids_and_worker_states(self):
         _process, worker_id = self.open_worker()

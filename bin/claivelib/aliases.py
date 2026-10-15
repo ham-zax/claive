@@ -40,7 +40,7 @@ def resolve(reference):
     return worker
 
 
-def update(name, worker=None, replace=False):
+def update(name, worker=None, replace=False, output=None):
     from claivelib import cli
     validate_name(name)
     # Resolve before taking the lock, and store only a canonical worker ID.
@@ -62,8 +62,24 @@ def update(name, worker=None, replace=False):
                 raise ValueError(f"@{name} already names worker {existing}; use --replace to rebind it")
             data[name] = target
         cli.save(path, data)
-    print(f"@{name} -> {target}" if target else f"Removed worker alias @{name}")
+    print(f"@{name} -> {target}" if target else f"Removed worker alias @{name}", file=output or sys.stdout)
     return 0
+
+
+def binding(name):
+    """Read one binding and its stored worker status without creating or locking files."""
+    from claivelib import cli
+    validate_name(name)
+    worker = _read(cli.root(create=False) / "aliases.json")[0].get(name)
+    if worker is None:
+        return None
+    try:
+        state = json.loads((cli.root(create=False) / worker / "state.json").read_text())
+    except (OSError, ValueError):
+        status = "missing"
+    else:
+        status = state.get("status", "unknown")
+    return dict(id=worker, status=status)
 
 
 def listing(json_output=False):

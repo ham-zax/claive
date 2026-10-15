@@ -111,6 +111,64 @@ class EnginePolicyChecks(unittest.TestCase):
             self.assertIn(message, result.stderr)
         self.assertFalse(self.jobs())
 
+    def test_models_allowlist_limits_models_and_efforts(self):
+        self.policy(fixture={"models": {"small": {"efforts": ["low", "high"]}, "open": {}}})
+        result = self.launch("--model", "big")
+        self.assertIn("model big on worker engine fixture is not in the models allowlist", result.stderr)
+        self.assertIn("allowed: small, open", result.stderr)
+        result = self.launch("--model", "small", "--reasoning-effort", "max")
+        self.assertIn("reasoning effort max for model small on worker engine fixture is not allowed", result.stderr)
+        self.assertIn("allowed: low, high", result.stderr)
+        self.assertIn("pass --model", self.launch().stderr)
+        self.assertFalse(self.jobs())
+        self.assertEqual(self.launch("--model", "small", "--reasoning-effort", "high").returncode, 0)
+        self.assertEqual(self.launch("--model", "open", "--reasoning-effort", "max").returncode, 0)
+        self.policy(fixture={"models": {"small": {"efforts": ["low"]}}, "default_model": "small",
+                             "default_reasoning_effort": "low"})
+        self.assertEqual(self.launch().returncode, 0)
+
+    def test_models_allowlist_applies_to_an_open_worker(self):
+        self.policy(fixture={"models": {"small": {}}})
+        process = subprocess.Popen([FIXTURE_CLI, "open", "--engine", "fixture", "--workspace", str(self.path),
+                                    "--prompt-file", str(self.prompt), "--model", "small"], env=self.env,
+                                   text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.addCleanup(process.kill)
+        deadline = time.time() + 10
+        while time.time() < deadline and not any(
+                json.loads(p.read_text()).get("status") == "idle" for p in self.jobs()):
+            time.sleep(0.05)
+        job = self.jobs()[0].parent.name
+        self.policy(fixture={"models": {"other": {}}})
+        refused = self.cli("followup", job, "--prompt-file", str(self.prompt))
+        self.assertIn("not in the models allowlist", refused.stderr)
+        self.assertEqual(self.cli("close", job).returncode, 0)
+        process.communicate(timeout=10)
+
+    def test_models_allowlist_cannot_widen_the_engine(self):
+        for engines, message in (
+                ({"codex": {"models": {"gpt-9": {}}}}, "gpt-9 not supported by the engine"),
+                ({"codex": {"models": {"gpt-6-luna": {"efforts": ["max", "high"]}}}},
+                 "high not supported by the engine for gpt-6-luna"),
+                ({"claude": {"models": {"claude-haiku-5-5": {"efforts": ["ultra"]}}}}, "ultra not supported"),
+                ({"fixture": {"models": {"a": {"effort": ["low"]}}}}, "must be {\"efforts\""),
+                ({"fixture": {"models": {"a": {"efforts": [""]}}}}, "must be {\"efforts\""),
+                ({"fixture": {"models": {"a": {}}, "default_model": "b"}}, "default_model must be one of"),
+                ({"fixture": {"models": {"a": {"efforts": ["low"]}}, "default_model": "a",
+                              "default_reasoning_effort": "max"}}, "efforts of default_model")):
+            self.policy(**engines)
+            result = self.launch("--model", "a")
+            self.assertNotEqual(result.returncode, 0, engines)
+            self.assertIn(message, result.stderr)
+        self.assertFalse(self.jobs())
+
+    def test_engines_command_reports_the_models(self):
+        self.policy(codex={"models": {"gpt-6-luna": {}, "gpt-6.1-sol": {"efforts": ["low", "xhigh"]}}})
+        rows = {row["engine"]: row for row in json.loads(self.cli("engines", "--json").stdout)["engines"]}
+        self.assertEqual(rows["codex"]["models"], {"gpt-6-luna": ["max"], "gpt-6.1-sol": ["low", "xhigh"]})
+        self.assertEqual(rows["claude"]["models"], {"claude-haiku-5-5": ["low", "medium", "high", "xhigh", "max"]})
+        self.assertIsNone(rows["pi"]["models"])
+        self.assertIn("models gpt-6-luna[max], gpt-6.1-sol[low,xhigh]", self.cli("engines").stdout)
+
     def test_engines_command_reports_the_policy(self):
         self.policy(claude={"enabled": False, "reason": "paused"},
                     pi={"default_reasoning_effort": "high", "disabled_reasoning_efforts": ["max"]})
@@ -123,6 +181,58 @@ class EnginePolicyChecks(unittest.TestCase):
         doctor = {c["name"]: c for c in json.loads(self.cli("doctor", "--json").stdout)["checks"]}
         self.assertEqual(doctor["claude"]["detail"], "disabled by user: paused")
 
+    def test_extra_args_reach_the_command_before_the_prompt_separator(self):
+        self.policy(fixture={"extra_args": ["--extra-flag", "value"]})
+        result = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state = json.loads(self.jobs()[0].read_text())
+        command = state["command"]
+        start = command.index("--extra-flag")
+        self.assertEqual(command[start + 1], "value")
+        if "--" in command:
+            self.assertLess(start, command.index("--"))
+
+    def test_extra_args_refuse_owned_flags_and_bad_values(self):
+        cases = [("claude", ["--model=other"], "claive owns --model"),
+                 ("codex", ["-m", "x"], "claive owns -m"),
+                 ("pi", ["--thinking", "low"], "claive owns --thinking"),
+                 ("muse", ["--session-id"], "claive owns --session-id"),
+                 ("claude", ["--"], "claive owns --"),
+                 ("claude", [""], "extra_args must hold nonempty strings"),
+                 ("claude", "--tools", "extra_args has the wrong type")]
+        for engine, value, message in cases:
+            with self.subTest(engine=engine, value=value):
+                self.policy(**{engine: {"extra_args": value}})
+                result = self.cli("engines", "--json")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+        self.policy(claude={"extra_args": ["--tools", "Read,Grep,Glob,Bash", "--permission-mode", "plan"]})
+        self.assertEqual(self.cli("engines", "--json").returncode, 0)
+
+    def test_codex_user_config_accepts_only_booleans(self):
+        for value in (True, False):
+            with self.subTest(value=value):
+                self.policy(codex={"user_config": value})
+                result = self.cli("engines", "--json")
+                self.assertEqual(result.returncode, 0, result.stderr)
+        for value in ("true", 1, 0, None, [], {}):
+            with self.subTest(value=value):
+                self.policy(codex={"user_config": value})
+                result = self.cli("engines", "--json")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"invalid claive config {self.config}: engines.codex.user_config has the wrong type",
+                              result.stderr)
+
+    def test_user_config_is_rejected_on_other_engines(self):
+        for engine in ("claude", "pi", "muse", "fixture"):
+            for value in (True, False):
+                with self.subTest(engine=engine, value=value):
+                    self.policy(**{engine: {"user_config": value}})
+                    result = self.cli("engines", "--json")
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(f"invalid claive config {self.config}: engines.{engine}.user_config is only for codex",
+                                  result.stderr)
+
     def test_orchestration_picks_skip_models_the_user_disabled(self):
         script = ("import sys; sys.path.insert(0, sys.argv[1])\n"
                   "from claivelib import orchestration as o\n"
@@ -132,6 +242,10 @@ class EnginePolicyChecks(unittest.TestCase):
                                 text=True, capture_output=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "beta")
+        self.policy(pi={"models": {"beta": {}}})
+        result = subprocess.run(["python3", "-c", script, str(Path(__file__).resolve().parents[1] / "bin")], env=self.env,
+                                text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.stdout.strip(), "beta", result.stderr)
 
 
 if __name__ == "__main__":

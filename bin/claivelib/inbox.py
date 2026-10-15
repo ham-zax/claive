@@ -155,6 +155,11 @@ def format_text(events):
             line = f"conversation {event.get('id')} {badge} code={event.get('code')}"
             if event.get("needs_parent"):
                 line += f" question: {event['needs_parent'].get('question', '')}"
+        elif event.get("type") == "channel_closed":
+            summary = event.get("summary", {})
+            count = summary.get("counts", {}).get("total", 0)
+            line = f"channel {event.get('channel', event.get('id'))} closed "
+            line += f"({summary.get('close_reason', 'unknown')}); {count} messages"
         elif event.get("type") == "goal":
             line = f"goal {event.get('id')} {badge} {label}"
             if event.get("needs_parent"):

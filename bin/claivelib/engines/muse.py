@@ -175,6 +175,15 @@ class MuseEngine(WorkerEngine):
         actual = matches[-1].rsplit(" (", 1)[0] if matches else ""
         return actual if actual and Path(actual).is_dir() else None
 
+    def describe_event(self, event) -> list[dict]:
+        if event.get("payload_type") == "run.terminal.completed":
+            payload = event.get("payload")
+            text = payload.get("text") if isinstance(payload, dict) else None
+            if isinstance(text, str) and text:
+                return [{"kind": "text", "text": text}]
+            return []
+        return super().describe_event(event)
+
     def normalize_event(self, event):
         payload = event.get("payload", {})
         kind = event.get("payload_type", "")
@@ -237,7 +246,8 @@ class MuseEngine(WorkerEngine):
     def build_command(self, request):
         command = [
             request.binary, "exec", "--workspace", request.workspace, "--trust-workspace",
-            "--disable-approval", "--json", "--provider", request.provider,
+            # Muse refuses --disable-approval with a permission profile (read-only turns).
+            *([] if request.read_only else ["--disable-approval"]), "--json", "--provider", request.provider,
             "--max-model-steps", str(request.max_model_steps), "--user-input-auto-resolve",
             "--prompt-file", request.prompt_file,
         ]
@@ -247,9 +257,8 @@ class MuseEngine(WorkerEngine):
             command += ["--model", request.model or MUSE_MODEL,
                         "--reasoning-effort", request.reasoning_effort]
         if request.read_only:
-            command += ["--disable-write", "--disable-shell"]
-        if not request.web:
-            command += ["--disable-web-tools"]
+            # Muse's own read-only profile: the filesystem refuses writes and the shell stays.
+            command += ["--permission-profile", ":read-only", "--disable-write"]
 
         isolation = request.isolation or {}
         mode = isolation.get("mode", "none")

@@ -77,7 +77,7 @@ queue related work with `claive followup @backend --prompt-file /abs/task.md`.
 To add context without a new task, use `claive send @backend --message '...'`
 (`--mode note|wake|now`; receipts in the worker's `messages/receipts/`).
 To question it, `claive ask @backend --message '...' --timeout 120` (exit 0 answered,
-124 withdrawn/expired, 3 needs the parent); the worker answers with `claive reply
+124 withdrawn/expired, 3 needs the parent, 1 refused or failed turn); the worker answers with `claive reply
 MSG_ID --message '...'` or in its final text. `claive peek @backend [--steps N]
 [--start N]` reads its numbered recent steps without touching it (parent only).
 Set `CLAIVE_PARENT=<harness>` to name the sender in delivered messages.

@@ -15,9 +15,97 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "bin"))
-from claivelib import cli, peek
+from claivelib import cli, intent, messaging, peek, redaction
 from claivelib.engine import WorkerEngine
 from claivelib.engines import get_engine
+
+
+class RedactionChecks(unittest.TestCase):
+    def test_issuer_token_shapes(self):
+        cases = [
+            "sk-" + "a_b-" * 4,
+            *(prefix + "a" * 36 for prefix in ("ghp_", "gho_", "ghs_", "github_pat_")),
+            *(f"xox{kind}-1234567890-abcdefghij" for kind in "abpr"),
+            "AKIA" + "A1" * 8,
+        ]
+        for secret in cases:
+            with self.subTest(prefix=secret.split("-", 1)[0]):
+                self.assertEqual(redaction.redact(secret), "[redacted]")
+
+    def test_bearer_private_key_and_named_values(self):
+        self.assertEqual(redaction.redact("Authorization: Bearer abc.def_123+/="),
+                         "Authorization: Bearer [redacted]")
+        private_key = ("-----BEGIN RSA PRIVATE KEY-----\nMIIE-private-material\n"
+                       "-----END RSA PRIVATE KEY-----")
+        self.assertEqual(redaction.redact(private_key), "[redacted]")
+
+        for key in ("client_secret", "refresh_token", "DB_PASSWORD", "passwd", "api_key", "APIKEY"):
+            with self.subTest(key=key):
+                self.assertEqual(redaction.redact(f"{key}=sensitive-value"),
+                                 f"{key}=[redacted]")
+        self.assertEqual(redaction.redact('{"database_token": "sensitive-value"}'),
+                         '{"database_token": "[redacted]"}')
+        self.assertEqual(redaction.redact("password='sensitive value'"),
+                         "password='[redacted]'")
+
+    def test_false_positives_remain_unchanged(self):
+        text = ("Normal prose mentions a token, password, and secret without assigning values. "
+                "Commit 0123456789abcdef0123456789abcdef01234567; worker 012345abcdef.")
+        self.assertEqual(redaction.redact(text), text)
+
+    def test_short_and_numeric_named_values_remain_unchanged(self):
+        text = ('input_tokens=120 max_tokens=4096 token=12345678 secret=short '
+                '{"input_tokens":"120","api_key":"12345678"}')
+        self.assertEqual(redaction.redact(text), text)
+        self.assertEqual(redaction.redact("secret=long-value"), "secret=[redacted]")
+        self.assertEqual(redaction.redact('{"api_key":"long-value"}'),
+                         '{"api_key":"[redacted]"}')
+
+
+class IntentChecks(unittest.TestCase):
+    def test_latest_text_step_first_nonempty_line_and_markdown_cleanup(self):
+        steps = [
+            {"kind": "text", "text": "Earlier intent"},
+            {"kind": "tool_result", "text": "ignored"},
+            {"kind": "text", "text": "\n  - **Review the _latest_ change**\nAnother line"},
+        ]
+        self.assertEqual(intent.intent_from_steps(steps), "Review the latest change")
+
+    def test_no_text_or_empty_latest_text_returns_none(self):
+        self.assertIsNone(intent.intent_from_steps([]))
+        self.assertIsNone(intent.intent_from_steps([{"kind": "tool_call", "text": "Read"}]))
+        self.assertIsNone(intent.intent_from_steps([
+            {"kind": "text", "text": "Older intent"}, {"kind": "text", "text": " \n\x00 "},
+        ]))
+
+    def test_control_characters_are_removed_and_long_intent_is_capped(self):
+        self.assertEqual(intent.intent_from_steps([{"kind": "text", "text": "Review\x00 the patch"}]),
+                         "Review the patch")
+        self.assertEqual(intent.intent_from_steps([{"kind": "text", "text": "\x1b[31mReview the patch\x1b[0m"}]),
+                         "Review the patch")
+        self.assertEqual(intent.intent_from_steps([{"kind": "text", "text": "x" * 130}]),
+                         "x" * 119 + "…")
+
+    def test_intent_from_each_engine_text_fixture(self):
+        pi_events = [json.loads(line) for line in
+                     (REPO / "tests/fixtures/pi/success.jsonl").read_text().splitlines()]
+        fixtures = [
+            ("pi", pi_events, "PI_PROBE_OK"),
+            ("claude", [{"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "**Claude scans sources**\nsecond line"}]}}],
+             "Claude scans sources"),
+            ("codex", [{"type": "item.completed", "item": {
+                "type": "agent_message", "text": "- Codex summarizes evidence\nsecond line"}}],
+             "Codex summarizes evidence"),
+            ("muse", [{"payload_type": "run.terminal.completed", "payload": {
+                "terminal": "completed", "text": "1. Muse checks the result\nsecond line"}}],
+             "Muse checks the result"),
+        ]
+        for name, events, expected in fixtures:
+            with self.subTest(engine=name):
+                engine = get_engine(name)
+                steps = [step for event in events for step in engine.describe_event(event)]
+                self.assertEqual(intent.intent_from_steps(steps), expected)
 
 
 class PeekChecks(unittest.TestCase):
@@ -139,17 +227,127 @@ class PeekChecks(unittest.TestCase):
         self.write_events([{"type": "first\nsecond"}])
         result = self.output()
         self.assertEqual(set(result), {"id", "status", "phase", "turn",
-                                       "last_activity_age_seconds", "steps", "total"})
+                                       "last_activity_age_seconds", "intent", "steps", "total"})
         self.assertEqual(result["id"], self.worker_id)
         self.assertEqual(result["status"], "idle")
         self.assertEqual(result["phase"], "waiting")
         self.assertEqual(result["turn"], 3)
         self.assertGreaterEqual(result["last_activity_age_seconds"], 10)
+        self.assertIsNone(result["intent"])
         self.assertEqual(result["steps"], [{"index": 1, "kind": "event", "text": "first\nsecond"}])
         human = self.run_cli()
         self.assertEqual(human.returncode, 0, human.stderr)
         self.assertRegex(human.stdout, rf"Worker {self.worker_id} \| idle \| turn 3 \| waiting \| last event \S+ ago")
         self.assertIn("event: first ⏎ second", human.stdout)
+        self.assertNotIn("Intent:", human.stdout)
+
+    def test_intent_uses_full_log_and_is_redacted_in_human_and_json(self):
+        self.state["engine"] = "claude"
+        self.write_state()
+        token = "sk-" + "intent-" + "A9" * 10
+        events = [{"type": "assistant", "message": {"content": [
+            {"type": "text", "text": f"Step {index}"}]}} for index in range(5)]
+        events.append({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": f"**Review {token} now**\nsecond line"}]}})
+        self.write_events(events)
+
+        result = self.output("--start", "1", "--steps", "1")
+        self.assertEqual(result["steps"], [{"index": 1, "kind": "text", "text": "Step 0"}])
+        self.assertEqual(result["intent"], "Review [redacted] now")
+        human = self.run_cli("--start", "1", "--steps", "1")
+        self.assertEqual(human.returncode, 0, human.stderr)
+        self.assertEqual(human.stdout.splitlines()[1], "Intent: Review [redacted] now")
+        self.assertNotIn(token, human.stdout)
+
+    def test_human_output_formats_parent_message_without_changing_json(self):
+        identifier = "f" * 32
+        envelope = messaging.delivered_text(dict(
+            id=identifier, kind="note", message="Keep the final check focused.",
+            sender="parent (codex)"))
+        self.state["engine"] = "claude"
+        self.write_state()
+        self.write_events([{"type": "assistant", "message": {"content": [
+            {"type": "text", "text": envelope}]}}])
+
+        result = self.output()
+        self.assertEqual(result["steps"][0]["text"], envelope)
+        human = self.run_cli()
+        self.assertEqual(human.returncode, 0, human.stderr)
+        self.assertIn(f"parent -> worker [note {identifier}]: Keep the final check focused.", human.stdout)
+        self.assertIn(f"Intent: parent -> worker [note {identifier}]: Keep the final check focused.", human.stdout)
+        self.assertNotIn("<parent-message>", human.stdout)
+
+    def test_codex_duplicate_agent_message_event_is_one_step(self):
+        self.state["engine"] = "codex"
+        self.write_state()
+        text = "final response"
+        self.write_events([
+            {"type": "item.completed", "item": {
+                "type": "agent_message", "id": "msg_123", "text": text,
+                "command": None, "exit_code": None}},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": text}},
+        ])
+
+        result = self.output()
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["steps"], [{"index": 1, "kind": "text", "text": text}])
+
+        self.write_events([
+            {"type": "item.completed", "item": {"type": "agent_message", "id": "msg_123", "text": text}},
+            {"type": "item.completed", "item": {"type": "agent_message", "id": "msg_456", "text": text}},
+        ])
+        self.assertEqual(self.output()["total"], 2)
+
+    def test_step_text_is_redacted_before_clip_in_human_and_json(self):
+        self.state["engine"] = "claude"
+        self.write_state()
+        token = "sk-" + "Z_9-" * 4
+        text = f"Keep this value private: {token}"
+        self.write_events([{"type": "assistant", "message": {"content": [
+            {"type": "text", "text": text}]}}])
+
+        self.assertEqual(self.output()["steps"][0]["text"],
+                         "Keep this value private: [redacted]")
+        human = self.run_cli()
+        self.assertIn("Keep this value private: [redacted]", human.stdout)
+        self.assertNotIn(token, human.stdout)
+
+        long_text = "h" * 395 + token + "t" * 400
+        self.write_events([{"type": "assistant", "message": {"content": [
+            {"type": "text", "text": long_text}]}}])
+        clipped_inputs = []
+
+        def capture_before_clip(value, limit=peek.STEP_CHARS):
+            clipped_inputs.append(value)
+            return value
+
+        with mock.patch.object(peek, "clip", side_effect=capture_before_clip):
+            peek.steps_window(self.path, get_engine("claude"), 5)
+        self.assertEqual(clipped_inputs, [redaction.redact(long_text)])
+
+    def test_human_output_strips_controls_but_json_keeps_step_text(self):
+        self.write_events([{"type": "probe"}])
+        unsafe_kind = "event\x1b[2J"
+        unsafe_text = "plain\x07 café\x9b2J"
+        engine = mock.Mock()
+        engine.describe_event.return_value = [dict(kind=unsafe_kind, text=unsafe_text)]
+
+        with (mock.patch.dict(os.environ, self.env, clear=True),
+              mock.patch("claivelib.engines.get_engine", return_value=engine),
+              redirect_stdout(io.StringIO()) as output):
+            self.assertEqual(peek.show(self.worker_id), 0)
+        human = output.getvalue()
+        self.assertNotIn("\x1b", human)
+        self.assertNotIn("\x07", human)
+        self.assertNotIn("\x9b", human)
+        self.assertIn("event: plain café", human)
+
+        with (mock.patch.dict(os.environ, self.env, clear=True),
+              mock.patch("claivelib.engines.get_engine", return_value=engine),
+              redirect_stdout(io.StringIO()) as output):
+            self.assertEqual(peek.show(self.worker_id, json_output=True), 0)
+        record = json.loads(output.getvalue())
+        self.assertEqual(record["steps"], [dict(index=1, kind=unsafe_kind, text=unsafe_text)])
 
     def test_unknown_activity_age(self):
         self.state.pop("last_activity")
@@ -186,6 +384,48 @@ class EventDescriptions(unittest.TestCase):
             {"type": "tool_result", "is_error": True, "content": "denied"}]}}),
             [{"kind": "tool_result", "text": "error: denied"}])
         self.assertEqual(engine.describe_event({"type": "result", "subtype": "success", "result": "done"}), [])
+        self.assertEqual(engine.describe_event({"type": "system", "subtype": "init"}), [])
+        self.assertEqual(engine.describe_event({"type": "system", "subtype": "hook_started"}), [])
+        self.assertEqual(engine.describe_event({"type": "system", "subtype": "api_error",
+                                                "error": {"message": "service unavailable"}}),
+                         [{"kind": "error", "text": "service unavailable"}])
+
+    def test_claude_rate_limit_peek_uses_normalized_quota_only_when_rejected(self):
+        engine = get_engine("claude")
+        allowed_statuses = ("allowed", "allowed_warning", "not_rejected")
+        for status in allowed_statuses:
+            with self.subTest(status=status):
+                event = {"type": "rate_limit_event", "rate_limit_info": {"status": status}}
+                self.assertEqual(engine.describe_event(event), [])
+
+        rejected = {"type": "rate_limit_event", "rate_limit_info": {
+            "status": "rejected", "resetsAt": 1791417600}}
+        quota = next(item for item in engine.normalize_event(rejected)
+                     if item["type"] == "quota_exhausted")
+        self.assertEqual(engine.describe_event(rejected),
+                         [{"kind": "error", "text": peek.compact(quota)}])
+
+    def test_claude_provider_error_pair_is_one_error_and_distinct_result_remains(self):
+        engine = get_engine("claude")
+        error_text = (
+            "Autocompact is thrashing: the context refilled to the limit within 3 turns of the previous "
+            "compact, 3 times in a row. A file being read or a tool output is likely too large for the "
+            "context window. Try reading in smaller chunks, or use /clear to start fresh.")
+        assistant = {"type": "assistant", "error": "invalid_request", "message": {
+            "type": "message", "role": "assistant", "content": [{"type": "text", "text": error_text}]}}
+        matching_result = {"type": "result", "subtype": "success", "is_error": True,
+                           "result": error_text}
+
+        steps = engine.describe_event(assistant) + engine.describe_event(matching_result)
+
+        self.assertEqual(steps, [{"kind": "error", "text": error_text}])
+        different_result = {"type": "result", "subtype": "error_api_error", "is_error": True,
+                            "result": "A different provider error"}
+        different_pair = engine.describe_event(assistant) + engine.describe_event(different_result)
+        self.assertEqual(different_pair, [
+            {"kind": "error", "text": error_text},
+            {"kind": "error", "text": "A different provider error"},
+        ])
 
     def test_codex_text_call_and_result(self):
         # Shapes from tests/test_codex_engine.py's normalization cases.

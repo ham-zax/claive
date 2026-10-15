@@ -32,6 +32,7 @@ import uuid
 from claivelib import cli as cli_mod
 from claivelib import config
 from claivelib import inbox as inbox_mod
+from claivelib import runtime
 
 TERMINAL = {"done", "failed", "timed_out", "cancelled"}
 PROVIDER_KINDS = {"quota", "protocol", "launch"}
@@ -39,6 +40,11 @@ BACKOFF_BASE = 30
 BACKOFF_CAP = 1800
 DEFAULT_BUDGET = 7200
 DEFAULT_ATTEMPTS = 3
+INSTALL_FINGERPRINT_INTERVAL = 30.0
+
+
+def install_fingerprint():
+    return runtime.fingerprint_tree(runtime.package_dir())
 
 
 def goals_dir():
@@ -134,6 +140,8 @@ def claive_command(*args):
 
 def cmd_add(args):
     cli_mod.check_nested()  # queued goals launch workers
+    if args.role is not None and args.role not in cli_mod.resolved_roles():
+        raise ValueError(f"unknown role: {args.role}")
     prompt = Path(args.prompt_file)
     if not prompt.is_absolute() or not prompt.is_file() or not prompt.stat().st_size:
         raise ValueError("--prompt-file must be an existing nonempty absolute file")
@@ -272,11 +280,70 @@ def cmd_retry(goal_id):
 # --- claive serve ------------------------------------------------------------------------------
 
 class Server:
-    def __init__(self, interval=5.0, max_parallel=1):
+    def __init__(self, interval=5.0, max_parallel=1, fingerprint_fn=None):
         self.interval = interval
         self.max_parallel = max_parallel
         self.terminating = False
         self.state_path = supervisor_dir() / "state.json"
+        self.fingerprint_fn = install_fingerprint if fingerprint_fn is None else fingerprint_fn
+        self.install_fingerprint = None
+        self.install_fingerprint_set = False
+        self.install_fingerprint_candidate = None
+        self.install_fingerprint_checked_at = None
+        self.install_fingerprint_error_logged = False
+
+    def _read_install_fingerprint(self):
+        try:
+            fingerprint = self.fingerprint_fn()
+        except (OSError, ValueError) as error:
+            if not self.install_fingerprint_error_logged:
+                self.install_fingerprint_error_logged = True
+                try:
+                    self.log(f"install fingerprint unavailable; skipping check: {error}")
+                except (OSError, ValueError):
+                    pass  # stdout was attempted by log(); diagnostics must not stop serve either
+            return False, None
+        self.install_fingerprint_error_logged = False
+        return True, fingerprint
+
+    def capture_install_fingerprint(self):
+        available, fingerprint = self._read_install_fingerprint()
+        self.install_fingerprint_checked_at = time.monotonic()
+        if available:
+            self.install_fingerprint = fingerprint
+            self.install_fingerprint_set = True
+
+    def check_install_fingerprint(self):
+        if self.install_fingerprint_checked_at is None:
+            return
+        now = time.monotonic()
+        if now - self.install_fingerprint_checked_at < INSTALL_FINGERPRINT_INTERVAL:
+            return
+        if any(goal["status"] == "running" for goal in all_goals()):
+            self.install_fingerprint_checked_at = now
+            return
+        available, fingerprint = self._read_install_fingerprint()
+        self.install_fingerprint_checked_at = time.monotonic()
+        if not available:
+            self.install_fingerprint_candidate = None
+            return
+        if any(goal["status"] == "running" for goal in all_goals()):
+            self.install_fingerprint_candidate = None
+            return
+        if not self.install_fingerprint_set:
+            self.install_fingerprint = fingerprint
+            self.install_fingerprint_set = True
+            self.install_fingerprint_candidate = None
+            return
+        if fingerprint == self.install_fingerprint:
+            self.install_fingerprint_candidate = None
+            return
+        if fingerprint != self.install_fingerprint_candidate:
+            self.install_fingerprint_candidate = fingerprint
+            return
+        print("claive serve: install changed; restarting", flush=True)
+        executable = sys.executable
+        os.execv(executable, [executable, os.path.abspath(sys.argv[0]), *sys.argv[1:]])
 
     def log(self, text):
         line = f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {text}"
@@ -311,12 +378,19 @@ class Server:
         if stop_file().exists():
             self.stop_all()
             return False
+        from claivelib import wakes
+        wake_result = wakes.deliver_all()
+        for item in wake_result["delivered"]:
+            self.log(f"worker {item['worker']}: scheduled wake {item['schedule_id']} queued")
+        for item in wake_result["errors"]:
+            self.log(f"worker {item['worker']}: scheduled wake deferred ({item['error']})")
         for goal in all_goals():
             if goal["status"] in {"running", "parked"}:
                 with updating(goal["id"]) as current:
                     if current["status"] in {"running", "parked"}:
                         self.reconcile(current)
         self.launch_ready()
+        cli_mod.run_due_monitors()
         return True
 
     def stop_all(self):
@@ -512,6 +586,7 @@ class Server:
         signal.signal(signal.SIGTERM, terminate)
         signal.signal(signal.SIGINT, terminate)
         if not once:
+            self.capture_install_fingerprint()
             self.log(f"serve started (pid {os.getpid()}, interval {self.interval:g}s, "
                      f"max parallel {self.max_parallel})")
         while True:
@@ -521,6 +596,7 @@ class Server:
                 return 0
             deadline = time.monotonic() + self.interval
             while time.monotonic() < deadline and not self.terminating and not stop_file().exists():
+                self.check_install_fingerprint()
                 time.sleep(0.2)
             if self.terminating:
                 left = [goal["worker"] for goal in all_goals() if goal["status"] == "running"]

@@ -21,17 +21,17 @@ def emit(event):
 
 
 def home_for_server(base, opt_in, target, ephemeral=False):
-    """Avoid silently inheriting user tools/rules in an otherwise hermetic job."""
+    """Share skills and retained sessions; user config remains opt-in."""
     if not ephemeral:
         # The first steerable turn must leave a rollout to resume later, even
         # on a host that has never launched Codex before.
         (base / "sessions").mkdir(parents=True, exist_ok=True)
-    for name in ("auth.json", "sessions"):
+    for name in ("auth.json", "sessions", "skills"):
         source = base / name
         if source.exists():
             (target / name).symlink_to(source, target_is_directory=source.is_dir())
     if opt_in:
-        for name in ("config.toml", "skills"):
+        for name in ("config.toml",):
             source = base / name
             if source.exists():
                 (target / name).symlink_to(source, target_is_directory=source.is_dir())
@@ -46,17 +46,19 @@ def run(args):
                    "-c", 'model_reasoning_effort="' + args.effort + '"',
                    "-c", 'approval_policy="never"',
                    "-c", 'sandbox_mode="' + args.sandbox + '"',
-                   "-c", 'web_search="' + ("live" if args.web else "disabled") + '"',
-                   "-c", "project_doc_max_bytes=0"]
+                   "-c", 'web_search="live"']
         child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                  stderr=sys.stderr, env=env, bufsize=0)
-        incoming = {sys.stdin.fileno(): bytearray(), child.stdout.fileno(): bytearray()}
+        incoming = {child.stdout.fileno(): bytearray()}
         selector = selectors.DefaultSelector()
-        selector.register(sys.stdin.buffer, selectors.EVENT_READ)
         selector.register(child.stdout, selectors.EVENT_READ)
+        if not args.initial_prompt_file:
+            incoming[sys.stdin.fileno()] = bytearray()
+            selector.register(sys.stdin.buffer, selectors.EVENT_READ)
         thread_id = None
         turn_id = None
-        prompt = None
+        prompt = (Path(args.initial_prompt_file).read_text(encoding="utf-8")
+                  if args.initial_prompt_file else None)
         pending_steers = []
         last_text = ""
         finished = False
@@ -142,7 +144,11 @@ def run(args):
                             result = event.get("result") or {}
                             if identifier == "initialize":
                                 send("initialized")
-                                if args.resume:
+                                if args.fork:
+                                    send("thread/fork", {"threadId": args.fork, "model": args.model,
+                                                         "cwd": args.cwd, "sandbox": args.sandbox,
+                                                         "modelProvider": "openai", "approvalPolicy": "never"}, "thread")
+                                elif args.resume:
                                     send("thread/resume", {"threadId": args.resume, "model": args.model,
                                                            "cwd": args.cwd, "sandbox": args.sandbox,
                                                            "modelProvider": "openai", "approvalPolicy": "never"}, "thread")
@@ -211,7 +217,10 @@ def main():
     parser = argparse.ArgumentParser()
     for name in ("binary", "cwd", "model", "effort", "sandbox"):
         parser.add_argument("--" + name, required=True)
-    parser.add_argument("--resume")
+    session_action = parser.add_mutually_exclusive_group()
+    session_action.add_argument("--resume")
+    session_action.add_argument("--fork")
+    parser.add_argument("--initial-prompt-file")
     parser.add_argument("--web", action="store_true")
     parser.add_argument("--user-config", action="store_true")
     parser.add_argument("--ephemeral", action="store_true")

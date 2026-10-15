@@ -9,6 +9,7 @@ import uuid
 import os
 
 from claivelib import cli, mission, turns
+from claivelib.ansi import strip_controls
 from claivelib.state import launch_config
 
 MAX_MESSAGE_BYTES = 128 * 1024
@@ -246,14 +247,16 @@ def _print(state, json_output):
     if json_output:
         print(json.dumps(state, indent=2))
     else:
-        print(f"Conversation {state['id']}: {state['status']} | {len(state['transcript'])} replies | code={state['code']}")
+        print(strip_controls(f"Conversation {state['id']}: {state['status']} | "
+                             f"{len(state['transcript'])} replies | code={state['code']}"))
         if state.get("error"):
-            print(state["error"])
+            print(strip_controls(state["error"]))
         if state.get("needs_parent"):
-            print(f"Parent question from {state['needs_parent']['worker']}: {state['needs_parent'].get('question', '')}")
+            print(strip_controls(f"Parent question from {state['needs_parent']['worker']}: "
+                                 f"{state['needs_parent'].get('question', '')}"))
         if state["transcript"]:
-            print(state["transcript"][-1]["answer"])
-        print(f"Transcript: claive conversation show {state['id']} --json")
+            print(strip_controls(state["transcript"][-1]["answer"]))
+        print(strip_controls(f"Transcript: claive conversation show {state['id']} --json"))
     return state.get("code") or 0
 
 

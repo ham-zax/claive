@@ -100,6 +100,18 @@ class ClaudeSteeringChecks(unittest.TestCase):
         duplex = TurnRequest(**base, steering=True)
         command = engine.build_command(duplex)
         self.assertEqual(command[-3:], ["--input-format", "stream-json", "--replay-user-messages"])
+        self.assertEqual(command[:-3], plain[:-2])
+        for read_only in (False, True):
+            with self.subTest(read_only=read_only):
+                options = dict(base, read_only=read_only, steering=True)
+                steered = engine.build_command(TurnRequest(**options))
+                self.assertEqual(steered[steered.index("--tools") + 1], "default")
+                self.assertEqual(steered[steered.index("--permission-mode") + 1],
+                                 "plan" if read_only else "bypassPermissions")
+                self.assertEqual(steered[steered.index("--setting-sources") + 1], "")
+                self.assertNotIn("--strict-mcp-config", steered)
+                self.assertNotIn("--disable-slash-commands", steered)
+                self.assertEqual(engine.build_command(TurnRequest(**dict(options, web=True))), steered)
         self.assertNotIn("work on task", command)
         self.assertEqual(json.loads(engine.initial_input(duplex)),
                          {"type": "user", "message": {"role": "user", "content": "work on task"}})

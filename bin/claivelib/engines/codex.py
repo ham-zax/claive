@@ -7,6 +7,7 @@ from pathlib import Path
 import uuid
 
 from claivelib.engine import SteeringCapability, WorkerEngine
+from claivelib.config import engine_policy
 from claivelib.state import launch_config, session_id
 
 CODEX_MODEL = "gpt-6-luna"
@@ -35,13 +36,22 @@ def _yolo(request):
     return not request.read_only and os.environ.get("CLAIVE_CODEX_YOLO", "").lower() not in {"0", "false", "no", "off"}
 
 
+def _use_user_config():
+    return engine_policy("codex").get("user_config", False) or os.environ.get(
+        "CLAIVE_CODEX_USE_USER_CONFIG", "").lower() in {"1", "true", "yes"}
+
+
 class CodexEngine(WorkerEngine):
     name = "codex"
+    supports_fork = True
     default_model = CODEX_MODEL
     default_reasoning_effort = CODEX_EFFORT
 
     def default_effort_for(self, model):
         return CODEX_DEFAULT_EFFORTS.get(model, CODEX_EFFORT)
+
+    def supported_models(self):
+        return {model: tuple(efforts) for model, efforts in CODEX_EFFORTS.items()}
 
     def steering_capability(self):
         return SteeringCapability(True, "codex-app-server", notes=(
@@ -56,6 +66,7 @@ class CodexEngine(WorkerEngine):
 
     def __init__(self):
         self._last_text = ""
+        self._peek_message = None
 
     def resolve_session_id(self, value, session_logging=True):
         if not session_logging:
@@ -110,37 +121,37 @@ class CodexEngine(WorkerEngine):
     def build_command(self, request):
         self.validate_turn(request)
         sandbox = "read-only" if request.read_only else "workspace-write"
-        if request.steering:
+        if request.steering or request.fork_session_id:
             if _yolo(request):
                 sandbox = "danger-full-access"
             wrapper = Path(__file__).with_name("codex_appserver.py")
             command = [sys.executable, str(wrapper), "--binary", request.binary,
                        "--cwd", request.workspace, "--model", request.model,
                        "--effort", request.reasoning_effort, "--sandbox", sandbox]
-            if request.session_id and self._session_file(request.session_id):
+            if request.fork_session_id:
+                command.extend(["--fork", request.fork_session_id])
+                if not request.steering:
+                    command.extend(["--initial-prompt-file", request.prompt_file])
+            elif request.session_id and self._session_file(request.session_id):
                 command.extend(["--resume", request.session_id])
-            if request.web:
-                command.append("--web")
             if not request.session_logging:
                 command.append("--ephemeral")
-            if os.environ.get("CLAIVE_CODEX_USE_USER_CONFIG", "").lower() in {"1", "true", "yes"}:
+            if _use_user_config():
                 command.append("--user-config")
             return command
         if _yolo(request):
             guard = ["--dangerously-bypass-approvals-and-sandbox"]
         else:
             guard = ["-c", f'sandbox_mode="{sandbox}"', "-c", 'approval_policy="never"']
-        # Default remains hermetic. Explicitly opt in for deployments that register
-        # a narrow MCP browser server with `codex mcp add` and user-installed skills.
-        # Keep this independent of the growth project and the browser provider.
-        ignore_user_config = os.environ.get("CLAIVE_CODEX_USE_USER_CONFIG", "").lower() not in {"1", "true", "yes"}
+        # Skills load independently; config.toml (including MCP servers) is opt-in.
+        ignore_user_config = not _use_user_config()
         shared = [
             "--json", "--skip-git-repo-check",
             *(["--ignore-user-config"] if ignore_user_config else []), "--ignore-rules",
             "-m", request.model,
             "-c", f'model_reasoning_effort="{request.reasoning_effort}"',
             *guard,
-            "-c", f'web_search="{"live" if request.web else "disabled"}"',
+            "-c", 'web_search="live"',
         ]
         if not request.session_logging:
             shared += ["--ephemeral"]
@@ -150,6 +161,26 @@ class CodexEngine(WorkerEngine):
         if request.session_id and self._session_file(request.session_id):
             return [request.binary, "exec", "resume", *shared, request.session_id, "--", prompt]
         return [request.binary, "exec", *shared, "--cd", request.workspace, "--", prompt]
+
+    def dedupe_key(self, event):
+        """Collapse Codex's repeated adjacent agent_message completion event."""
+        item = event.get("item") if isinstance(event.get("item"), dict) else {}
+        if event.get("type") != "item.completed" or item.get("type") != "agent_message":
+            self._peek_message = None
+            return None
+        text = item.get("text")
+        if not isinstance(text, str):
+            self._peek_message = None
+            return None
+        identifier = item.get("id")
+        identifier = identifier if isinstance(identifier, str) else None
+        previous = self._peek_message
+        if (previous is not None and previous[0] == text
+                and (previous[1] is None or identifier is None or previous[1] == identifier)):
+            return previous[2]
+        key = (text, identifier)
+        self._peek_message = (text, identifier, key)
+        return key
 
     def describe_event(self, event) -> list[dict]:
         from claivelib.peek import compact

@@ -7,6 +7,7 @@ from claivelib.engine import WorkerEngine
 
 class FixtureEngine(WorkerEngine):
     name = "fixture"
+    supports_fork = True
     default_max_model_steps = 100
 
     def resolve_launch(self, **options):
@@ -14,10 +15,13 @@ class FixtureEngine(WorkerEngine):
             "binary": os.environ["FIXTURE_WORKER_BINARY"],
             "provider": options.get("provider") or "fixture",
             "model": options.get("model"),
+            "steering": bool(options.get("steering")),
             "read_only": bool(options.get("read_only")),
             "web": bool(options.get("web")),
             "output_schema": options.get("output_schema"),
             "session_logging": bool(options.get("session_logging", True)),
+            "session_dir": (str(Path(options["session_root"]) / "fixture" / options["session_id"])
+                            if options.get("session_id") else None),
             "isolation": dict(options.get("isolation") or {}),
         }
 
@@ -27,7 +31,15 @@ class FixtureEngine(WorkerEngine):
             raise ValueError("fixture binary must be an absolute executable path")
 
     def build_command(self, request):
-        return [request.binary, request.prompt_file, *(["--model", request.model] if request.model else [])]
+        command = [request.binary, request.prompt_file]
+        if request.model:
+            command += ["--model", request.model]
+        if request.session_id and request.session_dir:
+            command += ["--session-dir", request.session_dir, "--session-id", request.session_id]
+        if request.fork_session_id:
+            command += ["--fork-session-id", request.fork_session_id,
+                        "--fork-session-dir", request.fork_session_dir or ""]
+        return command
 
     def normalize_event(self, event):
         kind = event.get("kind")

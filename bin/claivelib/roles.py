@@ -21,7 +21,7 @@ ROLES = {
         "model": "muse-spark-1.3-contributor",
         "reasoning_effort": "xhigh",
         "read_only": False,
-        "max_model_steps": 100,
+        "max_model_steps": None,
         "preamble": (
             "You are a worker. Implement only the assigned files. No commit, no staging, "
             "no delegation. Run the named checks and report their results. When a choice "
@@ -56,11 +56,12 @@ ROLES = {
 }
 
 
-def resolved_roles():
-    """ROLES with the per-host overrides from the claive config applied."""
+def resolved_roles(config_data=None):
+    """Built-in roles with per-host overrides and custom roles applied."""
     roles = deepcopy(ROLES)
-    for name, override in config.role_overrides().items():
-        if name not in roles:
-            raise ValueError(f"invalid claive config {config.config_path()}: unknown role {name}")
-        roles[name].update(override)
+    for name, override in config.role_overrides(config_data).items():
+        role = roles.setdefault(name, {})
+        if "prompt_file" in override:
+            role.pop("preamble", None)
+        role.update(override)
     return roles

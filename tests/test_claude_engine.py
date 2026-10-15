@@ -79,15 +79,23 @@ class ClaudeChecks(unittest.TestCase):
     def test_command_tools_session_and_resume(self):
         command = self.engine.build_command(self.request())
         self.assertEqual(command[command.index("--model") + 1], CLAUDE_MODEL)
-        self.assertEqual(command[command.index("--tools") + 1], "Read,Edit,Write,Bash,Grep,Glob")
+        self.assertEqual(command[command.index("--tools") + 1], "default")
+        self.assertEqual(command[command.index("--permission-mode") + 1], "bypassPermissions")
+        self.assertEqual(command[command.index("--setting-sources") + 1], "")
+        self.assertNotIn("--strict-mcp-config", command)
+        self.assertNotIn("--disable-slash-commands", command)
         self.assertEqual(command[command.index("--autocompact") + 1], "100k")
         self.assertEqual(self.engine.default_reasoning_effort, "xhigh")
         self.assertIn("--session-id", command)
         self.assertEqual(command[-2:], ["--", "--do the thing\n"])
         read_only = self.engine.build_command(self.request(read_only=True))
-        self.assertEqual(read_only[read_only.index("--tools") + 1], "Read,Grep,Glob")
-        web = self.engine.build_command(self.request(read_only=True, web=True))
-        self.assertTrue(web[web.index("--tools") + 1].endswith(",WebSearch,WebFetch"))
+        self.assertEqual(read_only[read_only.index("--tools") + 1], "default")
+        self.assertEqual(read_only[read_only.index("--permission-mode") + 1], "plan")
+        for read_only_turn, expected in ((False, command), (True, read_only)):
+            with self.subTest(read_only=read_only_turn):
+                self.assertEqual(self.engine.build_command(self.request(read_only=read_only_turn, web=True)),
+                                 expected)
+        self.assertTrue(self.engine.resolve_launch(web=True)["web"])
         transcript = self.root / "config/projects/-w" / f"{SESSION}.jsonl"
         transcript.parent.mkdir(parents=True)
         transcript.write_text("")
@@ -96,6 +104,18 @@ class ClaudeChecks(unittest.TestCase):
         self.assertNotIn("--session-id", resumed)
         self.assertIn("--no-session-persistence", self.engine.build_command(
             self.request(session_id=None, session_logging=False)))
+
+    def test_fork_resumes_source_with_fork_session_and_binds_new_id(self):
+        source_session = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        command = self.engine.build_command(self.request(fork_session_id=source_session))
+        self.assertEqual(command[command.index("--resume") + 1], source_session)
+        self.assertIn("--fork-session", command)
+        self.assertNotIn("--session-id", command)
+
+        event = {"type": "system", "subtype": "init", "session_id": "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"}
+        normalized = self.engine.normalize_event(event)
+        self.assertEqual(normalized[0]["type"], "session_bound")
+        self.assertEqual(normalized[0]["session_id"], event["session_id"])
 
     def test_output_schema_becomes_json_schema_and_structured_result(self):
         schema = self.root / "schema.json"

@@ -166,10 +166,10 @@ claive peek ID [--steps 5]                    # last steps, no interruption
   rule is not added, because in claive such a message ends the turn, so the final-text rule
   already covers it.
 - When the timeout passes, claive withdraws a question that has not arrived (note, wake
-  request or steering request). The deadline is also stored with the message, so a
-  question cannot arrive late even when the `ask` process stops. A delivered question
-  without an answer ends `expired`. Exit codes: 0 answered, 124 withdrawn or expired,
-  3 the worker needs the parent, 1 refused or failed turn.
+  request or steering request). The deadline is stored with queued messages, wake requests,
+  and steering requests. The steering pump marks an expired steering request `withdrawn`
+  before sending it. A delivered question without an answer ends `expired`. Exit codes:
+  0 answered, 124 withdrawn or expired, 3 the worker needs the parent, 1 refused or failed turn.
 - `peek` reads the event log only, for the parent only. Steps have stable 1-based numbers
   and a total; `--steps` (1..50, default 5) and `--start N` page through them. Each step
   is cut to 600 characters in the middle (head and tail kept), as in lop.
@@ -235,6 +235,30 @@ Example roles: `reviewer`, `coder`, `scout`. A role sets:
 
 Workers that a worker starts inherit its limits. This replaces the simple read-only/writer
 switch. Engines that cannot limit tools must refuse a role that needs a limit.
+
+## Further items from lop (H to M)
+
+A second survey of lop found six more items. Each one adapts one lop module (MIT,
+Copyright (c) 2024 Radient Inc.). Items A to G are the features above and the lop items
+that make them better (envelopes in human output, redaction in `peek`, intent line,
+`ask --schema`, scheduled wakes, channels, roles).
+
+- H. Terminal control codes (lop `ansi.py`). Human output (`show`, `logs --stderr`, `peek`,
+  `inbox`, wait reports, conversation output) removes escape sequences and control
+  characters from worker and tool text. JSON output is already safe.
+- I. Restart `serve` after an install (lop `buildwatch.py`). `serve` records the install
+  fingerprint when it starts. Between goals, when no goal runs, it compares the fingerprint
+  again and starts itself again with the same arguments when it changed.
+- J. Failure note for the next turn (lop `incidents.py`). When a turn of a reusable worker
+  fails, is cancelled or times out, the next prompt starts with one line that gives the
+  failure kind and a short error. The note is given one time.
+- K. Process names (lop `procname.py`). The supervisor sets a clear process name, so that
+  `ps` and `pgrep` can find one worker without incorrect matches.
+- L. `claive fork ID` (lop `fork.py`). A new reusable worker starts from a copy of the
+  provider session of an idle worker. Engines that cannot fork refuse with a clear error.
+- M. Monitors (lop `monitors/`). The parent adds a command that runs at an interval in the
+  workspace of a worker. When its output changes, the worker gets a message with a short
+  diff. The first run records the baseline only. The parent must give a read-only command.
 
 ## Later
 

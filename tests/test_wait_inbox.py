@@ -91,6 +91,61 @@ class WaitInboxChecks(unittest.TestCase):
         # The worker's own turn event is not consumed by the wait that reported the worker.
         self.assertEqual([event["id"] for event in self.unread("ops")], [job])
 
+    def test_human_report_and_stderr_logs_strip_controls_without_changing_stored_text(self):
+        summary = "summary before\x1b[2J after café"
+        answer = ("start\x1b[2Jend\x07 bell \x9b2J c1\n"
+                  f"```claive-report\n{{\"status\":\"done\",\"summary\":{json.dumps(summary)}}}\n```\n")
+        answer_file = self.prompt_file("answer", answer)
+        started, job = self.launch("run", "--report", FIXTURE_TEXT_FILE=str(answer_file))
+        self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+
+        waited = self.cli("wait", job)
+        self.assertEqual(waited.returncode, 0, waited.stdout + waited.stderr)
+        self.assertNotIn("\x1b", waited.stdout)
+        self.assertNotIn("\x07", waited.stdout)
+        self.assertNotIn("\x9b", waited.stdout)
+        self.assertIn("Report: summary before after café", waited.stdout)
+        self.assertIn("startend bell  c1", waited.stdout)
+
+        shown = self.cli("show", job)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertNotIn("\x1b", shown.stdout)
+        state = json.loads(self.cli("show", job, "--json").stdout)
+        self.assertEqual(state["report"]["summary"], summary)
+        result_file = self.registry / job / "result.txt"
+        self.assertEqual(result_file.read_text(), answer)
+
+        stderr_file = self.registry / job / "stderr.log"
+        stderr = "stderr before\x1b[2J after\x07\n"
+        stderr_file.write_text(stderr)
+        logged = self.cli("logs", job, "--stderr")
+        self.assertEqual(logged.returncode, 0, logged.stderr)
+        self.assertEqual(logged.stdout, "stderr before after\n")
+        self.assertEqual(stderr_file.read_text(), stderr)
+
+    def test_human_inbox_outputs_strip_controls_but_json_and_file_keep_them(self):
+        label = "worker before\x1b[2J after\x07 café"
+        started, job = self.launch("run", "--label", label)
+        self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+
+        human = self.cli("inbox", "--consumer", "ansi-human", "--peek")
+        self.assertEqual(human.returncode, 0, human.stderr)
+        self.assertNotIn("\x1b", human.stdout)
+        self.assertNotIn("\x07", human.stdout)
+        self.assertIn("worker before after café", human.stdout)
+
+        structured = self.cli("inbox", "--consumer", "ansi-json", "--peek", "--json")
+        self.assertEqual(json.loads(structured.stdout)[0]["label"], label)
+        event = next(json.loads(line) for line in (self.registry / "inbox.jsonl").read_text().splitlines()
+                     if json.loads(line).get("id") == job)
+        self.assertEqual(event["label"], label)
+
+        waited = self.cli("wait", "--inbox", "ansi-wait", "--timeout", "2")
+        self.assertEqual(waited.returncode, 0, waited.stdout + waited.stderr)
+        self.assertNotIn("\x1b", waited.stdout)
+        self.assertNotIn("\x07", waited.stdout)
+        self.assertIn("worker before after café", waited.stdout)
+
     def test_ask_event_from_the_inbox_exits_3(self):
         ask = self.prompt_file("ask", "FIXTURE_MODE=ask")
         asked, job = self.launch("run", "--report", prompt=ask)

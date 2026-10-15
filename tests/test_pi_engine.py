@@ -13,7 +13,8 @@ import unittest
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "bin"))
 from claivelib import cli
-from claivelib.engines.pi import PiEngine
+from claivelib.engine import TurnRequest
+from claivelib.engines.pi import READ_ONLY_NOTE, PiEngine
 
 
 class PiChecks(unittest.TestCase):
@@ -89,6 +90,35 @@ class PiChecks(unittest.TestCase):
             time.sleep(0.025)
         self.fail("Pi worker did not create state")
 
+    def test_tool_selection_and_isolation_flags_for_json_and_rpc(self):
+        for steering in (False, True):
+            for read_only in (False, True):
+                with self.subTest(steering=steering, read_only=read_only):
+                    request = TurnRequest(
+                        binary=self.env["PI_WORKER_BINARY"], workspace=str(self.workspace),
+                        prompt_file=str(self.prompt), session_id=None, provider="opencode2api",
+                        model="mimo-v2.6-flash-free", reasoning_effort="low",
+                        max_model_steps=None, read_only=read_only, web=False,
+                        output_schema=None, session_logging=False, isolation={}, steering=steering,
+                    )
+                    command = PiEngine().build_command(request)
+                    self.assertEqual(command[command.index("--mode") + 1], "rpc" if steering else "json")
+                    self.assertEqual(command[command.index("--tools") + 1], "*")
+                    if read_only:
+                        self.assertEqual(command[command.index("--append-system-prompt") + 1], READ_ONLY_NOTE)
+                        if steering:
+                            self.assertTrue(json.loads(PiEngine().initial_input(request))["message"]
+                                            .endswith(READ_ONLY_NOTE + "\n"))
+                        else:
+                            self.assertEqual(command[-1], READ_ONLY_NOTE)
+                    else:
+                        self.assertNotIn("--append-system-prompt", command)
+                    for flag in ("--offline", "--no-extensions", "--no-prompt-templates",
+                                 "--no-themes", "--no-approve"):
+                        self.assertIn(flag, command)
+                    for flag in ("--no-skills", "--no-mcp", "--no-context-files"):
+                        self.assertNotIn(flag, command)
+
     def test_captured_success_tool_failure_and_cancel_events(self):
         for name in ("success", "resume", "tool", "failure", "cancel"):
             with self.subTest(name=name):
@@ -135,10 +165,37 @@ class PiChecks(unittest.TestCase):
         self.assertEqual(state["session_id"], "pi-session.unit_7")
         received = json.loads((self.registry / state["id"] / "result.txt").read_text())
         self.assertEqual(received["prompt"], self.prompt.read_text())
-        self.assertEqual(received["tools"], "read,grep,find,ls")
+        self.assertEqual(received["tools"], "*")
+        self.assertEqual(received["system_append"], READ_ONLY_NOTE)
+        self.assertEqual(received["messages"], [READ_ONLY_NOTE])
         self.assertEqual(received["effort"], "low")
         self.assertIn("--no-extensions", state["command"])
         self.assertFalse((self.workspace / "INJECTED").exists())
+
+    def test_fork_uses_source_file_and_binds_the_new_pi_session_id(self):
+        source_dir = self.root / "source-sessions"
+        source_dir.mkdir()
+        source_file = source_dir / "source-id.jsonl"
+        source_file.write_text(json.dumps({"type": "session", "id": "source-id",
+                                           "cwd": str(self.workspace)}) + "\n")
+        new_dir = self.root / "new-sessions"
+        request = TurnRequest(
+            binary=str(REPO / "tests/fake_pi.py"), workspace=str(self.workspace),
+            prompt_file=str(self.prompt), session_id="new-id", provider="opencode2api",
+            model="muse-spark-1.3-contributor-free", reasoning_effort="high",
+            max_model_steps=None, read_only=True, web=False, output_schema=None,
+            session_logging=True, isolation={}, session_dir=str(new_dir),
+            fork_session_id="source-id", fork_session_dir=str(source_dir),
+        )
+        command = PiEngine().build_command(request)
+        self.assertEqual(command[command.index("--fork") + 1], str(source_file))
+        self.assertEqual(command[command.index("--session-dir") + 1], str(new_dir))
+        self.assertNotIn("--session", command)
+        self.assertNotIn("--session-id", command)
+
+        bound = PiEngine().normalize_event({"type": "session", "id": "new-pi-id"})
+        self.assertEqual(bound, [{"type": "session_bound", "native_kind": "session",
+                                 "session_id": "new-pi-id"}])
 
     def test_shared_model_selection_across_agents_and_registries(self):
         process, original = self.open()

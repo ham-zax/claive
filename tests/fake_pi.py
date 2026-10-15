@@ -40,7 +40,9 @@ elif directory:
     path.write_text(json.dumps({"type": "session", "id": identifier, "cwd": str(Path.cwd())}) + "\n")
 
 rows = [json.loads(line) for line in (fixture_dir / ("failure.jsonl" if mode == "failure" else "success.jsonl")).read_text().splitlines()]
-answer = json.dumps({"prompt": prompt, "resumed": resumed, "effort": value("--thinking"), "tools": value("--tools")})
+messages = sys.argv[sys.argv.index("--") + 2:]
+answer = json.dumps({"prompt": prompt, "resumed": resumed, "effort": value("--thinking"), "tools": value("--tools"),
+                     "system_append": value("--append-system-prompt"), "messages": messages})
 for row in rows:
     if row["type"] == "session":
         row.update(id=identifier or "ephemeral", cwd=str(Path.cwd()))

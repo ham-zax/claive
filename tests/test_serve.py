@@ -8,8 +8,10 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from test_workers import FIXTURE_CLI, FIXTURE_WORKER, module
+from claivelib import serve
 
 
 class ServeChecks(unittest.TestCase):
@@ -216,6 +218,196 @@ class ServeChecks(unittest.TestCase):
         goal = self.until(goal_id, lambda g: g["status"] != "running", "orphan handled")
         self.assertIsNone(module.identity(worker["worker_pid"]), "orphaned worker must be killed before a retry")
         self.assertIn("orphaned worker", json.dumps(goal))
+
+
+class ServeInstallRestartChecks(unittest.TestCase):
+    def test_fingerprint_errors_are_logged_once_and_skipped(self):
+        temp = tempfile.TemporaryDirectory(prefix="claive-install-error-")
+        self.addCleanup(temp.cleanup)
+        supervisor = Path(temp.name) / "supervisor"
+        supervisor.mkdir()
+        fingerprint = mock.Mock(side_effect=[OSError("install gap"), ValueError("partial tree"),
+                                             {"serve.py": "stable"}])
+        with mock.patch.object(serve, "supervisor_dir", return_value=supervisor):
+            server = serve.Server(fingerprint_fn=fingerprint)
+        server.log = mock.Mock()
+        clock = [0.0]
+        failures = []
+
+        def attempt(action):
+            try:
+                action()
+            except (OSError, ValueError) as error:
+                failures.append(error)
+
+        with (mock.patch.object(serve.time, "monotonic", side_effect=lambda: clock[0]),
+              mock.patch.object(serve, "all_goals", return_value=[]),
+              mock.patch.object(serve.os, "execv") as execv):
+            attempt(server.capture_install_fingerprint)
+            clock[0] = 30
+            attempt(server.check_install_fingerprint)
+            clock[0] = 60
+            attempt(server.check_install_fingerprint)
+
+        self.assertEqual(failures, [])
+        self.assertEqual(fingerprint.call_count, 3)
+        server.log.assert_called_once()
+        self.assertIn("install fingerprint", server.log.call_args.args[0])
+        self.assertEqual(server.install_fingerprint, {"serve.py": "stable"})
+        execv.assert_not_called()
+
+    def test_restart_waits_for_two_consecutive_matching_new_fingerprints(self):
+        temp = tempfile.TemporaryDirectory(prefix="claive-install-stable-")
+        self.addCleanup(temp.cleanup)
+        supervisor = Path(temp.name) / "supervisor"
+        supervisor.mkdir()
+        fingerprint = mock.Mock(side_effect=[{"serve.py": "old"}, {"serve.py": "new-a"},
+                                             {"serve.py": "new-b"}, {"serve.py": "new-b"}])
+        with mock.patch.object(serve, "supervisor_dir", return_value=supervisor):
+            server = serve.Server(fingerprint_fn=fingerprint)
+        clock = [0.0]
+        with (mock.patch.object(serve.time, "monotonic", side_effect=lambda: clock[0]),
+              mock.patch.object(serve, "all_goals", return_value=[]),
+              mock.patch.object(serve.os, "execv") as execv,
+              mock.patch("builtins.print")):
+            server.capture_install_fingerprint()
+            for instant in (30, 60):
+                clock[0] = instant
+                server.check_install_fingerprint()
+                execv.assert_not_called()
+            clock[0] = 90
+            server.check_install_fingerprint()
+
+        execv.assert_called_once()
+
+    def test_default_fingerprint_uses_the_running_package_directory(self):
+        package = Path("/runtime/claivelib")
+        expected = {"serve.py": "sha256"}
+        with (mock.patch.object(serve.runtime, "package_dir", return_value=package),
+              mock.patch.object(serve.runtime, "fingerprint_tree", return_value=expected) as tree):
+            self.assertEqual(serve.install_fingerprint(), expected)
+        tree.assert_called_once_with(package)
+
+    def run_until_install_check(self, fingerprints, goals, goals_after_first_read=None, stop_at=30.5):
+        temp = tempfile.TemporaryDirectory(prefix="claive-install-watch-")
+        self.addCleanup(temp.cleanup)
+        supervisor = Path(temp.name) / "supervisor"
+        supervisor.mkdir()
+        stop = supervisor / "stop"
+        clock = [0.0]
+        fingerprint_times = []
+
+        def fingerprint():
+            if fingerprint_times:
+                fingerprint_times.append(clock[0])
+            else:
+                fingerprint_times.append("startup")
+            return next(fingerprints)
+
+        with mock.patch.object(serve, "supervisor_dir", return_value=supervisor):
+            server = serve.Server(interval=120, fingerprint_fn=fingerprint)
+
+        def sleep(seconds):
+            clock[0] += seconds
+            if clock[0] >= stop_at:
+                server.terminating = True
+
+        opened = []
+        real_open = open
+
+        def tracked_open(*args, **kwargs):
+            stream = real_open(*args, **kwargs)
+            opened.append(stream)
+            return stream
+
+        goal_reads = 0
+
+        def goal_states():
+            nonlocal goal_reads
+            goal_reads += 1
+            if goal_reads > 1 and goals_after_first_read is not None:
+                return goals_after_first_read
+            return goals
+
+        argv = ["claive", "serve", "--interval", "120"]
+        python = "/usr/bin/python3"
+        launcher = "/worktree/bin/claive"
+        with (mock.patch.object(serve, "supervisor_dir", return_value=supervisor),
+              mock.patch.object(serve, "stop_file", return_value=stop),
+              mock.patch.object(server, "tick", return_value=True),
+              mock.patch.object(server, "log"),
+              mock.patch.object(serve, "all_goals", side_effect=goal_states),
+              mock.patch.object(serve.signal, "signal"),
+              mock.patch.object(serve.time, "monotonic", side_effect=lambda: clock[0]),
+              mock.patch.object(serve.time, "sleep", side_effect=sleep),
+              mock.patch.object(serve.sys, "argv", argv),
+              mock.patch.object(serve.sys, "executable", python),
+              mock.patch.object(serve.os.path, "abspath", return_value=launcher),
+              mock.patch.object(serve.os, "execv") as execv,
+              mock.patch("builtins.open", side_effect=tracked_open),
+              mock.patch("builtins.print") as output):
+            def restart(path, args):
+                server.terminating = True
+
+            execv.side_effect = restart
+            result = server.run()
+        for stream in opened:
+            stream.close()
+        return result, execv, output, argv, fingerprint_times, python, launcher
+
+    def test_changed_install_restarts_python_with_absolute_launcher_and_same_arguments(self):
+        result, execv, output, argv, fingerprint_times, python, launcher = self.run_until_install_check(
+            iter(({"serve.py": "old"}, {"serve.py": "new"}, {"serve.py": "new"})), [], stop_at=60.5)
+
+        self.assertEqual(result, 0)
+        execv.assert_called_once_with(python, [python, launcher, *argv[1:]])
+        output.assert_called_once_with("claive serve: install changed; restarting", flush=True)
+        self.assertGreaterEqual(fingerprint_times[1], 30)
+        self.assertGreaterEqual(fingerprint_times[2], 60)
+
+    def test_install_change_is_not_checked_while_a_goal_runs(self):
+        running = [{"status": "running", "worker": "abc123"}]
+        result, execv, _output, _argv, fingerprint_times, _python, _launcher = self.run_until_install_check(
+            iter(({"serve.py": "old"}, {"serve.py": "new"})), running)
+
+        self.assertEqual(result, 0)
+        execv.assert_not_called()
+        self.assertEqual(fingerprint_times, ["startup"])
+
+    def test_goal_starting_during_fingerprint_check_prevents_restart(self):
+        running = [{"status": "running", "worker": "abc123"}]
+        result, execv, output, _argv, _fingerprint_times, _python, _launcher = self.run_until_install_check(
+            iter(({"serve.py": "old"}, {"serve.py": "new"})), [], running)
+
+        self.assertEqual(result, 0)
+        execv.assert_not_called()
+        output.assert_not_called()
+
+    def test_unchanged_install_does_not_restart(self):
+        result, execv, output, _argv, fingerprint_times, _python, _launcher = self.run_until_install_check(
+            iter(({"serve.py": "same"}, {"serve.py": "same"})), [])
+
+        self.assertEqual(result, 0)
+        execv.assert_not_called()
+        output.assert_not_called()
+        self.assertEqual(len(fingerprint_times), 2)
+        if len(fingerprint_times) > 1:
+            self.assertGreaterEqual(fingerprint_times[1], 30)
+
+    def test_each_serve_tick_runs_due_monitors(self):
+        temporary = tempfile.TemporaryDirectory(prefix="claive-serve-monitors-")
+        self.addCleanup(temporary.cleanup)
+        supervisor = Path(temporary.name) / "supervisor"
+        supervisor.mkdir()
+        stop = supervisor / "stop"
+        with (mock.patch.object(serve, "supervisor_dir", return_value=supervisor),
+              mock.patch.object(serve, "stop_file", return_value=stop),
+              mock.patch.object(serve, "all_goals", return_value=[]),
+              mock.patch.object(serve.cli_mod, "run_due_monitors") as run_due):
+            server = serve.Server()
+            with mock.patch.object(server, "launch_ready"):
+                self.assertTrue(server.tick())
+        run_due.assert_called_once_with()
 
 
 if __name__ == "__main__":

@@ -46,6 +46,7 @@ new MCP servers. Consult `docs/harness-integration.md` for the runtime protocol.
 Steering needs `--enable-steering`. Fork needs an idle reusable session.
 `--web` has no effect on Claude, Codex and Muse.
 Claude keeps `--setting-sources ""` and uses `--tools default`.
+Claude loads repository CLAUDE.md files and `~/.config/claive/claude/CLAUDE.md`.
 Write turns use `bypassPermissions`, read-only turns use `plan`.
 Live check, 2026-10-15: `ExitPlanMode` is unavailable in `--print`.
 Model refusals did not prove a harness-level write block.

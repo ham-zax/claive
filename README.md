@@ -20,6 +20,12 @@ result is the validated JSON object. `--enable-steering` switches to stream-json
 Write turns use `--permission-mode bypassPermissions`. Read-only turns use
 `--permission-mode plan`. `--setting-sources ""` keeps the parent's hooks and
 permission rules out. MCP servers and skills load. WebSearch and WebFetch stay on.
+Claude workers load CLAUDE.md files through `--add-dir` and
+`CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`. Claive adds the worker file
+`claude/CLAUDE.md` next to `config.json` (default `~/.config/claive/claude/CLAUDE.md`) when it
+exists. Then claive adds each directory from the git root down to the workspace. The walk stops
+below the home directory. The parent's `~/.claude/CLAUDE.md`, `CLAUDE.local.md` and `@import`
+lines do not load.
 Live check, 2026-10-15: `ExitPlanMode` is unavailable in `--print` mode.
 The model refused writes itself, so that check did not prove a harness-level write block.
 

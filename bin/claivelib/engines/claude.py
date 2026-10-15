@@ -5,6 +5,7 @@ from pathlib import Path
 import uuid
 from datetime import datetime, timezone
 
+from claivelib import config
 from claivelib.budget import HOOK_SETTINGS
 from claivelib.engine import SteeringCapability, WorkerEngine
 from claivelib.state import launch_config, session_id
@@ -41,6 +42,29 @@ def _config_dir():
     return Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))).expanduser()
 
 
+def instruction_dirs(workspace):
+    """Directories whose CLAUDE.md files the worker loads: the claive worker dir, then the git root down to the workspace.
+
+    `--setting-sources ""` turns off the native user and project memory, so claive passes these as
+    `--add-dir` with CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1. The walk stops below the home
+    directory so a home-level repository does not load the parent's ~/.claude/CLAUDE.md.
+    """
+    dirs = []
+    worker_dir = config.config_path().parent / "claude"
+    if (worker_dir / "CLAUDE.md").is_file():
+        dirs.append(str(worker_dir))
+    start = Path(workspace).resolve()
+    chain = []
+    for directory in (start, *start.parents):
+        if directory == Path.home().resolve() or directory == directory.parent:
+            chain = [start]
+            break
+        chain.append(directory)
+        if (directory / ".git").exists():
+            break
+    return dirs + [str(directory) for directory in reversed(chain)]
+
+
 class ClaudeEngine(WorkerEngine):
     name = "claude"
     supports_fork = True
@@ -54,6 +78,10 @@ class ClaudeEngine(WorkerEngine):
     def __init__(self):
         self._last_text = ""
         self._last_api_error_text = None
+
+    def child_env(self):
+        # Without this, Claude Code loads no CLAUDE.md from the --add-dir directories.
+        return {"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD": "1"}
 
     def steering_capability(self):
         return SteeringCapability(True, "claude-stream-json", notes=(
@@ -151,6 +179,8 @@ class ClaudeEngine(WorkerEngine):
             # Isolate user/project settings so the parent's hooks and permission rules do not run in workers.
             "--setting-sources", "",
         ]
+        for directory in instruction_dirs(request.workspace):
+            command += ["--add-dir", directory]
         if isinstance(request.budget, dict):
             command += ["--settings", json.dumps(HOOK_SETTINGS)]
         if request.session_logging:

@@ -195,6 +195,15 @@ Claude write turns use `--permission-mode bypassPermissions`.
 `--setting-sources ""` keeps the parent's hooks and permission rules out.
 MCP servers and skills load. Claive does not pass `--strict-mcp-config` or
 `--disable-slash-commands`. WebSearch and WebFetch remain available.
+Claude workers load CLAUDE.md files through `--add-dir` and
+`CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`. The order is the worker file
+`claude/CLAUDE.md` next to `config.json` (default `~/.config/claive/claude/CLAUDE.md`, only when
+it exists), then each directory from the git root down to the workspace. A `.git` file (a
+worktree) also marks the git root. Outside a repository, only the workspace loads. The walk stops
+below the home directory, so the parent's `~/.claude/CLAUDE.md` does not load. Each added
+directory loads `CLAUDE.md`, `.claude/CLAUDE.md` and `.claude/rules/*.md`.
+Live check, 2026-10-15: `CLAUDE.local.md` and `@import` lines do not load.
+Codex workers read `~/.codex/AGENTS.md` and the repository `AGENTS.md` natively.
 Live check, 2026-10-15: `ExitPlanMode` is unavailable in `--print` mode.
 The model refused writes itself. A harness-level write block remains unproven.
 

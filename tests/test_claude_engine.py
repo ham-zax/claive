@@ -107,6 +107,52 @@ class ClaudeChecks(unittest.TestCase):
         self.assertIn("--no-session-persistence", self.engine.build_command(
             self.request(session_id=None, session_logging=False)))
 
+    def add_dirs(self, workspace):
+        command = self.engine.build_command(self.request(workspace=str(workspace)))
+        return [command[index + 1] for index, value in enumerate(command) if value == "--add-dir"]
+
+    def test_instruction_dirs_walk_from_the_git_root_to_the_workspace(self):
+        repo = (self.root / "repo").resolve()
+        sub = repo / "pkg" / "sub"
+        sub.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        self.assertEqual(self.add_dirs(sub), [str(repo), str(repo / "pkg"), str(sub)])
+        self.assertEqual(self.add_dirs(repo), [str(repo)])
+        worktree = (self.root / "worktree").resolve()
+        worktree.mkdir()
+        (worktree / ".git").write_text("gitdir: /elsewhere\n")
+        self.assertEqual(self.add_dirs(worktree), [str(worktree)])
+        loose = (self.root / "loose" / "deep").resolve()
+        loose.mkdir(parents=True)
+        self.assertEqual(self.add_dirs(loose), [str(loose)])
+        self.assertEqual(self.engine.child_env(), {"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD": "1"})
+
+    def test_instruction_dirs_stop_below_home(self):
+        home = (self.root / "home").resolve()
+        workspace = home / "project"
+        workspace.mkdir(parents=True)
+        (home / ".git").mkdir()
+        previous = os.environ.get("HOME")
+        os.environ["HOME"] = str(home)
+        try:
+            self.assertEqual(self.add_dirs(workspace), [str(workspace)])
+        finally:
+            os.environ["HOME"] = previous
+
+    def test_worker_instructions_dir_comes_first_when_its_file_exists(self):
+        previous = os.environ["CLAIVE_CONFIG"]
+        os.environ["CLAIVE_CONFIG"] = str(self.root / "claive" / "config.json")
+        try:
+            workspace = (self.root / "work").resolve()
+            workspace.mkdir()
+            self.assertEqual(self.add_dirs(workspace), [str(workspace)])
+            worker_dir = self.root / "claive" / "claude"
+            worker_dir.mkdir(parents=True)
+            (worker_dir / "CLAUDE.md").write_text("worker rules\n")
+            self.assertEqual(self.add_dirs(workspace), [str(worker_dir), str(workspace)])
+        finally:
+            os.environ["CLAIVE_CONFIG"] = previous
+
     def test_fork_resumes_source_with_fork_session_and_binds_new_id(self):
         source_session = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
         command = self.engine.build_command(self.request(fork_session_id=source_session))

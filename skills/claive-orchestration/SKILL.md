@@ -79,6 +79,8 @@ Fork needs an idle reusable session.
 `--web` has no effect on Claude, Codex and Muse.
 Claude write turns use `bypassPermissions`. `--setting-sources ""` keeps parent
 hooks and permission rules out. MCP servers and skills load.
+Claude workers load CLAUDE.md from the git root down to the workspace, plus
+`~/.config/claive/claude/CLAUDE.md` when it exists. The parent's `~/.claude/CLAUDE.md` does not load.
 Live check, 2026-10-15: `ExitPlanMode` is unavailable in `--print`.
 Model refusals did not prove a harness-level write block.
 Codex skills and repo `AGENTS.md` load, including on App Server turns.

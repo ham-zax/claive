@@ -92,6 +92,10 @@ class WorkerEngine:
     def validate_turn(self, request):
         """Reject unsupported turn options before launch or queue acceptance."""
 
+    def child_env(self):
+        """Extra environment variables for the worker process."""
+        return {}
+
     def resolve_launch(self, **options):
         raise NotImplementedError
 

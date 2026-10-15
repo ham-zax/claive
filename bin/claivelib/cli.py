@@ -720,7 +720,7 @@ def supervise(job_id, control=None):
             child = None
             timed_out = False
             kill_at = None
-            child_env = dict(os.environ, CLAIVE_WORKER_ID=job_id, CLAIVE_BIN=launcher_path())
+            child_env = dict(os.environ, CLAIVE_WORKER_ID=job_id, CLAIVE_BIN=launcher_path(), **engine.child_env())
             if state.get("engine") == "pi":
                 # Rebuilt every turn so models.json edits and config changes take effect.
                 overlay = provider.overlay_agent_dir(root())

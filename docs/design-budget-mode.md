@@ -42,7 +42,7 @@ a worker may use.
 "engines": {"claude": {"budget": {
   "enabled": true,
   "models": {
-    "default":          {"warn": 135000, "stop": 145000, "max_handoffs": 7},
+    "default":          {"warn": 140000, "stop": 150000, "max_handoffs": 7},
     "claude-haiku-5-5": {"warn": 85000,  "stop": 95000,  "max_handoffs": null}
   }
 }}}
@@ -68,10 +68,13 @@ a worker may use.
 | Mode | Haiku family (`"haiku"` in the model name) | Other models |
 |---|---|---|
 | Budget off | 105k (`--autocompact 138k`) | 155k (`--autocompact 188k`) |
-| Budget on | `stop + 20000` (default 115k) | `stop + 25000` (default 170k) |
+| Budget on | `stop + 20000` (default 115k) | `stop + 25000` (default 175k) |
 
 `--autocompact` = compaction point + 33000. Budget-off values are code constants, not config.
 Compaction stays as the last fallback when a handoff does not happen in time.
+The later warning and stop limits follow seamless-claude commit `859fb93`.
+Claive retains its 25k non-Haiku margin instead of the interactive hooks' 15k margin.
+The default non-Haiku compaction point is therefore 175k (`--autocompact 208k`).
 
 claive reads the context size from the usage of the model call that also requests the next tool.
 Claude Code delivers a stdin message only after that tool's result. In the first live run (Haiku,
@@ -79,7 +82,7 @@ stop 57k, margin 10k) one result of 8.6k tokens pushed the context to 66.9k, and
 before the model read the stop message. A single Read can return up to about 25k tokens. So at the
 stop limit the budget gate (below) denies the tool call, and claive sends the stop message on
 stdin. The stdin message reaches the model right after the denied call's short result, and also
-when the gate fails. The margins are the gaps of the seamless-claude handoff hooks. When the gate denies the
+when the gate fails. When the gate denies the
 call, the margin holds the handoff reply. When the gate allows the call (timeout or failure), the
 margin only lowers the risk of compaction. In run d028e6320ef0 (Haiku, stop 57k, margin 20k) the
 stop was detected at 58.2k, a 17k Read result followed, and Claude compacted at 75.3k, below the 77k
@@ -156,7 +159,8 @@ Warn:
 
 ```
 [claive budget] Context is at {k}k tokens. At {stop_k}k claive tells you to stop at once.
-Reach a checkpoint before then: finish and verify the current step. Do not start large new work.
+Continue your work. Plan a checkpoint before that limit: finish and verify the current step.
+Do not start a sub-task that cannot finish before the checkpoint.
 If the assignment is complete at the checkpoint, give your normal final answer.
 Otherwise end your turn with a handoff reply in the format below. claive then continues the
 work in a new session with the handoff, original assignment and retained external messages.

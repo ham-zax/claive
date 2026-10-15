@@ -545,6 +545,20 @@ class ClaudeBudgetChecks(unittest.TestCase):
         self.assertEqual((state["context_tokens"], state["budget_phase"]), (96000, "stopping"))
         self.assertNotIn("budget_error", state)
 
+    def test_non_haiku_warns_and_stops_at_later_limits_then_returns_final(self):
+        self.plan([{"usage": 139999}, {"usage": 140000}, {"read": 1},
+                   {"usage": 149999}, {"usage": 150000}, {"read": 1}, {"result": "Final answer."}])
+        self.create("--model", "claude-sonnet-5-5")
+        code, state = self.supervise()
+        self.assertEqual(code, 0)
+        messages = self.calls("input")[1:]
+        self.assertEqual(messages, [budget.warn_message(140000, state["launch"]["budget"]),
+                                    budget.stop_message(150000, state["launch"]["budget"], False)])
+        self.assertEqual(state["launch"]["budget"]["compact"], 175000)
+        self.assertEqual(state["handoffs"], 0)
+        self.assertEqual(len(self.calls("prompt")), 1)
+        self.assertEqual((self.path / "result.txt").read_text(), "Final answer.")
+
     def test_jump_to_stop_carries_template_without_warn(self):
         self.plan([{"usage": 100000}, {"read": 1}, {"result": "done"}])
         self.create()

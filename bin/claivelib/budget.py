@@ -41,7 +41,8 @@ Running processes, background jobs, temp files.
 The exact next action and its stop condition."""
 
 WARN = """[claive budget] Context is at {k}k tokens. At {stop_k}k claive tells you to stop at once.
-Reach a checkpoint before then: finish and verify the current step. Do not start large new work.
+Continue your work. Plan a checkpoint before that limit: finish and verify the current step.
+Do not start a sub-task that cannot finish before the checkpoint.
 If the assignment is complete at the checkpoint, give your normal final answer.
 Otherwise end your turn with a handoff reply in the format below. claive then continues the
 work in a new session with the handoff, original assignment and retained external messages.

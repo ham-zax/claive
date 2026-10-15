@@ -256,9 +256,10 @@ Duplicate context files are refused. Follow-ups keep the retained session.
 ### Claude context budget
 
 `engines.claude.budget` is on by default. Built-in limits: Haiku warns at 85k and stops at 95k
-tokens with no handoff limit. Other models warn at 135k, stop at 145k and allow 7 automatic
+tokens with no handoff limit. Other models warn at 140k, stop at 150k and allow 7 automatic
 continuations per turn. Config entries merge over these per model and per key. `budget: false` turns it off.
-At the warn limit claive asks the worker to reach a checkpoint. At the stop limit claive asks it
+At the warn limit claive asks the worker to continue toward a checkpoint before the stop limit.
+The worker must not start a sub-task that cannot finish before that checkpoint. At the stop limit claive asks it
 to stop: a PreToolUse hook (`"$CLAIVE_BIN" _budget_gate`, added through `--settings`) denies each
 tool call, so no large tool result enters first, and claive sends the stop message on stdin. If
 the gate fails, that message arrives one tool result late, and compaction is still possible. A

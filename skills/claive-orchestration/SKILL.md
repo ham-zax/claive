@@ -52,7 +52,7 @@ claive denies the worker's tool calls (a PreToolUse hook; the denied tool error 
 worker writes a `[claive-handoff]` reply and claive continues the turn in a new session
 (inbox `budget_handoff`). After `max_handoffs` automatic continuations the next handoff exits 3
 (`budget_limit`): `claive answer` continues a reusable worker; for a one-shot worker, start a new
-worker from the saved context. Limits: `engines.claude.budget` (Haiku warn 85k/stop 95k, others 135k/145k;
+worker from the saved context. Limits: `engines.claude.budget` (Haiku warn 85k/stop 95k, others 140k/150k;
 `budget: false` turns it off; `--output-schema` launches run without it). `claive show` prints a
 "Context budget:" line. Spec: `docs/design-budget-mode.md`. `claive-orch` uses only
 Muse/Pi for its implementer/critic ladder; its roster does not authorize Claude/Codex

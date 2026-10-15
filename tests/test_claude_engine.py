@@ -172,6 +172,7 @@ class ClaudeChecks(unittest.TestCase):
                 ("claude-sonnet-5-5", None, 155000, "188k"),
                 (CLAUDE_MODEL, {"stop": 95000}, 115000, "148k"),
                 ("claude-sonnet-5-5", {"stop": 145000}, 170000, "203k"),
+                ("claude-sonnet-5-5", {"stop": 150000}, 175000, "208k"),
                 (CLAUDE_MODEL, {"stop": 200000}, 220000, "253k"),
                 ("claude-sonnet-5-5", {"stop": 200000}, 225000, "258k")):
             with self.subTest(model=model, budget=budget):

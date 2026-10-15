@@ -16,8 +16,8 @@ CLAUDE_PROVIDER = "anthropic"
 HAIKU_COMPACTION_POINT = 105000
 DEFAULT_COMPACTION_POINT = 155000
 # Room past stop for the handoff reply. When the budget gate does not deny the next tool call,
-# the margin only lowers the risk that its result reaches compaction. Same gaps as the
-# seamless-claude handoff hooks.
+# the margin only lowers the risk that its result reaches compaction. Keep the 25k margin
+# for non-Haiku workers even though the interactive hooks now use 15k.
 HAIKU_BUDGET_MARGIN = 20000
 BUDGET_COMPACTION_MARGIN = 25000
 # Claude Code 2.1.300 compacts 33000 tokens before the configured window.

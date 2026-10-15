@@ -47,7 +47,7 @@ ENGINE_KEYS = {
     "user_config": bool, "extra_args": list, "budget": (bool, dict),
 }
 CLAUDE_BUDGET_DEFAULTS = {
-    "default": {"warn": 135000, "stop": 145000, "max_handoffs": 7},
+    "default": {"warn": 140000, "stop": 150000, "max_handoffs": 7},
     "claude-haiku-5-5": {"warn": 85000, "stop": 95000, "max_handoffs": None},
 }
 # Flags each engine's command builder owns: output format, print mode, model, effort, session, resume.

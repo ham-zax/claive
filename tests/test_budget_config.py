@@ -43,11 +43,11 @@ class BudgetConfigChecks(unittest.TestCase):
         self.assertEqual(config.claude_budget(HAIKU),
                          ({"warn": 85000, "stop": 95000, "max_handoffs": None, "compact": 115000}, None))
         self.assertEqual(config.claude_budget(SONNET),
-                         ({"warn": 135000, "stop": 145000, "max_handoffs": 7, "compact": 170000}, None))
+                         ({"warn": 140000, "stop": 150000, "max_handoffs": 7, "compact": 175000}, None))
 
     def test_config_default_merges_per_key_over_builtin_model(self):
         self.policy({"models": {"default": {"warn": 80000}}})
-        for model, stop, maximum, margin in ((HAIKU, 95000, None, 20000), (SONNET, 145000, 7, 25000)):
+        for model, stop, maximum, margin in ((HAIKU, 95000, None, 20000), (SONNET, 150000, 7, 25000)):
             with self.subTest(model=model):
                 self.assertEqual(config.claude_budget(model),
                                  ({"warn": 80000, "stop": stop, "max_handoffs": maximum,

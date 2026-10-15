@@ -77,8 +77,11 @@ def _existing_receipt(path, identifier):
             except FileNotFoundError:
                 pass
             else:
-                if steer_receipt.get("status") == "acknowledged":
-                    record.update(status="delivered", turn=steer_receipt.get("turn"),
+                continuation = steer_receipt.get("continuation", {})
+                if steer_receipt.get("status") == "acknowledged" or continuation.get("phase") == "entered":
+                    delivered_turn = (continuation.get("turn") if continuation.get("phase") == "entered"
+                                      else steer_receipt.get("turn"))
+                    record.update(status="delivered", turn=delivered_turn,
                                   delivered_at=steer_receipt.get("updated_at") or time.time())
                     _store_receipt(path, record)
         return record

@@ -15,7 +15,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "bin"))
 from claivelib import budget, cli, inbox
 
-HANDOFF = "[claive-handoff]\n## Goal\nFinish the assignment.\n## Next step\nCheck the next step."
+HANDOFF = "[claive-handoff]\n## Owed to the parent\nnone\n## Goal\nFinish the assignment.\n## Next step\nCheck the next step."
 FINAL = 'Done.\n```claive-report\n{"status":"done","summary":"Finished"}\n```'
 
 FIXTURE = '''#!/usr/bin/env python3
@@ -62,6 +62,19 @@ for action in plan:
         emit(dict(type="system", subtype="compact_boundary"))
     elif "sleep" in action:
         time.sleep(action["sleep"])
+    elif "remove_input" in action:
+        state_file = next((root / "state").glob("*/state.json"))
+        state = json.loads(state_file.read_text())
+        manifest = Path(state["budget_context_file"])
+        target = (Path(json.loads(manifest.read_text())["assignment_file"])
+                  if action["remove_input"] == "assignment" else manifest)
+        target.unlink()
+    elif "rewrite_task" in action:
+        (root / "task.md").write_text(action["rewrite_task"])
+    elif "corrupt_receipt" in action:
+        for file in (root / "state").glob("*/steering/receipts/*.json"):
+            if json.loads(file.read_text()).get("source") != "budget":
+                file.write_text("{")
     elif "cancel" in action:
         import signal
         os.kill(os.getppid(), signal.SIGTERM)
@@ -74,6 +87,21 @@ for action in plan:
 
 
 class BudgetTextChecks(unittest.TestCase):
+    def test_handoff_requires_a_nonblank_owed_section(self):
+        for body in ("", "\n ", "\n## Next step\nContinue."):
+            self.assertIn("Owed", budget.handoff_error("[claive-handoff]\n## Owed to the parent" + body))
+        self.assertIsNone(budget.handoff_error(HANDOFF))
+
+    def test_full_inputs_survive_without_truncation(self):
+        original = "ASSIGNMENT " + "α" * 50000
+        handoff = HANDOFF + "\nEND_OF_HANDOFF"
+        prompt = budget.continuation_prompt(handoff, original)
+        self.assertIn(original, prompt)
+        self.assertIn(handoff, prompt)
+        self.assertLess(prompt.index(original), prompt.index(handoff))
+        self.assertIn("Re-check inexpensive claims", prompt)
+        self.assertIn("A handoff or hidden reasoning is not delivery", prompt)
+
     def test_inbox_formats_budget_handoff_as_one_trimmed_line(self):
         event = inbox.budget_event("123456789abc", "worker\nlabel", 3, 2, 5, 87999, "session", "  Check\n next step.  ")
         self.assertEqual(inbox.format_text([event]),
@@ -165,13 +193,168 @@ class BudgetGateChecks(unittest.TestCase):
 
 
 class ClaudeBudgetChecks(unittest.TestCase):
+    def _retained_message(self, mode):
+        from claivelib import asking, messaging, steering
+
+        question = "AUDIT_OWED_QUESTION: what is six times seven?"
+        final = "AUDIT_OWED_ANSWER: 42.\n" + FINAL
+        self.plan([{"read": 1}, {"result": HANDOFF}], [{"result": HANDOFF}], [{"result": final}])
+        self.create("--report")
+        submitted = []
+        original_pump = steering.Transport.pump
+
+        def pump(transport):
+            if not submitted:
+                if mode == "steer":
+                    submitted.append(steering.submit(self.path, question))
+                else:
+                    receipt, _ = messaging.send(self.path, question, "now", kind=mode,
+                                                expires_at=time.time() + 120)
+                    submitted.append(receipt)
+            return original_pump(transport)
+
+        with patch.object(steering.Transport, "pump", pump):
+            code, state = self.supervise()
+        self.assertEqual(code, 0, state)
+        self.assertEqual(state["handoffs"], 2)
+        prompts = self.calls("prompt")
+        self.assertEqual(len(prompts), 3)
+        for prompt in prompts[1:]:
+            self.assertEqual(prompt.count(question), 1)
+            self.assertEqual(prompt.count(HANDOFF), 1)
+            self.assertEqual(prompt.count("Original assignment:"), 1)
+        self.assertIn("AUDIT_OWED_ANSWER: 42", (self.path / "result.txt").read_text())
+        identifier = submitted[0].get("steering_receipt_id", submitted[0]["id"])
+        receipt = steering.receipt(self.path, identifier)
+        self.assertEqual(receipt["status"], "acknowledged")
+        self.assertEqual(receipt["continuation"]["phase"], "entered")
+        self.assertNotIn("payload", receipt)
+        if mode != "steer":
+            self.assertIn("<parent-message>", prompts[-1])
+            self.assertIn(submitted[0]["id"], prompts[-1])
+        if mode == "ask":
+            record, answer_code, _ = asking.ask(self.path, question, identifier=submitted[0]["id"])
+            self.assertEqual(answer_code, 0)
+            self.assertEqual(record["status"], "answered")
+            self.assertIn("AUDIT_OWED_ANSWER: 42", record["answer"])
+
+    def test_acknowledged_steering_survives_two_model_handoffs(self):
+        self._retained_message("steer")
+
+    def test_message_accepted_at_close_survives_entry_and_later_delivery_expiry(self):
+        from claivelib import steering
+
+        question = "PENDING_AT_BOUNDARY stays in history."
+        self.plan([{"result": HANDOFF}], [{"result": HANDOFF}], [{"result": "done"}])
+        self.create()
+        submitted = []
+        original_update = cli.event_update
+        original_records = steering.continuation_records
+        original_observe = budget.observe_entry
+        entered = []
+
+        def update(state, event):
+            if event["type"] == "terminal_completed" and not submitted:
+                submitted.append(steering.submit(self.path, question, expires_at=time.time() + 120))
+            return original_update(state, event)
+
+        def observe(path, state, event):
+            result = original_observe(path, state, event)
+            if state.get("budget_input_id") and event.get("id") == state["budget_input_id"]:
+                entered.append(True)
+            return result
+
+        def records(path, turn, carried_ids=(), entered_ids=(), now=None):
+            self.assertEqual(cli.load(path)["status"], "running")
+            return original_records(path, turn, carried_ids, entered_ids,
+                                    now=time.time() + 3600 if entered else now)
+
+        with (patch.object(cli, "event_update", update), patch.object(budget, "observe_entry", observe),
+              patch.object(steering, "continuation_records", records)):
+            code, state = self.supervise()
+        self.assertEqual(code, 0, state)
+        self.assertEqual(state["handoffs"], 2)
+        receipt = steering.receipt(self.path, submitted[0]["id"])
+        self.assertEqual(receipt["status"], "not_delivered")
+        self.assertEqual(receipt["continuation"]["phase"], "entered")
+        self.assertTrue(all(prompt.count(question) == 1 for prompt in self.calls("prompt")[1:]))
+
+    def test_mid_turn_message_keeps_sender_wrapper_across_handoffs(self):
+        self._retained_message("send")
+
+    def test_ask_is_answered_by_the_final_result_after_handoffs(self):
+        self._retained_message("ask")
+
+    def test_missing_owed_section_pauses_without_accepting_the_handoff(self):
+        raw = "[claive-handoff]\n## Next step\nContinue."
+        self.plan([{"result": raw}])
+        self.create("--report")
+        with patch.object(cli, "record_report", wraps=cli.record_report) as report:
+            code, state = self.supervise()
+        self.assertEqual(code, 3)
+        self.assertEqual(state["needs_parent"]["kind"], "budget_recovery")
+        self.assertEqual(state["handoffs"], 0)
+        self.assertEqual(len(self.calls("command")), 1)
+        self.assertEqual(report.call_count, 0)
+        self.assertEqual((self.path / "handoffs/turn-0001-1.md").read_text(), raw)
+
+    def test_missing_frozen_assignment_requests_recovery_before_a_new_session(self):
+        self.plan([{"remove_input": "assignment"}, {"result": HANDOFF}])
+        self.create()
+        code, state = self.supervise()
+        self.assertEqual(code, 3, state)
+        self.assertEqual(state["needs_parent"]["kind"], "budget_recovery")
+        self.assertIn("assignment.md", state["needs_parent"]["question"])
+        self.assertEqual(len(self.calls("command")), 1)
+
+    def test_missing_manifest_requests_recovery_before_a_new_session(self):
+        self.plan([{"remove_input": "manifest"}, {"result": HANDOFF}])
+        self.create()
+        code, state = self.supervise()
+        self.assertEqual(code, 3, state)
+        self.assertEqual(state["needs_parent"]["kind"], "budget_recovery")
+        self.assertEqual(len(self.calls("command")), 1)
+
+    def test_corrupt_receipt_is_recovery_not_a_provider_protocol_error(self):
+        from claivelib import steering
+
+        self.plan([{"read": 1}, {"corrupt_receipt": True}, {"result": HANDOFF}])
+        self.create()
+        submitted = []
+        original_pump = steering.Transport.pump
+
+        def pump(transport):
+            if not submitted:
+                submitted.append(steering.submit(self.path, "Preserve the pending parent direction."))
+            return original_pump(transport)
+
+        with patch.object(steering.Transport, "pump", pump):
+            code, state = self.supervise()
+        self.assertEqual(code, 3, state)
+        self.assertEqual(state["needs_parent"]["kind"], "budget_recovery")
+        self.assertIn(submitted[0]["id"], state["needs_parent"]["question"])
+        self.assertEqual(state["malformed_events"], 0)
+        self.assertEqual(len(self.calls("command")), 1)
+
+    def test_original_assignment_is_frozen_before_the_model_runs(self):
+        self.plan([{"rewrite_task": "A changed file is not the original assignment."}, {"result": HANDOFF}],
+                  [{"result": "done"}])
+        original = self.prompt.read_text()
+        self.create()
+        code, state = self.supervise()
+        self.assertEqual(code, 0, state)
+        self.assertEqual(self.calls("prompt")[0], original)
+        self.assertIn(original, self.calls("prompt")[1])
+        self.assertNotIn(self.prompt.read_text(), self.calls("prompt")[1])
+
     def test_stopping_reply_with_late_marker_records_budget_warning(self):
         reply = "A preface.\nMore detail.\n\n[claive-handoff]\n## Next step\nContinue."
         self.plan([{"usage": 100000}, {"read": 1}, {"result": reply}])
         self.create()
         code, state = self.supervise()
         warning = budget.LATE_MARKER.format(line=4)
-        self.assertEqual(code, 0, state)
+        self.assertEqual(code, 3, state)
+        self.assertEqual(state["needs_parent"]["kind"], "budget_recovery")
         self.assertEqual(state["budget_phase"], "stopping")
         self.assertEqual(state["budget_warning"], warning)
         self.assertEqual((state["handoffs"], state["budget_missed"]), (0, 0))
@@ -256,8 +439,8 @@ class ClaudeBudgetChecks(unittest.TestCase):
         self.assertIsNone(state.get("pending_handoff"))
         self.assertEqual(state["needs_parent"]["kind"], "budget_limit")
         handoff_file = self.path / "handoffs/turn-0001-2.md"
-        self.assertTrue(state["needs_parent"]["question"].endswith(
-            f"Its latest handoff is in {handoff_file}. Start a new worker from that handoff to continue."))
+        self.assertIn(str(handoff_file), state["needs_parent"]["question"])
+        self.assertIn("Start a new worker from the saved context", state["needs_parent"]["question"])
         shown = subprocess.run([str(REPO / "bin/claive"), "show", state["id"]], env=self.env,
                                text=True, capture_output=True, timeout=5)
         self.assertEqual(shown.returncode, 0, shown.stderr)
@@ -570,7 +753,7 @@ class ClaudeBudgetChecks(unittest.TestCase):
         self.assertTrue(all("--no-session-persistence" in command for command in self.calls("command")))
 
     def test_answer_after_limit_delivers_handoff_and_resets_turn_count(self):
-        self.plan([{"result": HANDOFF}], [{"result": HANDOFF}], [{"result": FINAL}])
+        self.plan([{"result": HANDOFF}], [{"result": HANDOFF}], [{"result": FINAL}], [{"result": FINAL}])
         Path(self.env["CLAIVE_CONFIG"]).write_text(json.dumps({"engines": {"claude": {"budget": {
             "models": {"claude-haiku-5-5": {"max_handoffs": 1}}}}}}))
         launcher = str(REPO / "bin/claive")
@@ -601,14 +784,31 @@ class ClaudeBudgetChecks(unittest.TestCase):
         first = idle(1)
         self.assertEqual(first["needs_parent"]["kind"], "budget_limit")
         self.assertEqual(first["pending_handoff"], str(self.path / "handoffs/turn-0001-2.md"))
-        self.assertTrue(first["needs_parent"]["question"].endswith(
-            "Answer to continue in a new session from that handoff, or close the worker."))
+        self.assertIn("answer or followup", first["needs_parent"]["question"])
         self.assertEqual(cli.outcome_code(first), 3)
         shown = subprocess.run([launcher, "show", first["id"]], env=self.env,
                                text=True, capture_output=True, timeout=5)
         self.assertEqual(shown.returncode, 0, shown.stderr)
         self.assertIn(f"Pending handoff: {first['pending_handoff']} (answer or followup continues from it)\n",
                       shown.stdout)
+        manifest = json.loads(Path(first["pending_budget_context"]).read_text())
+        assignment = Path(manifest["assignment_file"])
+        saved_assignment = assignment.read_text()
+        assignment.unlink()
+        refused = subprocess.run([launcher, "answer", first["id"], "--message", "Continue."],
+                                 env=self.env, text=True, capture_output=True, timeout=5)
+        self.assertEqual(refused.returncode, 0, refused.stderr)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            blocked = json.loads((self.path / "state.json").read_text())
+            if "Cannot resume budget context" in blocked.get("needs_parent", {}).get("question", ""):
+                break
+            time.sleep(0.02)
+        self.assertEqual(blocked["turn"], 1)
+        self.assertEqual(cli.outcome_code(blocked), 3)
+        self.assertEqual(len(self.calls("command")), 2)
+        self.assertIn("pending_budget_context", blocked)
+        assignment.write_text(saved_assignment)
         answer = subprocess.run([launcher, "answer", first["id"], "--message", "Continue with the next step."],
                                 env=self.env, text=True, capture_output=True, timeout=5)
         self.assertEqual(answer.returncode, 0, answer.stderr)
@@ -618,11 +818,22 @@ class ClaudeBudgetChecks(unittest.TestCase):
         self.assertEqual((second["handoffs"], second["turn_handoffs"]), (2, 0))
         self.assertEqual(second["report_state"], "ok")
         prompt = self.calls("prompt")[-1]
-        self.assertTrue(prompt.startswith(budget.PREAMBLE + "\n\n" + HANDOFF))
+        self.assertTrue(prompt.startswith(budget.PREAMBLE + "\n\nOriginal assignment:\n"))
+        self.assertIn(HANDOFF, prompt)
         self.assertIn("---\nParent message:\n", prompt)
         self.assertIn("Continue with the next step.", prompt)
         self.assertTrue(prompt.endswith(cli.REPORT_CONTRACT))
         self.assertEqual(Path(second["turn_prompt_file"]).read_text(), prompt)
+        ordinary = self.workspace / "ordinary.md"
+        ordinary.write_text("An ordinary independent next turn.")
+        queued = subprocess.run([launcher, "followup", first["id"], "--prompt-file", str(ordinary)],
+                                env=self.env, text=True, capture_output=True, timeout=5)
+        self.assertEqual(queued.returncode, 0, queued.stderr)
+        third = idle(3)
+        self.assertNotIn("pending_budget_context", third)
+        self.assertNotIn("budget_input_id", third)
+        self.assertNotIn(HANDOFF, self.calls("prompt")[-1])
+        self.assertNotIn("Complete the original assignment.", self.calls("prompt")[-1])
         closed = subprocess.run([launcher, "close", first["id"]], env=self.env,
                                 text=True, capture_output=True, timeout=5)
         self.assertEqual(closed.returncode, 0, closed.stderr)

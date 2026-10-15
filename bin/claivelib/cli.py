@@ -661,6 +661,15 @@ def supervise(job_id, control=None):
                 except ValueError as error:
                     state["budget_error"] = str(error)
 
+    def close_transport():
+        if transport:
+            try:
+                transport.close()
+            except (OSError, steering.ReceiptError) as error:
+                if budget_values is None:
+                    raise
+                state["budget_context_error"] = str(error)
+
     def apply_events(normalized):
         """Apply one native event; then publish its tool calls and any stop change to the budget gate."""
         tool_ids = [item["tool_id"] for item in normalized if item.get("type") == "tool_started" and item.get("tool_id")]
@@ -668,10 +677,20 @@ def supervise(job_id, control=None):
         for normalized_event in normalized:
             event_update(state, normalized_event)
             update_budget(normalized_event)
+            if budget_values is not None:
+                try:
+                    budget.observe_entry(path, state, normalized_event)
+                except (OSError, ValueError) as error:
+                    state["budget_context_error"] = str(error)
             if transport:
-                transport.observe(normalized_event)
+                try:
+                    transport.observe(normalized_event)
+                except steering.ReceiptError as error:
+                    if budget_values is None:
+                        raise
+                    state["budget_context_error"] = str(error)
                 if state.get("terminal"):
-                    transport.close()
+                    close_transport()
         if budget_values is not None and (tool_ids or gate["stop"] != stop_before):
             gate["seen"] = (gate["seen"] + tool_ids)[-budget.GATE_IDS:]
             try:
@@ -693,6 +712,8 @@ def supervise(job_id, control=None):
     save(path / "state.json", state)
     attempt = 0
     try:
+        if engine.name == "claude" and isinstance(launch_config(state).get("budget"), dict):
+            budget.begin_turn(path, state)
         while True:
             values = launch_config(state).get("budget")
             budget_values = values if engine.name == "claude" and isinstance(values, dict) else None
@@ -730,7 +751,15 @@ def supervise(job_id, control=None):
                 else:
                     state.pop("provider_base_url", None)
             with (path / "events.jsonl").open(log_mode) as events, (path / "stderr.log").open(log_mode) as errors:
-                initial_input = engine.initial_input(turn_request(state))
+                if budget_values is not None:
+                    try:
+                        initial_input = engine.initial_input(turn_request(state))
+                        initial_input = budget.initial_input(path, state, engine, initial_input)
+                    except (OSError, ValueError) as error:
+                        budget.recovery_failure(path, state, "", str(error))
+                        break
+                else:
+                    initial_input = engine.initial_input(turn_request(state))
                 child = subprocess.Popen(state["command"], stdout=subprocess.PIPE, stderr=errors,
                                          stdin=subprocess.PIPE if initial_input is not None else subprocess.DEVNULL,
                                          bufsize=0, start_new_session=True,
@@ -804,8 +833,7 @@ def supervise(job_id, control=None):
                         apply_events(engine.normalize_event(event))
                     except (ValueError, UnicodeDecodeError):
                         state["malformed_events"] += 1
-                if transport:
-                    transport.close()
+                close_transport()
                 state["exit_code"] = child.wait()
                 child.stdout.close()
             actual = engine.discover_workspace(
@@ -841,46 +869,26 @@ def supervise(job_id, control=None):
                     state["failure_kind"] = "worker"
             else:
                 state["status"] = "completed"
-            if (state["status"] == "completed" and budget_values is not None
-                    and state.get("budget_phase") == "stopping"):
-                late_marker = budget.late_marker_line(final_text)
-                if late_marker is not None:
-                    state["budget_warning"] = budget.LATE_MARKER.format(line=late_marker)
-            if state["status"] == "completed" and budget_values is not None and budget.is_handoff(final_text):
-                state["handoffs"] += 1
-                state["turn_handoffs"] += 1
-                number = state["turn_handoffs"]
-                handoff_file = path / "handoffs" / f"turn-{state['turn']:04}-{number}.md"
-                messaging._write_text(handoff_file, final_text)
-                state["session_id"] = engine.resolve_session_id(None, launch_config(state).get("session_logging", True))
-                continuation = path / f"prompt-{state['turn']:04}-h{number}.md"
-                continuation.write_text(budget.continuation_prompt(
-                    final_text, Path(state["turn_prompt_file"]).read_text()))
-                state["prompt_file"] = str(continuation)
-                state["command"] = build_command(engine, turn_request(state))
-                (path / "steering" / f"turn-{state['turn']:04}.closed").unlink(missing_ok=True)
-                maximum = budget_values["max_handoffs"]
-                limit_reached = maximum is not None and number > maximum
-                if limit_reached:
-                    if state.get("reusable"):
-                        action = ("Answer to continue in a new session from that handoff, "
-                                  "or close the worker.")
-                        state["pending_handoff"] = str(handoff_file)
-                    else:
-                        action = "Start a new worker from that handoff to continue."
-                    state["needs_parent"] = {
-                        "kind": "budget_limit",
-                        "question": f"The worker reached the limit of {maximum} automatic context handoffs in this turn. "
-                                    f"Its latest handoff is in {handoff_file}. {action}",
-                    }
-                save(path / "state.json", state)
-                inbox_mod.append(inbox_mod.budget_event(
-                    job_id, state.get("label", ""), state["turn"], number, state["handoffs"],
-                    state["context_tokens"], state["session_id"], budget.next_step(final_text)))
-                if limit_reached:
+            if state["status"] == "completed" and budget_values is not None:
+                if state.get("budget_context_error"):
+                    budget.recovery_failure(path, state, final_text, state.pop("budget_context_error"))
                     break
-                attempt += 1
-                continue
+                previous_handoffs = state["handoffs"]
+                outcome = budget.transition(path, state, final_text, engine.resolve_session_id(
+                    None, launch_config(state).get("session_logging", True)), budget_values)
+                if outcome:
+                    if outcome == "continue":
+                        state["command"] = build_command(engine, turn_request(state))
+                        (path / "steering" / f"turn-{state['turn']:04}.closed").unlink(missing_ok=True)
+                    save(path / "state.json", state)
+                    if state["handoffs"] > previous_handoffs:
+                        inbox_mod.append(inbox_mod.budget_event(
+                            job_id, state.get("label", ""), state["turn"], state["turn_handoffs"],
+                            state["handoffs"], state["context_tokens"], state["session_id"], budget.next_step(final_text)))
+                    if outcome == "paused":
+                        break
+                    attempt += 1
+                    continue
             if state.get("report_contract"):
                 record_report(state, answer)
             if (state["status"] == "failed" and not stopping
@@ -911,7 +919,9 @@ def supervise(job_id, control=None):
                     continue
             break
     except Exception as error:
-        if timed_out and not stopping:
+        if budget_values is not None and isinstance(error, steering.ReceiptError) and not stopping:
+            budget.recovery_failure(path, state, state.get("answer", ""), str(error))
+        elif timed_out and not stopping:
             state["status"] = "failed"
             state["failure_kind"] = "timeout"
             turn_timeout = state.get("turn_timeout")
@@ -938,8 +948,7 @@ def supervise(job_id, control=None):
                 child.wait()
             except Exception:
                 pass
-    if transport:
-        transport.close()
+    close_transport()
     state.pop("answer", None)
     state["ended_at"] = time.time()
     state["phase"] = state["status"]
@@ -1180,8 +1189,7 @@ def reusable_worker(job_id):
                         continue
                     notes = messaging.pending_messages(path)
                     pending_handoff = state.get("pending_handoff")
-                    handoff_file = Path(pending_handoff) if pending_handoff else None
-                    has_handoff = handoff_file is not None and handoff_file.is_file()
+                    has_handoff = bool(pending_handoff or state.get("pending_budget_context"))
                     if state.get("report_contract"):
                         source = request["prompt_file"]
                     if state.get("report_contract") or notes or incident or has_handoff:
@@ -1193,19 +1201,23 @@ def reusable_worker(job_id):
                             content = f"{incident}\n\n{content}"
                         if state.get("report_contract"):
                             content += "\n\n" + REPORT_CONTRACT
-                        if has_handoff:
-                            content = budget.answer_prompt(handoff_file.read_text(), content)
                         Path(effective).write_text(content)
                     try:
+                        if has_handoff:
+                            effective = budget.resume(path, state, content, new_turn)
                         next_turn = turn_request(state, prompt_file=effective,
                                                  reasoning_effort=effort, max_model_steps=steps,
                                                  isolation=isolation)
                         validate_turn(state.get("engine", DEFAULT_ENGINE), next_turn)
                         command = build_command(engine, next_turn)
                     except ValueError as error:
-                        state.update(last_turn_status="failed", error=str(error),
+                        state.update(last_turn_status="completed" if has_handoff else "failed", error=str(error),
                                      phase="follow-up rejected; ready for another assignment",
                                      failure_kind="rejected")
+                        if has_handoff:
+                            state["needs_parent"] = dict(kind="budget_recovery", question=(
+                                f"Cannot resume budget context: {error}. Restore the named inputs, "
+                                "then answer again, or start a new worker with a fresh assignment."))
                         save(path / "state.json", state)
                         _write_turn_event(state)
                         turns.complete(path, state, request.get("request_id"), str(error))
@@ -1228,6 +1240,7 @@ def reusable_worker(job_id):
                         state["source_prompt_file"] = source
                     if has_handoff:
                         state.pop("pending_handoff", None)
+                        state.pop("pending_budget_context", None)
                     save(path / "state.json", state)
                     messaging.mark_delivered(path, notes, new_turn)
                     pending[0].unlink()
@@ -1235,6 +1248,7 @@ def reusable_worker(job_id):
             if (path / "close.request").exists():
                 state.pop("needs_parent", None)
                 state.pop("pending_handoff", None)
+                state.pop("pending_budget_context", None)
                 state.update(status=state["last_turn_status"], phase="session closed", ended_at=time.time())
                 release_worktree(state)
                 save(path / "state.json", state)
@@ -1612,6 +1626,8 @@ def report(state):
             print(f"Context budget: off ({clean(reason)})")
         if state.get("pending_handoff"):
             print(f"Pending handoff: {clean(state['pending_handoff'])} (answer or followup continues from it)")
+        if state.get("pending_budget_context"):
+            print(f"Pending context: {clean(state['pending_budget_context'])} (restore missing inputs before recovery)")
     print(f"Queued follow-ups: {len(list((path / 'requests').glob('*.json')))} (delivered between turns)")
     if state.get("task_failures"):
         print(f"Task failures reported: {state['task_failures']} cumulative; "

@@ -354,6 +354,10 @@ claive ask (--message MESSAGE | --message-file MESSAGE_FILE) [--timeout TIMEOUT]
 
 Exit codes: 0 answered, 1 refused/failed/invalid reply, 3 needs parent, 124 withdrawn or expired.
 
+For Claude budget pauses, exit 3 provides recovery guidance and keeps the question open until
+its original deadline. Resume the worker, then wait again with the same text and `--id`.
+A handoff is not an answer. The question's ID, reply schema and deadline survive recovery.
+
 Example: `claive ask @backend --message 'Which file owns the parser?' --timeout 120`.
 
 ## `reply`
@@ -655,7 +659,12 @@ Example: `claive show @backend --json`.
 
 Claude workers add a `Context budget:` line: context tokens, warn, stop and compaction limits,
 handoffs and missed handoffs, or `off (reason)`. JSON adds `budget`, `context_tokens`, `handoffs`,
-`turn_handoffs`, `budget_missed` and `pending_handoff`.
+`turn_handoffs`, `budget_missed` and `pending_handoff`. Budget recovery also exposes
+`pending_budget_context` and a `Pending context:` line naming the saved manifest.
+`needs_parent.kind == "budget_recovery"` means a handoff or required input needs attention.
+Restore missing artifacts before `answer` or `followup`, or start a new worker with a fresh task.
+Steering receipts omit private payloads. Optional `continuation.phase` is `staged` for prompt
+inclusion or `entered` after correlated provider replay. Native receipt status does not change.
 
 ## `logs`
 

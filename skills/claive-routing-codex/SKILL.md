@@ -25,6 +25,9 @@ Select an engine deliberately and follow the parent's current authorization poli
 | `claude` | `--engine claude`; default `claude-haiku-5-5`, allowed models set by `engines.claude.models` in the claive config; context budget mode on by default (`[claive-handoff]` replies continue the turn in a new session, `budget_limit` exits 3); headless with parent settings/hooks excluded, MCP and skills loaded; no managed worktree or model-step cap; `--output-schema` returns schema-validated JSON; `--enable-steering` for live steering (budget mode turns it on) |
 | `codex` | `--engine codex`; pinned `gpt-6-luna` at effort `max` (default) or `gpt-6.1-sol` at `low`, `medium`, `high` or `xhigh` (`medium` when no effort is passed; `max` and `ultra` are refused); writer runs without the Codex sandbox by default, read-only uses the read-only sandbox; no managed worktree, output schema, or model-step cap |
 
+For Claude handoffs, exit-3 recovery, or an unanswered `ask` across sessions, follow
+**Claude budget recovery** in `claive-orchestration`.
+
 Claude/Codex workers are **available**, not automatically authorized as a
 fallback or as critics for the Muse/Pi arbiter. Do not silently switch engines,
 relax sandboxing, or assume another model's worker permissions carry over.

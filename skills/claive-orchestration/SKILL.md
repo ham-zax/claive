@@ -52,12 +52,23 @@ claive denies the worker's tool calls (a PreToolUse hook; the denied tool error 
 worker writes a `[claive-handoff]` reply and claive continues the turn in a new session
 (inbox `budget_handoff`). After `max_handoffs` automatic continuations the next handoff exits 3
 (`budget_limit`): `claive answer` continues a reusable worker; for a one-shot worker, start a new
-worker from the handoff. Limits: `engines.claude.budget` (Haiku warn 85k/stop 95k, others 135k/145k;
+worker from the saved context. Limits: `engines.claude.budget` (Haiku warn 85k/stop 95k, others 135k/145k;
 `budget: false` turns it off; `--output-schema` launches run without it). `claive show` prints a
 "Context budget:" line. Spec: `docs/design-budget-mode.md`. `claive-orch` uses only
 Muse/Pi for its implementer/critic ladder; its roster does not authorize Claude/Codex
 workers. Engine sandbox, settings and option limits: `README.md` and
 `docs/harness-integration.md`. Codex parents also follow `claive-routing-codex`.
+
+**Claude budget recovery.** A handoff needs a nonblank `## Owed to the parent` section.
+Claive retains the frozen assignment and eligible exact messages across sessions.
+Continuation entry confirms input delivery, not compliance. Check inexpensive handoff claims
+before relying on them. Return owed answers in the final outward reply.
+For exit 3 with `budget_recovery`, read the artifact paths in `claive show ID` and restore
+missing or corrupt inputs. Then use `claive answer` or `followup` to resume a reusable worker.
+For a one-shot worker, start a new worker from the saved context.
+A budget pause leaves an `ask` question open. Retry the same question ID after recovery,
+with the same question and schema. Its original deadline still applies.
+Treat pause guidance and intermediate handoffs as recovery information, never as an answer.
 
 **Check `claive engines [--json]` before choosing an engine.** It lists each engine's
 enabled state, the user's reason, default and disabled models and efforts, and steering

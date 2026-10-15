@@ -264,12 +264,21 @@ tool call, so no large tool result enters first, and claive sends the stop messa
 the gate fails, that message arrives one tool result late, and compaction is still possible. A
 tool error that starts with `PreToolUse:` and contains `[claive budget]` in the worker log is this
 gate, not a failure.
-The worker then ends its turn with a reply that starts with `[claive-handoff]`.
-claive saves the reply in `<job>/handoffs/` and continues the same turn in a new session.
+The worker then ends its session with a reply that starts with `[claive-handoff]` and includes
+a nonblank `## Owed to the parent` section. Claive saves the reply in `<job>/handoffs/` and
+continues the same logical turn in a fresh session. Versioned manifests in `<job>/budget-context/`
+reference the frozen assignment, latest handoff and exact external steering records. The prompt
+includes these inputs without nesting older handoffs. Raw receipt payloads stay out of public JSON.
+Matching provider replay confirms context entry. It does not prove compliance or an answered question.
 The inbox gets a `budget_handoff` event for each handoff.
 At the handoff after the limit, the turn exits 3 with `needs_parent.kind == "budget_limit"`.
 For a reusable worker, `claive answer` or `followup` is the permission to continue from the
-pending handoff. A one-shot worker cannot take an answer: start a new worker from its handoff.
+saved context. A one-shot worker cannot take an answer: start a new worker with the saved prompt
+and available context. Invalid handoffs and unavailable inputs exit 3 with
+`needs_parent.kind == "budget_recovery"`. `show` names the artifacts and recovery action.
+Restore missing or corrupt inputs before resuming, or start a new worker with a fresh assignment.
+An answer alone cannot recreate missing data. An `ask` remains open during automatic continuation,
+and budget pauses provide guidance rather than an answer. Its original deadline still applies.
 `--turn-timeout` covers all sessions of the turn. Claude's own compaction is the fallback, at
 stop + 20k for Haiku and stop + 25k for other models. `show` counts each compaction as `missed`. Spec: [design-budget-mode.md](design-budget-mode.md).
 

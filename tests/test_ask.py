@@ -12,7 +12,7 @@ import unittest
 from unittest import mock
 
 from tests import test_messaging
-from claivelib import ask_schema, asking, cli, messaging, steering, turns
+from claivelib import ask_schema, asking, budget, cli, messaging, steering, turns
 from claivelib.acceptance import atomic
 
 
@@ -338,6 +338,138 @@ class AskChecks(unittest.TestCase):
 
 
 class AskingPollChecks(unittest.TestCase):
+    def test_wake_answer_survives_an_unrelated_later_budget_pause(self):
+        receipt = self.prepare("wake", delivered=True, deadline=time.time() + 30)
+        manifest = self.path / "budget-context/turn-0005-resume.json"
+        context = dict(version=1, assignment_file=str(self.path / "assignment.md"), handoff_file=None,
+                       steering_ids=[], entered_ids=[], turns=[4, 5], recovery_messages=[], turn=5, phase="entered")
+        atomic(manifest, context)
+        budget._link_turns(self.path, context, manifest)
+        paused = dict(kind="budget_limit", question="Old pause.")
+        atomic(self.path / "responses" / f"{self.request_id}.json",
+               dict(turn=4, status="completed", code=3, needs_parent=paused))
+        messaging._write_text(self.path / "results/turn-0005.txt", "Recovered answer.")
+        assignment = self.path / "new-task.md"
+        assignment.write_text("Unrelated new task.")
+        self.state.update(schema_version=2, engine="claude", launch={"budget": {}}, turn=6,
+                          status="idle", last_turn_status="completed", prompt_file=str(assignment),
+                          needs_parent=dict(kind="budget_limit", question="Unrelated pause."))
+        budget.begin_turn(self.path, self.state)
+        self.assertEqual(budget.question_context(self.path, self.state, 4), dict(turn=5, phase="entered"))
+        self.assertEqual(json.loads(Path(self.state["budget_context_file"]).read_text())["turns"], [6])
+        record, code, _notice = self.run_ask(receipt)
+        self.assertEqual(code, 0)
+        self.assertEqual(record["answer"], "Recovered answer.")
+        self.assertEqual(record["delivered_turn"], 5)
+
+    def test_missing_budget_lineage_keeps_a_wake_question_open(self):
+        receipt = self.prepare("wake", delivered=True, deadline=time.time() + 30)
+        self.state.update(schema_version=2, engine="claude", launch={"budget": {}},
+                          budget_lineage_version=1, budget_context_file=str(self.path / "context.json"))
+        record, code, notice = self.run_ask(receipt)
+        self.assertEqual(code, 3)
+        self.assertEqual(record["status"], "open")
+        self.assertIn("turn-0004-lineage.json", notice)
+
+    def test_wake_question_follows_budget_recovery_without_accepting_a_handoff(self):
+        receipt = self.prepare("wake", delivered=True, deadline=time.time() + 30)
+        manifest = self.path / "budget-context/turn-0004-h1.json"
+        context = dict(version=1, assignment_file=str(self.path / "assignment.md"), handoff_file=None,
+                       steering_ids=[], entered_ids=[], turns=[4], recovery_messages=[], turn=4, phase="staged")
+        atomic(manifest, context)
+        self.state.update(schema_version=2, engine="claude", launch={"budget": {}}, status="idle",
+                          last_turn_status="completed", budget_context_file=str(manifest),
+                          needs_parent=dict(kind="budget_limit", question="Continue from saved context."))
+        paused_response = dict(turn=4, status="completed", code=3, needs_parent=self.state["needs_parent"])
+        atomic(self.path / "responses" / f"{self.request_id}.json", paused_response)
+        messaging._write_text(self.path / "results/turn-0004.txt", "[claive-handoff]\nNot the answer.")
+        record, code, notice = self.run_ask(receipt)
+        self.assertEqual(code, 3)
+        self.assertEqual(record["status"], "open")
+        self.assertIsNone(record["answer"])
+        deadline = record["deadline"]
+        self.state.pop("needs_parent")
+        self.state.update(turn=5, status="running")
+        context.update(turn=5, turns=[4, 5], phase="staged")
+        atomic(manifest, context)
+        polls = []
+
+        def enter_and_finish(_delay):
+            polls.append(True)
+            self.assertEqual(json.loads(self.file.read_text())["status"], "open")
+            context["phase"] = "entered"
+            atomic(manifest, context)
+            self.state.update(status="idle", last_turn_status="completed")
+            messaging._write_text(self.path / "results/turn-0005.txt", "Actual final answer after recovery.")
+
+        with mock.patch.object(asking.time, "sleep", side_effect=enter_and_finish):
+            record, code, notice = self.run_ask(receipt)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(polls), 1)
+        self.assertEqual(record["answer"], "Actual final answer after recovery.")
+        self.assertEqual(record["deadline"], deadline)
+
+    def test_unconfirmed_question_waits_through_recovery_and_accepts_a_reply(self):
+        receipt = self.prepare("now", deadline=time.time() + 30)
+        original_deadline = json.loads(self.file.read_text())["deadline"]
+        self.state.update(schema_version=2, engine="claude", launch={"budget": {}}, turn=5)
+        filename = self.path / "steering/receipts" / f"{self.steering_id}.json"
+        native = json.loads(filename.read_text())
+        native.update(status="unconfirmed", continuation=dict(turn=5, phase="staged"))
+        atomic(filename, native)
+        polls = []
+
+        def enter_and_reply(_delay):
+            polls.append(True)
+            self.assertEqual(json.loads(self.file.read_text())["status"], "open")
+            native["continuation"]["phase"] = "entered"
+            atomic(filename, native)
+            asking.reply(self.path, self.identifier, "The owed answer is 42.")
+
+        with mock.patch.object(asking.time, "sleep", side_effect=enter_and_reply):
+            record, code, _ = self.run_ask(receipt)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(polls), 1)
+        self.assertEqual(record["answer_source"], "reply")
+        self.assertEqual(record["delivered_turn"], 5)
+        self.assertEqual(record["deadline"], original_deadline)
+        self.assertEqual(steering.receipt(self.path, self.steering_id)["status"], "unconfirmed")
+
+    def test_budget_pause_is_guidance_not_an_answer_and_same_id_can_wait_again(self):
+        receipt = self.prepare("now", deadline=time.time() + 30)
+        self.state.update(schema_version=2, engine="claude", launch={"budget": {}}, status="idle",
+                          last_turn_status="completed", needs_parent=dict(kind="budget_limit", question="Resume context."))
+        filename = self.path / "steering/receipts" / f"{self.steering_id}.json"
+        native = json.loads(filename.read_text())
+        native.update(status="not_delivered", continuation=dict(turn=4, phase="staged"))
+        atomic(filename, native)
+        record, code, notice = self.run_ask(receipt)
+        self.assertEqual((code, notice), (3, "Resume context."))
+        self.assertEqual(record["status"], "open")
+        self.assertIsNone(record["answer"])
+        deadline = record["deadline"]
+        self.state.pop("needs_parent")
+        self.state["turn"] = 5
+        native["continuation"].update(turn=5, phase="entered")
+        atomic(filename, native)
+        messaging._write_text(self.path / "results/turn-0005.txt", "Final owed answer.")
+        record, code, _ = self.run_ask(receipt)
+        self.assertEqual(code, 0)
+        self.assertEqual(record["answer"], "Final owed answer.")
+        self.assertEqual(record["deadline"], deadline)
+
+    def test_carried_question_keeps_its_original_answer_deadline(self):
+        receipt = self.prepare("now", deadline=time.time() - 1)
+        self.state.update(schema_version=2, engine="claude", launch={"budget": {}})
+        filename = self.path / "steering/receipts" / f"{self.steering_id}.json"
+        native = json.loads(filename.read_text())
+        native.update(status="unconfirmed", continuation=dict(turn=4, phase="entered"))
+        atomic(filename, native)
+        record, code, _ = self.run_ask(receipt)
+        self.assertEqual((code, record["status"]), (124, "expired"))
+        with self.assertRaisesRegex(ValueError, "no longer waits"):
+            asking.reply(self.path, self.identifier, "Too late.")
+
     def setUp(self):
         import tempfile
         self.temp = tempfile.TemporaryDirectory()

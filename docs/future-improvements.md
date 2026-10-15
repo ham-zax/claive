@@ -179,6 +179,22 @@ worker clears needs_parent and pending_handoff.
 The live tests edited `~/.config/claive/config.json` and needed a manual restore.
 `CLAIVE_CONFIG` already exists. **Done:** docs/budget-mode-live-test.md now sets CLAIVE_CONFIG to a scratch config.
 
+## D. From the continuation review (2026-10-16)
+
+### D1. A lifecycle fixture for delayed question retries
+
+Proposal only. The first fixtures retried questions during recovery. Independent review found
+that a caller could retry after another ordinary turn starts. The implementation now covers
+that case. Consider a reusable lifecycle fixture that combines wake, steering, pause, recovery
+and delayed retry across several turns. That fixture could reduce repeated setup and make
+future persistence changes easier to test. Existing lint and unit-test commands remain sufficient.
+
+### D2. Keep failed assertion output bounded
+
+Proposal only. A failed supervisor assertion printed the full worker state and consumed context.
+Consider a fixture assertion helper that prints status, turn, error and artifact paths first.
+Keep the complete state in the test's scratch directory for diagnosis.
+
 ## Order
 
 1. A1, A4 (small, they catch real bugs).

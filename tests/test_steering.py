@@ -9,10 +9,12 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
-from claivelib import cli
+from claivelib import cli, steering
 from claivelib.engines.pi import PiEngine
+from claivelib.state import SCHEMA_VERSION
 
 RPC_FIXTURE = '''#!/usr/bin/python3
 import json,sys,time
@@ -46,6 +48,252 @@ for line in sys.stdin:
  emit(dict(type='message_end',message=dict(role='assistant',stopReason='stop',content=[dict(type='text',text='steered: '+request['message'])])))
  emit(dict(type='agent_settled'))
 '''
+
+
+class DurableSteeringChecks(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.path = Path(temp.name)
+        self.state = dict(schema_version=SCHEMA_VERSION, engine="pi", launch=dict(steering=True),
+                          status="running", worker_pid=123, turn=1)
+        patch = mock.patch.object(cli, "load", return_value=self.state)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def raw(self, identifier):
+        return json.loads(self.file(identifier).read_text())
+
+    def file(self, identifier):
+        return self.path / "steering" / "receipts" / f"{identifier}.json"
+
+    def record(self, status="pending", turn=1, sequence=1, expiry=None, **fields):
+        identifier = f"{len(list((self.path / 'steering' / 'receipts').glob('*.json'))) + 1:032x}"
+        record = dict(id=identifier, turn=turn, status=status, created_at=1,
+                      payload=dict(message=f"message {identifier}", sequence=sequence, expires_at=expiry))
+        record.update(fields)
+        steering.atomic(self.file(identifier), record)
+        return identifier
+
+    def transport(self):
+        # A local pipe exercises the existing framing without a provider or model.
+        read_fd, write_fd = os.pipe()
+        reader = os.fdopen(read_fd, "rb", buffering=0)
+        writer = os.fdopen(write_fd, "wb", buffering=0)
+        self.addCleanup(reader.close)
+        self.addCleanup(writer.close)
+        return steering.Transport(self.path, self.state, writer, ""), reader
+
+    def test_unicode_payload_is_durable_before_request_and_private(self):
+        message = "  親の指示 👩🏽‍💻\n café e\u0301\t\n"
+        original_atomic = steering.atomic
+        writes = []
+
+        def save(path, value):
+            if path.parent.name == "requests":
+                self.assertEqual(self.raw(value["id"])["payload"]["message"], message)
+                self.assertNotIn("payload", value)
+            writes.append(path.parent.name)
+            original_atomic(path, value)
+
+        with mock.patch.object(steering, "atomic", side_effect=save):
+            public = steering.submit(self.path, message, expires_at=123.5, source="peer")
+        identifier = public["id"]
+        self.assertEqual(writes, ["receipts", "requests"])
+        self.assertEqual(self.raw(identifier)["payload"],
+                         dict(message=message, sequence=1, expires_at=123.5))
+        request = json.loads(next((self.path / "steering" / "requests").glob("*.json")).read_text())
+        self.assertEqual(request, dict(public, message=message, expires_at=123.5))
+        for output in (public, steering.receipt(self.path, identifier), steering.summary(self.path, self.state)):
+            self.assertNotIn("payload", json.dumps(output))
+            self.assertNotIn(message, str(output))
+
+    def test_sequences_follow_maximum_in_same_turn_and_ignore_budget(self):
+        self.record(sequence=8)
+        self.record(sequence=3)
+        self.record(turn=2, sequence=100)
+        self.record(sequence=500, source="budget")
+        self.record(payload=None)  # Legacy metadata does not allocate a sequence.
+        first = steering.submit(self.path, "first")
+        budget = steering.submit(self.path, "budget", source="budget")
+        second = steering.submit(self.path, "second")
+        self.assertEqual(self.raw(first["id"])["payload"]["sequence"], 9)
+        self.assertEqual(self.raw(second["id"])["payload"]["sequence"], 10)
+        self.assertNotIn("payload", self.raw(budget["id"]))
+        self.state["turn"] = 3
+        third = steering.submit(self.path, "new turn")
+        self.assertEqual(self.raw(third["id"])["payload"],
+                         dict(message="new turn", sequence=1, expires_at=None))
+
+    def test_payload_and_continuation_survive_update_withdraw_and_close(self):
+        first = steering.submit(self.path, "queued")["id"]
+        second = steering.submit(self.path, "withdraw")["id"]
+        third = self.record(status="sent", sequence=3)
+        steering.stage_continuation(self.path, [first, second, third], turn=1, session_id="session",
+                                    prompt_file=self.path / "prompt", input_id="input")
+        before = {identifier: self.raw(identifier) for identifier in (first, second, third)}
+        transport, _ = self.transport()
+        transport.update(first, disposition={"queued": True}, reason="waiting")
+        self.assertTrue(steering.withdraw(self.path, second))
+        transport.close()
+        for identifier, status in ((first, "not_delivered"), (second, "withdrawn"), (third, "unconfirmed")):
+            raw = self.raw(identifier)
+            self.assertEqual(raw["status"], status)
+            self.assertEqual(raw["payload"], before[identifier]["payload"])
+            self.assertEqual(raw["continuation"], before[identifier]["continuation"])
+        self.assertEqual(list((self.path / "steering" / "requests").iterdir()), [])
+
+    def test_transport_preserves_framing_and_acknowledgement(self):
+        identifier = steering.submit(self.path, "hello λ")["id"]
+        payload = self.raw(identifier)["payload"]
+        transport, reader = self.transport()
+        transport.pump()
+        self.assertEqual(reader.readline(), PiEngine().steering_frame(identifier, "hello λ").encode())
+        self.assertEqual(steering.receipt(self.path, identifier)["status"], "sent")
+        transport.observe(dict(type="control_response", command="steer", id=identifier, success=True))
+        transport.close()
+        self.assertEqual(self.raw(identifier)["payload"], payload)
+        self.assertEqual(steering.receipt(self.path, identifier)["status"], "acknowledged")
+
+    def test_transport_rejects_each_immutable_field_without_writing(self):
+        identifier = self.record()
+        transport, _ = self.transport()
+        before = self.file(identifier).read_bytes()
+        for field in ("id", "turn", "source", "created_at", "payload"):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                transport.update(identifier, **{field: self.raw(identifier).get(field)})
+            self.assertEqual(self.file(identifier).read_bytes(), before)
+        transport.update(identifier, status="sent", reason="sent", disposition="queued", turn_ended=True)
+        self.assertEqual(self.raw(identifier)["status"], "sent")
+
+    def test_legacy_metadata_remains_publicly_readable(self):
+        identifier = self.record()
+        raw = self.raw(identifier)
+        del raw["payload"]
+        steering.atomic(self.file(identifier), raw)
+        self.assertEqual(steering.receipt(self.path, identifier), raw)
+        self.assertEqual(steering.summary(self.path, self.state)["receipts"], [raw])
+        transport, _ = self.transport()
+        transport.update(identifier, status="sent")
+        self.assertNotIn("payload", self.raw(identifier))
+
+    def test_status_and_expiry_selection(self):
+        expected = []
+        for status in ("acknowledged", "sent", "unconfirmed", "pending", "not_delivered", "rejected", "withdrawn"):
+            for expiry in (None, 99, 100, 101, 100.5, 10 ** 400):
+                identifier = self.record(status=status, expiry=expiry)
+                if status in {"acknowledged", "sent", "unconfirmed"} or (
+                        status in {"pending", "not_delivered"} and (expiry is None or expiry > 100)):
+                    expected.append(identifier)
+        self.record(source="budget", status="unknown", payload=None)
+        self.assertEqual([record["id"] for record in steering.continuation_records(self.path, 1, now=100)], expected)
+
+    def test_deduplication_order_historical_entry_and_no_receipt_writes(self):
+        late = self.record(turn=2, sequence=2)
+        early = self.record(turn=2, sequence=1)
+        tied = self.record(turn=2, sequence=1)
+        historical = self.record(turn=1, sequence=9, status="not_delivered", expiry=1)
+        excluded = self.record(turn=1, status="withdrawn", payload=None)
+        self.record(turn=1, status="acknowledged")  # Ordinary old turns are not inherited.
+        (self.path / ".steering.lock").write_text("unchanged lock")
+        before = {file: file.read_bytes() for file in (self.path / "steering" / "receipts").glob("*.json")}
+        records = steering.continuation_records(self.path, 2, carried_ids=[late, historical, historical, excluded],
+                                                 entered_ids=[historical, excluded], now=100)
+        self.assertEqual([record["id"] for record in records], [historical, early, tied, late])
+        self.assertTrue(all("payload" in record for record in records))
+        self.assertEqual({file: file.read_bytes() for file in before}, before)
+        self.assertEqual((self.path / ".steering.lock").read_text(), "unchanged lock")
+        self.assertEqual([record["id"] for record in steering.continuation_records(self.path, 2, [historical], now=100)],
+                         [early, tied, late])
+
+    def test_staging_does_not_imply_entry_or_override_expiry(self):
+        identifier = self.record(status="not_delivered", expiry=1)
+        steering.stage_continuation(self.path, [identifier], turn=1, session_id="s", prompt_file="p", input_id="uuid")
+        self.assertEqual(steering.continuation_records(self.path, 1, now=100), [])
+        self.assertEqual(steering.enter_continuation(self.path, "uuid"), [identifier])
+        self.assertEqual(steering.continuation_records(self.path, 1, now=100), [])
+        self.assertEqual(len(steering.continuation_records(self.path, 1, entered_ids=[identifier], now=100)), 1)
+
+    def test_missing_receipt_and_eligible_legacy_payload_fail_with_context(self):
+        missing = "f" * 32
+        with self.assertRaises(ValueError) as caught:
+            steering.continuation_records(self.path, 1, [missing])
+        self.assertIn(missing, str(caught.exception))
+        self.assertIn(str(self.path), str(caught.exception))
+        identifier = self.record(status="acknowledged")
+        raw = self.raw(identifier)
+        del raw["payload"]
+        steering.atomic(self.file(identifier), raw)
+        with self.assertRaises(ValueError) as caught:
+            steering.continuation_records(self.path, 1)
+        self.assertIn(identifier, str(caught.exception))
+        self.assertIn(str(self.path), str(caught.exception))
+        raw["status"] = "rejected"
+        steering.atomic(self.file(identifier), raw)
+        self.assertEqual(steering.continuation_records(self.path, 1), [])
+
+    def test_default_clock_applies_to_pending_expiry(self):
+        identifier = self.record(expiry=100)
+        with mock.patch.object(steering.time, "time", return_value=99):
+            self.assertEqual([record["id"] for record in steering.continuation_records(self.path, 1)], [identifier])
+        with mock.patch.object(steering.time, "time", return_value=100):
+            self.assertEqual(steering.continuation_records(self.path, 1), [])
+
+    def test_malformed_eligible_payloads_and_unknown_status_fail(self):
+        identifier = self.record(status="sent")
+        valid = self.raw(identifier)
+        invalid_payloads = [None, [], {}, dict(valid["payload"], message=" \n"),
+                            dict(valid["payload"], message=1), dict(valid["payload"], sequence=True),
+                            dict(valid["payload"], sequence=0), dict(valid["payload"], sequence=1.5),
+                            dict(valid["payload"], expires_at=True), dict(valid["payload"], expires_at="100"),
+                            dict(valid["payload"], expires_at=float("inf")),
+                            dict(valid["payload"], expires_at=float("nan")),
+                            dict(message="text", sequence=1)]
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                steering.atomic(self.file(identifier), dict(valid, payload=payload))
+                with self.assertRaises(ValueError) as caught:
+                    steering.continuation_records(self.path, 1)
+                self.assertIn(identifier, str(caught.exception))
+                self.assertIn(str(self.path), str(caught.exception))
+        steering.atomic(self.file(identifier), dict(valid, status="surprise"))
+        with self.assertRaisesRegex(ValueError, "unknown steering status"):
+            steering.continuation_records(self.path, 1)
+
+    def test_stage_and_enter_use_exact_input_id_and_bounded_metadata(self):
+        first = self.record(status="acknowledged")
+        second = self.record(status="unconfirmed")
+        third = self.record()
+        before = {identifier: self.raw(identifier) for identifier in (first, second, third)}
+        steering.stage_continuation(self.path, [first, first, second], turn=2, session_id="session-2",
+                                    prompt_file=self.path / "prompt-2", input_id="uuid-2")
+        steering.stage_continuation(self.path, [third], turn=2, session_id="other",
+                                    prompt_file="other", input_id="uuid-2-other")
+        self.assertEqual(self.raw(first)["continuation"],
+                         dict(turn=2, session_id="session-2", prompt_file=str(self.path / "prompt-2"),
+                              input_id="uuid-2", phase="staged"))
+        self.assertEqual(steering.enter_continuation(self.path, "uuid"), [])
+        self.assertEqual(steering.enter_continuation(self.path, "uuid-2"), [first, second])
+        after = {identifier: self.raw(identifier) for identifier in (first, second, third)}
+        self.assertEqual(steering.enter_continuation(self.path, "uuid-2"), [])
+        for identifier in (first, second, third):
+            self.assertEqual(self.raw(identifier), after[identifier])
+            self.assertEqual(after[identifier]["status"], before[identifier]["status"])
+            self.assertEqual(after[identifier]["payload"], before[identifier]["payload"])
+        self.assertEqual(after[third]["continuation"]["phase"], "staged")
+        steering.stage_continuation(self.path, [first], turn=3, session_id="session-3",
+                                    prompt_file="prompt-3", input_id="uuid-3")
+        self.assertEqual(len(self.raw(first)["continuation"]), 5)
+        self.assertEqual(steering.enter_continuation(self.path, "uuid-2"), [])
+        self.assertEqual(steering.enter_continuation(self.path, "uuid-3"), [first])
+
+    def test_stage_missing_receipt_rejects_without_partial_metadata(self):
+        identifier = self.record()
+        before = self.file(identifier).read_bytes()
+        with self.assertRaises(ValueError):
+            steering.stage_continuation(self.path, [identifier, "f" * 32], turn=2, session_id="s",
+                                        prompt_file="p", input_id="uuid")
+        self.assertEqual(self.file(identifier).read_bytes(), before)
 
 
 class SteeringChecks(unittest.TestCase):

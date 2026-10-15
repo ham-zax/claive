@@ -159,7 +159,8 @@ Warn:
 Reach a checkpoint before then: finish and verify the current step. Do not start large new work.
 If the assignment is complete at the checkpoint, give your normal final answer.
 Otherwise end your turn with a handoff reply in the format below. claive then continues the
-work in a new session that sees only the handoff and the original assignment.
+work in a new session with the handoff, original assignment and retained external messages.
+Keep the handoff marker first. A handoff never replaces an answer owed to the parent.
 
 {template}
 ```
@@ -169,6 +170,7 @@ Stop:
 ```
 [claive budget] Context is at {k}k tokens, at the {stop_k}k stop limit. Stop now. Do not finish
 the current step. Let background jobs run. End your turn with the handoff reply now.
+Keep the marker first and include every unanswered request under ## Owed to the parent.
 ```
 
 Template:
@@ -182,6 +184,9 @@ pointers (file:line, command) instead of file contents. Do not list modified fil
 
 ## Goal
 The assignment and its done condition. Quote the parent's direction-setting instructions verbatim.
+## Owed to the parent
+Always include this section. List requests not yet answered in a final outward result, with partial
+findings. An answer in reasoning or a handoff is still owed. Write "none" only when nothing is owed.
 ## State
 What is done and how it was verified (command and result). What is in progress.
 ## Decisions
@@ -198,49 +203,52 @@ The exact next action and its stop condition.
 
 ### Turn end
 
-A handoff is a completed turn whose final text has `[claive-handoff]` as its first nonblank line.
-claive checks this before `record_report`, so only the final session's answer meets the report
-contract. Any other final text completes the turn as today.
+A handoff ends a provider session. Its first nonblank line is `[claive-handoff]`, and its
+`## Owed to the parent` section has a nonblank body. Claive validates before `record_report`.
+Only the final logical result meets the report contract. A normal final answer without the
+marker retains the normal report path.
 
 On a handoff:
 
-1. claive saves the text to `<job>/handoffs/turn-NNNN-K.md` (K = handoff number in the turn).
-2. `state["handoffs"] += 1` (total), `state["turn_handoffs"] += 1` (this turn).
-3. claive appends an inbox event `{"type": "budget_handoff", "id", "label", "turn", "handoff":
-   K, "handoffs": total, "context_tokens", "session_id": new session, "next_step": first 300
-   characters of the Next step section}`.
-4. If `max_handoffs` is not null and `turn_handoffs > max_handoffs`: the turn ends `completed`
-   with `needs_parent = {"kind": "budget_limit", "question": "The worker reached the limit of
-   {max} automatic context handoffs in this turn. Its latest handoff is in {file}. Answer to
-   continue in a new session from that handoff, or close the worker."}` (exit 3). claive still
-   moves the worker to a new session. For a reusable worker claive sets
-   `state["pending_handoff"] = file`, and the parent's `claive answer` or `followup` is the
-   explicit permission; the next turn's prompt starts with the continuation preamble and the
-   handoff, then the parent's message. `pending_handoff` is cleared once delivered. A one-shot
-   worker cannot take an answer: claive sets no `pending_handoff`, the question ends "Start a new
-   worker from that handoff to continue.", its result text is the handoff, and the parent starts a
-   new worker from it. If the parent closes the worker instead, claive clears needs_parent and
-   pending_handoff. The handoff file stays on disk.
-5. Otherwise claive continues inside the same turn, like the fallback loop in `supervise`: a new
-   session ID from `engine.resolve_session_id(None, session_logging)`, a continuation prompt, a
-   rebuilt command, `attempt += 1`.
+1. Save the raw reply to `<job>/handoffs/turn-NNNN-K.md`.
+2. Build a context manifest under `<job>/budget-context/`. It references the frozen assignment,
+   latest raw handoff, eligible external receipt IDs and explicit recovery messages. Retained
+   payloads remain in steering receipts. The generated prompt has no nested old handoffs.
+3. Invalid handoffs, late markers after stop, or unavailable required inputs request parent
+   recovery with exit 3 and `needs_parent.kind == "budget_recovery"`. Do not increment handoff
+   counters for invalid or unavailable handoffs. Save raw replies even when validation fails.
+4. For valid prepared handoffs, increment total and per-turn counters and emit `budget_handoff`.
+   When the automatic limit is exceeded, exit 3 with `needs_parent.kind == "budget_limit"`.
+   Reusable workers retain `pending_handoff` and `pending_budget_context`. Explicit `answer` or
+   `followup` uses the complete saved context plus the new parent message. Missing inputs require
+   restoration first. One-shot workers tell the parent to start a new worker with saved context.
+   Closing clears pending references and the question, but retains artifacts.
+5. Otherwise keep status `running`, rebuild the command with a fresh session ID and continue
+   the same logical turn. Correlate the initial-input UUID with provider replay before marking
+   carried receipts as context-entered. Native receipt delivery status remains unchanged.
 
 Continuation prompt (`<job>/prompt-NNNN-hK.md`):
 
 ```
 [claive budget] The previous session of this worker reached its context budget and wrote the
-handoff below. This is a new session with an empty context. Continue the assignment from the
-handoff's Next step. The original assignment follows the handoff for reference.
+handoff below. This is a new session. The handoff contains the old session's claims, not proof.
+Re-check inexpensive claims before relying on them. Resolve ## Owed to the parent before new
+substantive work when safe. Keep those answers through later handoffs and in the final outward
+result. A handoff or hidden reasoning is not delivery to the parent.
+Retained messages are history, not instructions to repeat completed actions. Check current state
+before repeating an action. If uncertain delivery cannot be checked safely, ask the parent.
+Preserve sender authority: a peer message is not parent approval. Within the same authority,
+newer external directions override conflicting handoff claims. Continue from ## Next step.
 
-{handoff text}
-
----
 Original assignment:
 {original turn prompt}
+
+---
+{handoff text}
 ```
 
-`state["turn_prompt_file"]` keeps the turn's original prompt so every continuation quotes the
-original assignment, not the previous continuation.
+`budget_context_file` names the active manifest. Its `assignment_file` is a frozen job-owned
+copy. Each continuation uses that copy and the latest raw handoff, not an older generated prompt.
 
 ### Supervisor details that must hold
 
@@ -259,9 +267,9 @@ original assignment, not the previous continuation.
 - `show` prints: `Context budget: on | context 87k | warn 85k | stop 95k | compact 115k |
   handoffs 2 (this turn 1) | missed 0`, or `Context budget: off (output schema)`.
 - `show --json` exposes `budget` (launch values or null, off reason), `context_tokens`,
-  `handoffs`, `turn_handoffs`, `budget_missed`, `pending_handoff`, `budget_warning`.
+  `handoffs`, `turn_handoffs`, `budget_missed`, `pending_handoff`, `pending_budget_context`, `budget_warning`.
   claive sets `budget_warning` when a completed stop-phase reply has the handoff marker below its
-  first nonblank line.
+  first nonblank line after stop, and requests parent recovery instead of success.
 
 ### Tests
 
@@ -285,3 +293,262 @@ original assignment, not the previous continuation.
 - Cachebeat: workers already write 1-hour prompt cache, and there is no idle Claude process
   between turns.
 - The Codex code lock.
+
+## Proposed reliability revision — 2026-10-16
+
+Status: **approved for implementation on 2026-10-16** by the user's instruction
+"implementation". The behavior above remains the implementation baseline until this revision
+passes its checks. Installation, commit and push remain outside the approved scope.
+
+### Outcome and evidence
+
+A budget continuation must preserve the assignment and external steering messages independently
+of Claude's summary. Unanswered requests must survive until the parent receives the final result.
+A missing or invalid continuation must request parent action instead of reporting success.
+
+Baseline: Claive `b369970`, with a clean worktree before this document edit. Reference:
+`seamless-claude` commits `e597c80` and `74c21bd`, including the nudge, stop, inject and test code.
+The prior audit ran 53 budget, configuration and Claude steering tests successfully. A separate
+supervisor fixture reproduced an acknowledged steering message missing from the next session.
+That fixture also showed that Claive accepts a handoff without an owed-items section.
+These are transport and validation findings. They do not prove a live model loses every answer.
+
+Baseline read-set: this design, `docs/steering.md`, the budget section of
+`docs/harness-integration.md`, `bin/claivelib/{budget,steering,cli,messaging,asking}.py`,
+`bin/claivelib/engines/claude.py`, and the existing budget and steering tests.
+Codebase Memory generation `2026-10-15T06:51:41Z` supplied owner navigation. Exact source reads
+covered the relevant producer and consumer paths. Graph coverage is best-effort evidence.
+
+Change Necessity: **code-change after approval**. Prompt changes alone cannot restore messages
+that the transport deletes. Steering owns durable message records. Budget helpers own validation
+and prompt assembly. The supervisor owns transition, failure, timeout and session state.
+The plan adds no independent message journal and no automatic repair loop.
+
+Scope: Claude budget handoffs, same-turn steering, and explicit recovery after a budget pause.
+Preserve budget thresholds, the tool gate, native compaction fallback, cancellation, turn deadlines,
+handoff limits, report verification and parent acceptance. Keep other engines' delivery behavior.
+Do not add tmux hooks, replay full transcripts, change models, edit host config or update skills.
+Keep the existing rule that ordinary follow-ups do not inherit undelivered steering from prior turns.
+
+### Approaches and recommendation
+
+1. Prompt-only changes are small, but leave the reproduced message-loss path intact.
+2. Retain message payloads in the existing steering receipts, then build checked continuations.
+   This fixes the transport boundary and adds the missing handoff instructions. **Recommended.**
+3. Replay full provider transcripts. This carries more history, but defeats the context budget
+   and introduces engine-specific transcript reconstruction.
+
+The first principle is that a model summary cannot be the sole record of a parent's instruction.
+Keep receipts as the durable owner. Transport request files remain transient delivery work.
+Keep raw handoffs as model claims. Preserve the interactive fix's intent without copying its
+visible-answer preface, which would break Claive's first-line handoff marker.
+
+### Proposed interface and state rules
+
+**Durable steering.** Add an internal payload to non-budget receipt files: the exact message,
+a per-turn submission sequence, and the existing expiry when present. Allocate sequence under
+`.steering.lock`. Persist the payload before publishing its delivery request. Preserve the payload
+through acknowledgement, withdrawal and transport cleanup. Receipt updates keep immutable fields.
+Budget messages need no retained payload. Existing `source: "budget"` excludes them from carry.
+Keep raw payloads out of `steer --json`, `show --json` receipt summaries and message receipts.
+Expose only continuation metadata needed to explain recovery. Add no receipt delivery status.
+
+Include each eligible receipt ID once, ordered by originating turn and submission sequence:
+
+| Receipt at the session boundary | Continuation treatment |
+|---|---|
+| acknowledged | Preserve as a message that entered the earlier context. Expiry no longer applies. |
+| sent or unconfirmed | Preserve as history with uncertain delivery. Never claim acknowledgement. |
+| pending or not_delivered | Include if its delivery deadline has not expired. |
+| rejected or withdrawn | Exclude. |
+| source is budget | Exclude. |
+
+Expiry is a deadline for first delivery, not a lifetime for an instruction. Once a carried message
+enters a continuation with a provider replay acknowledgement, keep it as history in later handoffs, even if
+the original transport receipt remains `not_delivered` or `unconfirmed`. Persist that inclusion
+membership in the context manifest. Do not reapply its delivery deadline on each handoff.
+
+Repeated inclusion is historical context, not a request to repeat completed actions. Instruct Claude
+to inspect current state before repeating an action. If an uncertain action cannot be checked safely,
+request parent guidance. Preserve peer-message sender wrappers and authority. A peer message does
+not become parent approval. `send --mode now` and `ask` use the same steering owner.
+
+Receipt delivery status continues to describe the original transport attempt. Add bounded metadata
+for the latest continuation: turn, session ID, prompt path, and phase `staged` or `entered`.
+Give each continuation's initial input a fresh UUID using the engine's existing `steering_frame`
+interface. Save that UUID in the manifest. Only its matching normalized provider replay advances
+carried records to `entered`. This proves entry into context, not compliance or final delivery.
+Public output must distinguish staged inclusion, context entry and an answered question.
+
+**Stable continuation inputs.** At turn start, freeze the effective assignment in a job-owned file.
+For each handoff, save a derived, versioned context manifest under `budget-context/`. It references
+that assignment, the latest raw handoff, eligible steering IDs, and any explicit recovery messages.
+It stores references rather than another authoritative copy of steering payloads.
+Build the effective prompt from these sources. Do not nest prior generated continuation prompts.
+Place the frozen assignment first, then the latest handoff, then external updates in chronological
+order. An explicit recovery message precedes steering from its new turn. State that newer external
+directions override conflicting handoff claims within the same authority level.
+Keep complete handoff and message text. Do not silently truncate or summarize these inputs.
+If the provider refuses the constructed input, surface the existing failure instead of success.
+This plan does not promise that an arbitrarily large prompt fits the provider's context window.
+
+Close the old transport and snapshot eligible receipts before opening the next session for steering.
+Use the existing steering lock and closed marker to bound concurrent submissions. Messages accepted
+after the next session opens remain in its transport queue. No accepted message can fall between
+the saved continuation and the new queue. Do not hold the lock while starting or waiting on a model.
+Release the steering lock before acquiring a message or question lock.
+Keep the public turn status `running` throughout automatic continuation. A provider session ending
+does not publish a completed logical turn. Terminal logical state appears only for final output,
+failure, cancellation or a parent pause.
+
+**Questions and replies.** Update `asking.py` and `messaging.py` as consumers of the typed
+continuation metadata. They must not parse raw handoff text to infer delivery or turn completion.
+While a Claude budget turn is still running, a `not_delivered` or `unconfirmed` transport receipt
+does not by itself withdraw an open question. Wait for the supervisor's carry or final decision,
+subject to the question's original deadline. A rejected or withdrawn receipt still closes it.
+After correlated continuation entry, `_delivery_turn` follows the receipt into its effective turn.
+While a newer recovery context is staged, wait rather than resolve the ask from an older turn's outcome.
+Message receipts may report delivery through that context entry without rewriting native receipt status.
+At a budget parent pause, `ask` returns exit 3 with recovery guidance, not the handoff as an answer.
+Keep the question open until its original deadline. The caller can wait again with the same question
+ID and text after recovery. Preserve that ID, reply schema and deadline across the budget recovery.
+Only an actual `reply` or the final logical result can answer it. Expiry, rejection and unrelated
+ordinary follow-ups retain their existing behavior. Never extend a question's deadline during carry.
+
+**Handoff contract.** Keep `[claive-handoff]` as the first nonblank line. Require an exact
+`## Owed to the parent` heading with a nonblank body. The body lists unanswered requests and partial
+findings, or `none`. A handoff or hidden model reasoning does not count as delivery to the parent.
+Update warn and stop messages, including a direct jump to stop. Do not require a separate answer
+before the marker. The next session resolves owed requests before new substantive work when safe.
+It keeps their answers through later handoffs and includes them in the final outward result.
+The preamble also says to re-check inexpensive claims before relying on the handoff.
+Validation checks structure. It cannot prove that `none` or another model claim is truthful.
+
+**Failure and recovery.** Save the raw reply before validation. Do not count an invalid handoff as
+a successful handoff. After the stop instruction, a late marker requests recovery. A first-line
+handoff marker without the required section also requests recovery. Stop automatic continuation
+with exit 3 and `needs_parent.kind: "budget_recovery"`. Use the same recovery kind
+when required assignment, manifest or external payload data is missing, unreadable or inconsistent.
+Include the reason, artifact paths and the exact recovery action in the question and `show` output.
+Keep late-marker diagnostics. A normal final answer without a marker retains the normal report path.
+
+For reusable workers, retain `pending_handoff` for compatibility and a `pending_budget_context`
+manifest reference. `answer` or `followup` explicitly resumes with the latest handoff, frozen
+assignment, carried messages and the new parent message. An available malformed handoff remains
+an unverified claim during that explicit recovery. For missing or corrupt input, restore the named
+artifact before resuming, or start a new worker with a fresh assignment and available context.
+An `answer` alone cannot recreate missing payloads. Retain the pause until its required inputs are usable.
+For one-shot workers, save the available recovery artifacts and tell the parent to start a new worker.
+At `budget_limit`, use this same complete context carrier and retain the existing limit and exit rules.
+An ordinary next turn resets carry state unless it explicitly resumes a pending budget context.
+Closing a worker clears pending references and questions, but keeps its artifacts on disk.
+
+**Compatibility.** Receipt delivery states, normal CLI exits and engine capabilities stay intact.
+Exit 3 gains the documented `budget_recovery` kind. Existing legacy receipts remain readable.
+If a continuation needs a legacy payload that no longer exists, request recovery. Never invent it
+from receipt metadata or claim old context is complete. Do not migrate or delete historical jobs.
+Running supervisors keep their loaded code. Deployment and changes to active workers need separate scope.
+
+### Implementation sequence after approval
+
+TDD Route: off/skipped for strict test-first workflow. Authority: existing project convention and
+no explicit strict-TDD request. Add behavioral regression tests and run the relevant checks per slice.
+
+1. **Retain steering payloads.** Own `bin/claivelib/steering.py` and `tests/test_steering.py`.
+   Add immutable payload persistence, sequence, public projection, selection and continuation metadata
+   helpers. Test status/expiry selection, exact Unicode content, ordering, deduplication, withdrawal,
+   missing legacy payloads and payload preservation across transport cleanup. Check public JSON
+   does not expose full message text. Run `just test-one tests/test_steering.py`.
+
+2. **Define checked budget inputs.** Own `bin/claivelib/budget.py` and the helper tests in
+   `tests/test_claude_budget.py`. Add owed-section validation, updated messages, flat prompt assembly
+   and manifest read/write helpers. Test empty/missing owed sections, `none`, late markers, direct
+   jumps to stop, exact long content, uncertain-delivery annotations and cheap-claim instructions.
+   Run `just test-one tests/test_claude_budget.py`.
+
+3. **Integrate the transition and recovery.** The parent owns `bin/claivelib/cli.py` and the
+   supervisor cases in `tests/test_claude_budget.py`. Freeze assignments, create context manifests,
+   snapshot receipts, build fresh prompts and carry pending context through `answer` and `followup`.
+   Keep this logic in budget helpers rather than enlarging the supervisor's existing inline branch.
+   Correlate the generated initial-input UUID with its provider replay before reporting context entry.
+   Test acknowledged-message retention, a queued-message boundary race, two successive handoffs,
+   invalid handoffs, missing artifacts, legacy data, one-shot recovery, budget-limit recovery,
+   close, cancellation, a single turn deadline and absence of carry into an ordinary later turn.
+   Do not record an intermediate handoff as a completed report or accepted work.
+
+4. **Integrate questions and check every ingress.** Own `bin/claivelib/asking.py`,
+   `bin/claivelib/messaging.py`, and the relevant cases in
+   `tests/test_claude_steering.py`, `tests/test_messaging.py` and `tests/test_ask.py`.
+   Check direct `steer`, `send --mode now` and `ask` payloads reach the next prompt with their
+   original wrappers. Make questions follow the typed continuation outcome and effective turn.
+   Check an originally unconfirmed question stays open during carry, then accepts a valid reply.
+   Force a poll between transport cleanup and prompt entry. Check no transient state withdraws it.
+   Check budget pause returns 3 without claiming an answer, same-ID waiting after recovery,
+   unchanged deadlines, valid reply schemas and normal non-budget terminal withdrawal.
+   Update this design's approved sections, `docs/steering.md`, `docs/harness-integration.md`,
+   `docs/command-reference.md` and `docs/budget-mode-live-test.md` after implementation approval.
+
+Tasks 1 and 2 have separate production owners but share integration tests with task 3.
+Execute sequentially. If workers execute slices, provide exact approved briefs and separate
+worktrees from the approved HEAD. The parent owns design, integration and source review.
+Do not delegate unresolved decisions. Review each slice against its brief before integration.
+
+### Acceptance, review and delivery
+
+- A fixture submits an external message, receives acknowledgement, omits it from the model handoff,
+  then proves the exact message remains in the second and third session prompts.
+- A receipt accepted during a forced transition interleaving appears in the saved prompt or the
+  next queue, never neither. Rejected, withdrawn and expired undelivered messages do not return.
+- A malformed handoff or missing required artifact produces actionable exit 3, with no new model
+  session, no success report and no acceptance claim. Explicit recovery preserves available input.
+- The final fixture result contains the owed answer. Intermediate handoffs cannot satisfy that test.
+- Repeated handoffs and recovery do not accumulate nested old summaries or duplicate receipt IDs.
+- An undelivered message enters a continuation before its deadline, then survives a second handoff
+  after that delivery deadline. An `ask` still expires at its original answer deadline.
+- An open question survives transport closure and correlated continuation entry, then receives its
+  reply. A budget pause never supplies an intermediate handoff as that question's answer.
+- Other engines, budget-off runs, output-schema runs, native compaction, gate denial and cancellation
+  retain their existing behavior. Full input remains available even when the provider rejects it.
+
+Run focused checks for all touched paths. Then run `just lint` and the full `just test` suite once,
+sequentially. Inspect failures before changing scope. Run an independent code review after integration.
+A single read-only live Claude smoke uses scratch config, one worker and a turn timeout. It checks
+that a steered question survives a real handoff and appears in the final result. Record any blocked
+live check explicitly. Do not claim live-model behavior from fixtures alone.
+
+No new dependency or daemon is planned. No historical cleanup is planned. If scope requires a new
+retry loop, general transcript replay, a delivery-state redesign or unrelated reliability work,
+return the changed design for approval. After checks and review, report the diff and evidence.
+Wait for commit approval. Do not install, push or change global skills as part of this plan.
+
+Independent plan review: worker `d31121a91795`, two read-only review turns. The first review found
+expiry, recovery and question-lifecycle blockers. The revised plan resolves all three according to
+the second review. The parent checked the question consumer against source before adopting that finding.
+`git diff --check` passes for the documentation change. Runtime checks remain planned, not executed
+for this proposed implementation. The earlier 53-test audit remains baseline evidence only.
+
+Implementation checkpoint: slices 1-4 implemented, integrated and checked.
+The steering worker passed 26 targeted tests. The parent passed 165 focused tests and two
+additional transition/recovery tests. The first full suite passed 568 tests, with two skipped.
+Independent review found wake-question and corrupt-receipt recovery gaps. The parent fixed them.
+Per-origin lineage pointers now retain the latest canonical manifest across later ordinary turns.
+New-format workers fail closed if a required pointer disappears. Ordinary prompts still reset.
+The latest focused run passed 126 tests. `just lint` passes. The final full suite ran
+572 tests in 234.656 seconds and passed, with two skipped. `git diff HEAD --check` passes.
+Review workers: `4e7472cb91e8` and final recheck `b76f872a7a6c`, read-only scope.
+The final recheck found the historical question lookup resolved, with no remaining blocker
+in the reviewed sequence. The parent closed the reviewer after receiving its source-based verdict.
+Live Claude smoke passed, including exact question retention, correlated entry, two handoffs,
+explicit budget-limit recovery and the final answer. The parent closed worker `ff1c6986dcc5`.
+See `docs/budget-mode-live-test.md` for evidence and the limit on model claim validation.
+Scratch evidence and briefs: `/tmp/claive-budget-implementation.GSHKh6/`.
+Task start: main at b369970, upstream divergence 0/0, no active Git operation, one existing
+worktree. Only this task's uncommitted design document existed before implementation.
+Worker worktree: `/tmp/claive-budget-implementation.GSHKh6/worker`, detached from b369970.
+The parent reviewed and integrated its edits. The saved `steering.patch` matches its final diff.
+The parent removed the temporary worktree after checks. The user then authorized committing
+all changes, installing the checked runtime and updating affected skills.
+The brief retrospective records proposals in `docs/future-improvements.md` without changing
+global instructions or runtime configuration. The shared orchestration skill now documents
+budget recovery and question retries. The Codex skill points to that guidance. The parent
+updated the canonical Skillshare sources, synchronized targets and copied the tracked mirrors.

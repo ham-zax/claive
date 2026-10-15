@@ -12,11 +12,20 @@ Recorded 2026-10-15. The fixes for issues 1-3 are in the commit that adds this f
 1. The supervisor reads `usage` from each assistant event (input + cache tokens = context size).
 2. At `warn` it sends a warn message, at `stop` a stop message, through live steering
    (stream-json user messages). Receipts: `<job>/steering/receipts/*.json`, `source: "budget"`.
-3. The worker ends its turn with a reply whose first line is `[claive-handoff]`.
+3. The worker ends its session with a reply whose first line is `[claive-handoff]` and whose
+   `## Owed to the parent` section has a nonblank body.
 4. Claive saves it to `<job>/handoffs/turn-NNNN-K.md`, starts a new session with
    `<job>/prompt-NNNN-hK.md`, and appends an inbox event `budget_handoff`.
 5. Claude's own compaction is the fallback. Claive passes `--autocompact <compaction point + 33k>`.
    A `compact_boundary` event means a missed handoff (`state.budget_missed += 1`).
+
+The 2026-10-16 reliability revision also saves context manifests and retains exact external
+messages independently of the model handoff. A matching provider replay confirms their entry
+into a new session. Invalid or unavailable handoffs request recovery with exit 3.
+
+For the reliability smoke, steer an additional question before the first handoff. Check its
+receipt, exact text in the next prompt, correlated `continuation.phase == "entered"`, and its
+answer in the final result. Fixture evidence alone does not establish live model compliance.
 
 Code: `bin/claivelib/budget.py`, `cli.py` (`update_budget`, handoff branch near line 828,
 `show` near line 1580, `answer` near line 2710), `config.py` (`claude_budget`,
@@ -157,3 +166,22 @@ Give the worker a label with your own session prefix.
 - Issue 2 passes if handoff 1 continues automatically and handoff 2 stops with `budget_limit`.
 - Issue 3 passes (one-shot) if the question ends "Start a new worker from that handoff to
   continue." and `show` has no "Pending handoff" line.
+
+## Source-runtime check, 2026-10-16
+
+Worker `ff1c6986dcc5` used Claude Haiku 5.5 and a scratch registry and config.
+The source launcher ran a read-only task with a 300-second turn timeout.
+Scratch limits were warn 50,000, stop 57,000 and maximum automatic handoffs 1.
+The task read `bin/claivelib/cli.py` and `tests/test_workers.py`.
+
+The parent steered an additional arithmetic question requiring `BUDGET_LIVE_ANSWER=42`.
+The exact question remained in the generated continuation prompt. The matching input nonce
+confirmed continuation entry. Two handoffs reached `budget_limit`, with zero missed budgets
+and zero malformed provider events. One explicit parent answer resumed the saved context.
+Turn 2 returned the requested summaries and `BUDGET_LIVE_ANSWER=42` in its final result.
+The parent closed the idle worker. The worker ended with exit 0.
+
+One handoff incorrectly claimed no answer remained owed. Structural checks cannot prove model
+claims. The retained question and explicit recovery preserved the final answer in this run.
+The host config and installed launcher were unchanged.
+Local evidence: `/tmp/claive-budget-implementation.GSHKh6/live/evidence.json`.

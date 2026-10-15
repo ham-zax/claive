@@ -50,6 +50,21 @@ then steers the worker itself with the budget warn and stop messages. Their rece
 `source: "budget"`. `show` counts them apart from parent steering. Budget mode is off with
 `--output-schema`, `--fallback-models` or `engines.claude.budget: false`.
 
+For budget continuations, Claive retains exact external messages in private receipt payloads.
+Fresh sessions receive the frozen assignment, latest handoff and ordered messages. Handoffs require
+`## Owed to the parent` with a nonblank body. Handoff claims do not replace an outward answer.
+Public receipts omit message payloads. Their optional `continuation` metadata distinguishes
+`staged` prompt inclusion from `entered`, which requires Claude's matching initial-input replay.
+The original native delivery status remains unchanged. Context entry does not prove compliance.
+Messages that entered context remain history after their delivery deadline. Rejected and withdrawn
+messages do not return. Ordinary later turns do not inherit undelivered prior-turn steering.
+
+An `ask` keeps its ID, reply schema and original answer deadline through a budget continuation.
+Transport closure alone does not close the question while the logical turn continues.
+A budget parent pause returns exit 3 with guidance and leaves the question open until its deadline.
+After recovery, wait again with the same question text and `--id`. An intermediate handoff is never
+the answer. Missing continuation inputs require restoration or a new worker with a fresh assignment.
+
 `--message-file /abs/instruction.md` reads an instruction from an absolute path.
 This sends a correlated `steer` command into the running agent process. Pi queues
 the instruction after current tool calls finish and before the next model request. It does not change

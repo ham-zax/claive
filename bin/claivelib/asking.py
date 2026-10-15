@@ -5,7 +5,7 @@ import tempfile
 import time
 import uuid
 
-from claivelib import ask_schema, messaging, steering
+from claivelib import ask_schema, budget, messaging, steering
 from claivelib.acceptance import atomic
 
 
@@ -22,6 +22,9 @@ def _ask_path(path, identifier):
 def _delivery_turn(path, receipt):
     if receipt.get("steering_receipt_id"):
         steer_receipt = steering.receipt(path, receipt["steering_receipt_id"])
+        continuation = steer_receipt.get("continuation", {})
+        if continuation:
+            return continuation.get("turn") if continuation.get("phase") == "entered" else None
         return steer_receipt.get("turn") if steer_receipt.get("status") == "acknowledged" else None
     if receipt.get("status") == "delivered":
         return receipt.get("turn")
@@ -87,7 +90,8 @@ def _timeout(path, file, record, receipt):
             stop_file.unlink(missing_ok=True)
     else:
         steer_receipt = steering.receipt(path, delivery["steering_receipt_id"])
-        withdrew_request = steering.withdraw(path, delivery["steering_receipt_id"])
+        entered = steer_receipt.get("continuation", {}).get("phase") == "entered"
+        withdrew_request = False if entered else steering.withdraw(path, delivery["steering_receipt_id"])
         withdrawn = withdrew_request and steer_receipt.get("status") != "acknowledged"
         if withdrawn:
             receipt["status"] = "withdrawn"
@@ -152,16 +156,46 @@ def ask(path, question, timeout=120, identifier=None, *, schema=None):
                 _finish(file, record, "answered", answer["answer"], "reply")
                 return record, 0, f"Answer from {record['target']} (reply):\n{record['answer']}"
 
+            state = cli.load(path)
             steering_receipt_id = receipt.get("steering_receipt_id")
             if steering_receipt_id:
-                steer_status = steering.receipt(path, steering_receipt_id).get("status")
-                if steer_status in {"rejected", "not_delivered", "unconfirmed", "withdrawn"}:
+                steer_receipt = steering.receipt(path, steering_receipt_id)
+                steer_status = steer_receipt.get("status")
+                continuation = steer_receipt.get("continuation", {})
+                belongs = (steer_receipt.get("turn") == state["turn"] or
+                           continuation.get("turn") == state["turn"])
+                budget_turn = (state.get("engine") == "claude" and
+                               isinstance(state.get("launch", {}).get("budget"), dict) and belongs)
+                needs_parent = state.get("needs_parent") or {}
+                if (budget_turn and steer_status not in {"rejected", "withdrawn"}
+                        and needs_parent.get("kind") in {"budget_limit", "budget_recovery"}):
+                    if time.time() >= record["deadline"]:
+                        return _timeout(path, file, record, receipt)
+                    return record, 3, needs_parent["question"]
+                carried = continuation.get("phase") == "entered"
+                waiting = budget_turn and state["status"] == "running"
+                if (steer_status in {"rejected", "withdrawn"} or
+                        (steer_status in {"not_delivered", "unconfirmed"} and not carried and not waiting)):
                     record["delivered_turn"] = None
                     _finish(file, record, "withdrawn")
                     return record, 124, "withdrawn: question never reached the worker"
 
             turn = _delivery_turn(path, receipt)
-            state = cli.load(path)
+            if turn is not None:
+                try:
+                    context = budget.question_context(path, state, turn)
+                except ValueError as error:
+                    if time.time() >= record["deadline"]:
+                        return _timeout(path, file, record, receipt)
+                    return record, 3, f"Cannot read budget context: {error}. Restore it or start a new worker."
+                if context:
+                    needs_parent = state.get("needs_parent") or {}
+                    if (context["turn"] == state["turn"] and
+                            needs_parent.get("kind") in {"budget_limit", "budget_recovery"}):
+                        if time.time() >= record["deadline"]:
+                            return _timeout(path, file, record, receipt)
+                        return record, 3, needs_parent["question"]
+                    turn = context["turn"] if context["phase"] == "entered" else None
             if turn is not None:
                 record["delivered_turn"] = turn
                 atomic(file, record)
@@ -172,7 +206,9 @@ def ask(path, question, timeout=120, identifier=None, *, schema=None):
                     if request_id:
                         response_file = path / "responses" / f"{request_id}.json"
                         if response_file.is_file():
-                            response = json.loads(response_file.read_text())
+                            candidate = json.loads(response_file.read_text())
+                            if candidate.get("turn") == turn:
+                                response = candidate
                     outcome = response or _turn_outcome(state.get("id"), turn)
                     if not outcome:
                         outcome = (state if state["turn"] == turn or
@@ -187,6 +223,10 @@ def ask(path, question, timeout=120, identifier=None, *, schema=None):
                         status = "completed"
                     if needs_parent:
                         question = needs_parent.get("question", "")
+                        if needs_parent.get("kind") in {"budget_limit", "budget_recovery"}:
+                            if time.time() >= record["deadline"]:
+                                return _timeout(path, file, record, receipt)
+                            return record, 3, question
                         answer_text = text or question
                         _finish(file, record, "answered", answer_text, "final_text")
                         return record, 3, question

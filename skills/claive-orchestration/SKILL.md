@@ -130,9 +130,11 @@ from the kind of turn: `xhigh` for planning, logic or design debates and other i
 high-level discussion; `medium` (used when no effort is passed) or `low` for mechanical
 implementation where the brief states the exact steps; `high` for complex implementation
 where the brief gives a goal and the worker decides what to do and how. Never `max` or
-`ultra`: the engine refuses both for this model. Claude workers use `high` or `xhigh`
-unless the user names a level for that task: at `max` a small Claude model spent 63% of
-a 40-minute turn in hidden reasoning and wrote nothing.
+`ultra`: the engine refuses both for this model. Small models always run at their
+highest effort (user rule, 2026-10-20): Claude Haiku at `max`, every Pi model (DeepSeek,
+MiniMax and others) at `max`, which Pi clamps to the model's highest level. At `max` a small
+Claude model once spent 63% of a 40-minute turn in hidden reasoning and wrote nothing: always
+pass `--turn-timeout` and check the first result for that failure.
 
 **Pi rules.** Always pass `--model` (an explicit model also becomes Pi's global
 default, and omitting it inherits whatever was used last), plus `--engine pi

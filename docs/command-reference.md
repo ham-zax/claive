@@ -28,6 +28,7 @@ read-only. Only Muse supports a model-step cap and managed worktrees.
 | `--prompt-file` | Existing nonempty absolute task file |
 | `--context-file` | add a bounded UTF-8 context layer to the first prompt (repeatable) |
 | `--label` | Display label |
+| `--alias` | Bind `@NAME` to the new worker. The name must be unused |
 | `--engine` | muse, pi, claude or codex |
 | `--role` | Built-in or custom role |
 | `--team` | Configured team name. Requires --member and forbids --role |

@@ -1995,6 +1995,8 @@ def parser():
         launch.add_argument("--context-file", action="append", default=[],
                             help="add a bounded UTF-8 context layer to the first prompt (repeatable)")
         launch.add_argument("--label")
+        launch.add_argument("--alias", help="bind @NAME to the new worker (must be unused); "
+                            "default: a name derived from --label")
         launch.add_argument("--engine", default=None)
         launch.add_argument("--role")
         launch.add_argument("--team")
@@ -2316,11 +2318,24 @@ def main(launcher=None):
                    else value for value in args.id]
     if args.action in {"run", "start", "open"}:
         check_nested()
+        from claivelib import aliases
+        if args.alias:
+            aliases.validate_name(args.alias)
+            if aliases.binding(args.alias):
+                raise ValueError(f"@{args.alias} already names a worker; pick another --alias")
         path, state = create_job(args)
         if state.get("team"):
             from claivelib import teams
             teams.bind_worker(state["team"], state["id"])
         print(f"Worker {state['id']} | {clean(state['label'])} | {path}", flush=True)
+        try:
+            base = args.alias or aliases.slug(args.label)
+            bound = aliases.assign(base, state["id"], suffix=not args.alias) if base else None
+        except ValueError as error:
+            print(f"warning: no alias set: {error}", file=sys.stderr, flush=True)
+        else:
+            if bound:
+                print(f"Alias: @{bound}", flush=True)
         from claivelib import advice
         for note in advice.launch_notes(state, Path(args.prompt_file).stat().st_size):
             print(note, file=sys.stderr, flush=True)

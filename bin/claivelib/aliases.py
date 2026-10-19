@@ -66,6 +66,35 @@ def update(name, worker=None, replace=False, output=None):
     return 0
 
 
+def slug(text):
+    """Turn a free-form label into a valid alias base name, or '' when nothing usable remains."""
+    name = re.sub(r"[^a-z0-9_.-]+", "-", (text or "").lower())
+    name = re.sub(r"^[^a-z]+", "", name)
+    return name[:60].rstrip("-_.")
+
+
+def assign(base, worker, suffix=True):
+    """Bind base, or with suffix the first free of base-2, base-3, ...; never replace a binding."""
+    from claivelib import cli
+    validate_name(base)
+    path = cli.root() / "aliases.json"
+    fd = os.open(path.with_suffix(".lock"), os.O_WRONLY | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data, dropped = _read(path)
+        if dropped:
+            print(f"warning: dropped invalid alias entries: {', '.join(dropped)}", file=sys.stderr)
+        name, number = base, 1
+        if name in data and not suffix:
+            raise ValueError(f"@{name} already names worker {data[name]}")
+        while name in data:
+            number += 1
+            name = f"{base}-{number}"
+        data[name] = cli.job_path(worker).name
+        cli.save(path, data)
+    return name
+
+
 def binding(name):
     """Read one binding and its stored worker status without creating or locking files."""
     from claivelib import cli

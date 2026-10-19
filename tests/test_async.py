@@ -131,6 +131,27 @@ class AsyncChecks(unittest.TestCase):
         self.assertEqual(unavailable.returncode, 1)
         self.assertIn("not available for follow-up", unavailable.stderr)
 
+    def test_launch_alias_flag_and_label_derived_names(self):
+        result, first = self.launch("open", "--detach", "--alias", "slice-a")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Alias: @slice-a", result.stdout)
+        self.assertEqual(json.loads(self.cli("show", "@slice-a", "--json").stdout)["id"], first)
+        taken = self.launch("open", "--detach", "--alias", "slice-a")[0]
+        self.assertNotEqual(taken.returncode, 0)
+        self.assertIn("already names", taken.stderr)
+        self.assertEqual(len(self.workers()), 1)
+        derived, second = self.launch("open", "--detach", "--label", "Slice A: vault home!")
+        self.assertIn("Alias: @slice-a-vault-home", derived.stdout)
+        again, third = self.launch("open", "--detach", "--label", "Slice A: vault home!")
+        self.assertIn("Alias: @slice-a-vault-home-2", again.stdout)
+        ids = {item["name"]: item["id"] for item in json.loads(self.cli("alias", "list", "--json").stdout)}
+        self.assertEqual(ids, {"slice-a": first, "slice-a-vault-home": second, "slice-a-vault-home-2": third})
+
+    def test_launch_without_label_or_alias_binds_nothing(self):
+        result, _job = self.launch("open", "--detach")
+        self.assertNotIn("Alias:", result.stdout)
+        self.assertEqual(json.loads(self.cli("alias", "list", "--json").stdout), [])
+
     def test_alias_requires_explicit_rebinding_and_remove_keeps_worker(self):
         _, first = self.launch("run")
         _, second = self.launch("run")

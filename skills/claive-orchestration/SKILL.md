@@ -161,6 +161,14 @@ See `docs/command-reference.md` for command-specific codes.
   `claive open --detach ...` (reusable; returns at once),
   `claive batch start PLAN.json` (parallel lanes of stages). Never use `&`,
   `nohup`, or `sleep` polling loops.
+- **Name every worker you launch:** pass `--alias NAME` at launch, or pass a
+  `--label` and the launch derives a name from the label. The launch prints
+  `Alias: @NAME`. A taken `--alias` fails the launch. A taken derived name
+  gets suffix `-2`, `-3`. A launch with no alias and no label binds no name.
+  Then use `@NAME` for `show`, `wait`, `send`, `steer` and `cancel`. Use a session
+  prefix so you never touch another session's workers. Names persist after the
+  worker ends: `claive alias remove NAME` when the effort is done. Use
+  `claive alias set NAME ID` only to name a worker the launch left unnamed.
 - **Wait:** `claive wait ID [ID ...] --any --timeout S` returns the first worker
   to settle (with its report and code); on 124 do other work and wait again.
   Several IDs need `--any`: without it the wait exits 1 at once and waits for nothing.

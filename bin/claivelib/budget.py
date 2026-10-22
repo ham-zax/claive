@@ -18,27 +18,49 @@ HOOK_SETTINGS = {"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
 
 TEMPLATE = """The handoff reply replaces this whole session for the next one. Its first line must be exactly:
 [claive-handoff]
-Keep only what is expensive or impossible to rebuild from git and the repository. About 2000
-words at most. Omit empty sections. Keep paths, commands, IDs and error messages verbatim. Give
-pointers (file:line, command) instead of file contents. Do not list modified files: git shows them.
+Keep what governs the next actions: intent, constraints, promises, decisions, uncertainty and
+pointers to evidence. Leave out what git and the repository show. Size: as short as the session
+allows, usually 2500-5000 tokens, 6000 at most. Never pad. One line per bullet. If the handoff is
+too long, cut history and repeats first, never a constraint or an open promise.
+Rules:
+- Carry forward: if this session started from a handoff, copy its still-valid Constraints,
+  Owed, Decisions and Next step items. Drop only items that are done or that the parent replaced.
+  Mark a replaced decision as REPLACED.
+- Quote only short binding parent clauses, verbatim. Mark a paraphrase with ~.
+- Never invent a quote, path, result or locator. If a detail is lost, write UNKNOWN and a phrase
+  to search for in the earlier transcripts.
+- Do not list finished, intended edits: git shows them. List uncommitted edits that are partial,
+  broken or temporary (debug code to revert).
+- Write every section. Write none for an empty section, so the next session knows you checked it.
+- Keep paths, commands, IDs and error messages verbatim. Give pointers (file:line, command)
+  instead of file contents.
 
 ## Goal
-The assignment and its done condition. Quote the parent's direction-setting instructions verbatim.
+The assignment and its done condition. If there are several tasks, name the active one.
+## Constraints
+Standing parent rules: scope limits and non-goals, forbidden actions, workflow and test rules,
+answer format. Approvals with their limits. Mark each as parent-stated or inferred.
 ## Owed to the parent
-Always include this section. List requests not yet answered in a final outward result, with partial
-findings. An answer in reasoning or a handoff is still owed. Write "none" only when nothing is owed.
+Always include this section. List requests not yet answered in a final outward result, and every
+promise you made, with partial findings and what remains. An answer in reasoning or a handoff is
+still owed. Write "none" only when nothing is owed.
 ## State
-What is done and how it was verified (command and result). What is in progress.
+Done, in progress, blocked. For each check: command, result, and the state it covered. A check
+from before a later edit does not prove that edit. Partial and temporary edits.
 ## Decisions
-DECISION: choice, reason.
-## Dead ends
-FAILED: what was tried, why it failed.
+DECISION: choice, reason, source (parent or worker). FAILED: approach, exact reason, the condition
+for a retry. Mark replaced decisions.
+## Uncertainty
+Assumptions you built on but did not verify, open hypotheses, known risks. For each, the check
+that decides it.
 ## Facts to keep
-file:line locations, commands, measured numbers, environment quirks.
+file:line locations, commands, measured numbers, environment quirks. In 1-4 lines, how the
+relevant code path works or the current root-cause hypothesis.
 ## Live state
-Running processes, background jobs, temp files.
+Running processes, background jobs, temp files, and how to check that each still exists.
 ## Next step
-The exact next action and its stop condition."""
+A prerequisite check, then the exact next action and its stop condition. Then the remaining plan
+in order, including cleanup of temporary edits."""
 
 WARN = """[claive budget] Context is at {k}k tokens. At {stop_k}k claive tells you to stop at once.
 Continue your work. Plan a checkpoint before that limit: finish and verify the current step.
@@ -60,6 +82,17 @@ GATE_DENY = """[claive budget] claive, which runs this session, denied this tool
 {k}k tokens, at the {stop_k}k stop limit, and claive denies every tool call in this session from now
 on. claive's instructions arrive as a user message."""
 
+MANUAL = """[claive budget] The parent asked for a handoff now (claive handoff). Context is at {k}k tokens.
+Start no new step. Let background jobs run. If the assignment is complete, give your normal final
+answer. Otherwise end your turn with a handoff reply in the format below. claive then continues the
+work in a new session with the handoff, original assignment and retained external messages.{note}
+
+{template}"""
+
+COMPACTED = """[claive budget] Claude compacted this session before a handoff. The summary can miss
+recent edits. Current git state of the workspace:
+{git}"""
+
 LATE_MARKER = "The stop reply has [claive-handoff] on line {line}, not on the first nonblank line. claive counted no handoff."
 
 PREAMBLE = """[claive budget] The previous session of this worker reached its context budget and wrote the
@@ -70,7 +103,40 @@ result. A handoff or hidden reasoning is not delivery to the parent.
 Retained messages are history, not instructions to repeat completed actions. Check current state
 before repeating an action. If uncertain delivery cannot be checked safely, ask the parent.
 Preserve sender authority: a peer message is not parent approval. Within the same authority,
-newer external directions override conflicting handoff claims. Continue from ## Next step."""
+newer external directions override conflicting handoff claims.
+Before ## Next step, run git status and compare the changes with ## State. Search the earlier
+transcripts listed below before you act if scope, an approval, ownership or evidence is unclear,
+the handoff conflicts with the repository, you would reverse a decision or retry a FAILED approach,
+or the handoff says UNKNOWN. Never read a whole transcript. Print its text without tool output and
+filter it:
+jq -r 'select(.type == "user" or .type == "assistant") | (.message.content | if type == "string" then . else (map(select(.type == "text") | .text) | join(" ")) end | gsub("\\n"; " ")) as $t | select($t != "") | "\\(input_line_number) [\\(.type)] \\($t)"' <transcript> | rg -i '<phrase>'
+Then continue from ## Next step."""
+
+
+def compaction_message(workspace):
+    """Git context for a session that native compaction just summarised. Capped to stay cheap."""
+    import subprocess
+
+    def git(*arguments):
+        try:
+            result = subprocess.run(["git", "-C", str(workspace), *arguments], capture_output=True,
+                                    text=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return result.stdout if result.returncode == 0 else None
+
+    branch = git("branch", "--show-current")
+    if branch is None:
+        return COMPACTED.format(git="(not a git repository or git failed)")
+    status = git("status", "--short") or ""
+    lines = status.splitlines()
+    shown = "\n".join(lines[:30]) + (f"\n... {len(lines) - 30} more" if len(lines) > 30 else "")
+    return COMPACTED.format(git=f"branch: {branch.strip() or '(detached)'}\n{shown or '(clean)'}")
+
+
+def manual_message(tokens, note=None):
+    note = f"\nParent note for the handoff: {note.strip()}" if note and note.strip() else ""
+    return MANUAL.format(k=tokens // 1000, note=note, template=TEMPLATE)
 
 
 def warn_message(tokens, values):
@@ -168,6 +234,11 @@ def _context(filename):
             if not isinstance(message, dict) or type(message.get("turn")) is not int or not isinstance(
                     message.get("file"), str):
                 raise ValueError("invalid recovery message")
+        # Optional: contexts written before transcript links have no sessions key.
+        for session in value.get("sessions", []):
+            if not isinstance(session, dict) or not isinstance(session.get("session_id"), str) or not (
+                    session.get("transcript") is None or isinstance(session["transcript"], str)):
+                raise ValueError("invalid session link")
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(f"Invalid budget context {filename}: {error}") from error
     return value
@@ -188,6 +259,12 @@ def _render(context, records):
     original = _text(context["assignment_file"])
     handoff = _text(context["handoff_file"]) if context["handoff_file"] else ""
     prompt = continuation_prompt(handoff, original)
+    # Before retained messages, so the newest parent message (and any report contract) stays last.
+    sessions = context.get("sessions", [])
+    if sessions:
+        prompt += "\n\n---\nEarlier sessions of this worker, newest first (session ID, transcript):\n" + "\n".join(
+            f"- {item['session_id']} {item['transcript'] or 'none (session logging off or file missing)'}"
+            for item in reversed(sessions))
     updates = []
     for record in records:
         status = record["status"]
@@ -201,6 +278,14 @@ def _render(context, records):
     for _, content in sorted(updates, key=lambda item: item[0]):
         prompt += "\n\n---\n" + content
     return prompt
+
+
+def _session_link(session_id):
+    """The ended session and its retained Claude transcript, kept outside the model's handoff text."""
+    from claivelib.engines.claude import ClaudeEngine
+
+    transcript = ClaudeEngine._session_file(session_id)
+    return dict(session_id=session_id, transcript=str(transcript) if transcript else None)
 
 
 def _link_turns(path, context, manifest):
@@ -326,10 +411,13 @@ def transition(path, state, text, new_session, values):
     handoff.parent.mkdir(parents=True, exist_ok=True)
     handoff.write_text(text, encoding="utf-8")
     manifest = path / "budget-context" / f"turn-{state['turn']:04}-h{number}.json"
+    ended_session = state.get("session_id")
     state["session_id"] = new_session
     try:
         context = _context(state["budget_context_file"])
         context["handoff_file"] = str(handoff)
+        if ended_session:
+            context["sessions"] = [*context.get("sessions", []), _session_link(ended_session)]
         # Retain source turns even if a legacy payload makes preparation fail.
         atomic(manifest, context)
         prompt = path / f"prompt-{state['turn']:04}-h{number}.md"

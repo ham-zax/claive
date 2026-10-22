@@ -75,6 +75,18 @@ for action in plan:
         for file in (root / "state").glob("*/steering/receipts/*.json"):
             if json.loads(file.read_text()).get("source") != "budget":
                 file.write_text("{")
+    elif "handoff" in action:
+        import subprocess
+        state_file = next((root / "state").glob("*/state.json"))
+        deadline = time.time() + 5
+        # The supervisor must record the last usage before the parent reads it.
+        while json.loads(state_file.read_text()).get("context_tokens") != action["tokens"] and time.time() < deadline:
+            time.sleep(0.01)
+        worker = state_file.parent.name
+        env = {key: value for key, value in os.environ.items() if key != "CLAIVE_WORKER_ID"}
+        done = subprocess.run([action["launcher"], "handoff", worker, "--note", action["handoff"], "--json"],
+                              env=env, capture_output=True, text=True)
+        record(dict(handoff=done.returncode, output=done.stdout, error=done.stderr))
     elif "cancel" in action:
         import signal
         os.kill(os.getppid(), signal.SIGTERM)
@@ -376,7 +388,7 @@ class ClaudeBudgetChecks(unittest.TestCase):
         self.assertNotIn("budget_warning", state)
 
     def test_late_marker_below_stop_limit_does_not_record_budget_warning(self):
-        self.plan([{"usage": 85000}, {"read": 1}, {"result": "A preface.\n[claive-handoff]"}])
+        self.plan([{"usage": 90000}, {"read": 1}, {"result": "A preface.\n[claive-handoff]"}])
         self.create()
         code, state = self.supervise()
         self.assertEqual(code, 0, state)
@@ -384,7 +396,7 @@ class ClaudeBudgetChecks(unittest.TestCase):
         self.assertNotIn("budget_warning", state)
 
     def test_show_budget_on_after_handoff_in_text_and_json(self):
-        self.plan([{"result": HANDOFF}], [{"usage": 87999}, {"read": 1}, {"result": "done"}])
+        self.plan([{"result": HANDOFF}], [{"usage": 92999}, {"read": 1}, {"result": "done"}])
         self.create()
         code, state = self.supervise()
         self.assertEqual(code, 0, state)
@@ -394,15 +406,15 @@ class ClaudeBudgetChecks(unittest.TestCase):
         lines = text.stdout.splitlines()
         index = next(index for index, line in enumerate(lines) if line.startswith("Live steering:"))
         self.assertEqual(lines[index], "Live steering: True | pending 0 | acknowledged 0")
-        self.assertEqual(lines[index + 1], "Context budget: on | context 87k | warn 85k | stop 95k | "
-                         "compact 115k | handoffs 1 (this turn 1) | missed 0")
+        self.assertEqual(lines[index + 1], "Context budget: on | context 92k | warn 90k | stop 100k | "
+                         "compact 120k | handoffs 1 (this turn 1) | missed 0")
         shown = subprocess.run([str(REPO / "bin/claive"), "show", state["id"], "--json"], env=self.env,
                                text=True, capture_output=True, timeout=5)
         self.assertEqual(shown.returncode, 0, shown.stderr)
         data = json.loads(shown.stdout)
         self.assertEqual(data["budget"], {"enabled": True, "values": state["launch"]["budget"], "off_reason": None})
         self.assertEqual((data["context_tokens"], data["handoffs"], data["turn_handoffs"], data["budget_missed"]),
-                         (87999, 1, 1, 0))
+                         (92999, 1, 1, 0))
         self.assertIsNone(data["pending_handoff"])
         self.assertEqual((data["steering"]["pending"], data["steering"]["acknowledged"], data["steering"]["budget"]),
                          (0, 0, 1))
@@ -531,18 +543,18 @@ class ClaudeBudgetChecks(unittest.TestCase):
         return [json.loads(file.read_text()) for file in (self.path / "steering/receipts").glob("*.json")]
 
     def test_warn_and_stop_arrive_once_with_budget_receipts(self):
-        self.plan([{"usage": 85000}, {"usage": 86000}, {"read": 1},
-                   {"usage": 95000}, {"usage": 96000}, {"read": 1}, {"result": "done"}])
+        self.plan([{"usage": 90000}, {"usage": 91000}, {"read": 1},
+                   {"usage": 100000}, {"usage": 101000}, {"read": 1}, {"result": "done"}])
         self.create()
         code, state = self.supervise()
         self.assertEqual(code, 0, state)
         messages = self.calls("input")[1:]
-        self.assertEqual(messages, [budget.warn_message(85000, state["launch"]["budget"]),
-                                    budget.stop_message(95000, state["launch"]["budget"], False)])
+        self.assertEqual(messages, [budget.warn_message(90000, state["launch"]["budget"]),
+                                    budget.stop_message(100000, state["launch"]["budget"], False)])
         receipts = self.receipts()
         self.assertEqual(len(receipts), 2)
         self.assertTrue(all(item["source"] == "budget" and item["status"] == "acknowledged" for item in receipts))
-        self.assertEqual((state["context_tokens"], state["budget_phase"]), (96000, "stopping"))
+        self.assertEqual((state["context_tokens"], state["budget_phase"]), (101000, "stopping"))
         self.assertNotIn("budget_error", state)
 
     def test_non_haiku_warns_and_stops_at_later_limits_then_returns_final(self):
@@ -621,12 +633,12 @@ class ClaudeBudgetChecks(unittest.TestCase):
         self.assertEqual(state["budget_error"], "disk full")
 
     def test_warn_on_a_tool_call_still_arrives_on_stdin(self):
-        self.plan([{"usage": 85000, "tool": "t1"}, {"gate": "t1"}, {"read": 1}, {"result": "done"}])
+        self.plan([{"usage": 90000, "tool": "t1"}, {"gate": "t1"}, {"read": 1}, {"result": "done"}])
         self.create()
         code, state = self.supervise()
         self.assertEqual(code, 0, state)
         self.assertEqual(self.gates(), {"t1": None})
-        self.assertEqual(self.calls("input")[1:], [budget.warn_message(85000, state["launch"]["budget"])])
+        self.assertEqual(self.calls("input")[1:], [budget.warn_message(90000, state["launch"]["budget"])])
 
     def test_gate_opens_after_compaction_and_in_the_next_session(self):
         self.plan([{"usage": 100000, "tool": "t1"}, {"gate": "t1"}, {"compact": True},
@@ -643,8 +655,8 @@ class ClaudeBudgetChecks(unittest.TestCase):
         self.assertEqual(state["handoffs"], 1)
 
     def test_handoff_changes_session_and_checks_only_final_report(self):
-        self.plan([{"usage": 85000}, {"read": 1}, {"result": HANDOFF}],
-                  [{"usage": 95000}, {"read": 1}, {"result": FINAL}])
+        self.plan([{"usage": 90000}, {"read": 1}, {"result": HANDOFF}],
+                  [{"usage": 100000}, {"read": 1}, {"result": FINAL}])
         initial = self.create("--report")
         original = Path(initial["prompt_file"]).read_text()
         with patch.object(cli, "record_report", wraps=cli.record_report) as report:
@@ -657,21 +669,61 @@ class ClaudeBudgetChecks(unittest.TestCase):
         sessions = [command[command.index("--session-id") + 1] for command in commands]
         self.assertEqual(len(set(sessions)), 2)
         self.assertEqual(sessions[-1], state["session_id"])
-        self.assertEqual(self.calls("prompt")[1], budget.continuation_prompt(HANDOFF, original))
+        self.assertEqual(self.calls("prompt")[1], budget.continuation_prompt(HANDOFF, original)
+                         + "\n\n---\nEarlier sessions of this worker, newest first (session ID, transcript):\n"
+                         f"- {sessions[0]} none (session logging off or file missing)")
         self.assertEqual((self.path / "handoffs/turn-0001-1.md").read_text(), HANDOFF)
         self.assertEqual((self.path / "result.txt").read_text(), FINAL)
         self.assertEqual((self.path / "results/turn-0001.txt").read_text(), FINAL)
-        self.assertEqual((state["handoffs"], state["turn_handoffs"], state["context_tokens"]), (1, 1, 95000))
+        self.assertEqual((state["handoffs"], state["turn_handoffs"], state["context_tokens"]), (1, 1, 100000))
         self.assertNotIn("budget_warning", state)
         self.assertEqual(len(self.receipts()), 2)
         self.assertTrue(all(item["status"] == "acknowledged" for item in self.receipts()))
         events = [json.loads(line) for line in (self.registry / "inbox.jsonl").read_text().splitlines()]
         event = next(item for item in events if item["type"] == "budget_handoff")
-        expected = inbox.budget_event(state["id"], state["label"], 1, 1, 1, 85000, sessions[1], "Check the next step.")
+        expected = inbox.budget_event(state["id"], state["label"], 1, 1, 1, 90000, sessions[1], "Check the next step.")
         for key in expected.keys() - {"seq", "at"}:
             self.assertEqual(event[key], expected[key])
         self.assertIsInstance(event["seq"], int)
         self.assertTrue(event["at"].endswith("Z"))
+
+    def test_continuation_links_the_ended_session_transcript(self):
+        self.plan([{"result": HANDOFF}], [{"result": "done"}])
+        initial = self.create()
+        transcript = self.workspace / "claude-config/projects/-work" / f"{initial['session_id']}.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text("{}\n")
+        code, state = self.supervise()
+        self.assertEqual(code, 0, state)
+        self.assertTrue(self.calls("prompt")[1].endswith(
+            "\n\n---\nEarlier sessions of this worker, newest first (session ID, transcript):\n"
+            f"- {initial['session_id']} {transcript}"))
+        manifest = json.loads((self.path / "budget-context/turn-0001-h1.json").read_text())
+        self.assertEqual(manifest["sessions"], [{"session_id": initial["session_id"], "transcript": str(transcript)}])
+
+    def test_manual_handoff_steers_the_template_and_continues(self):
+        launcher = str(REPO / "bin/claive")
+        self.plan([{"usage": 50000}, {"handoff": "Wrap up the parser.", "launcher": launcher, "tokens": 50000}, {"read": 1},
+                   {"result": HANDOFF}], [{"result": "done"}])
+        self.create()
+        code, state = self.supervise()
+        self.assertEqual(code, 0, state)
+        call = self.calls("handoff")
+        self.assertEqual(call, [0], self.calls("error"))
+        receipt = json.loads(self.calls("output")[0])
+        self.assertEqual(receipt["source"], "budget")
+        self.assertEqual(self.calls("input")[1], budget.manual_message(50000, "Wrap up the parser."))
+        self.assertIn("\nParent note for the handoff: Wrap up the parser.\n", budget.manual_message(50000, " Wrap up the parser. "))
+        self.assertEqual((state["handoffs"], state["budget_phase"]), (1, "none"))
+
+    def test_manual_handoff_refuses_a_worker_without_budget(self):
+        Path(self.env["CLAIVE_CONFIG"]).write_text(json.dumps({"engines": {"claude": {"budget": False}}}))
+        state = self.create()
+        refused = subprocess.run([str(REPO / "bin/claive"), "handoff", state["id"]], env=self.env,
+                                 text=True, capture_output=True, timeout=5)
+        self.assertEqual(refused.returncode, 1, refused.stdout)
+        self.assertIn("claive handoff needs a Claude worker launched with budget mode", refused.stderr)
+        self.assertFalse((self.path / "steering/receipts").exists() and any((self.path / "steering/receipts").iterdir()))
 
     def test_haiku_allows_three_handoffs_in_one_turn(self):
         self.plan(*([[{"result": HANDOFF}]] * 3), [{"result": "done"}])
@@ -681,7 +733,11 @@ class ClaudeBudgetChecks(unittest.TestCase):
         self.assertEqual((state["handoffs"], state["turn_handoffs"]), (3, 3))
         self.assertNotIn("needs_parent", state)
         self.assertEqual(len(list((self.path / "handoffs").glob("*.md"))), 3)
-        self.assertEqual(self.calls("prompt")[-1], budget.continuation_prompt(HANDOFF, self.prompt.read_text()))
+        sessions = [command[command.index("--session-id") + 1] for command in self.calls("command")]
+        self.assertEqual(self.calls("prompt")[-1], budget.continuation_prompt(HANDOFF, self.prompt.read_text())
+                         + "\n\n---\nEarlier sessions of this worker, newest first (session ID, transcript):\n"
+                         + "\n".join(f"- {session} none (session logging off or file missing)"
+                                     for session in reversed(sessions[:3])))
 
     def test_handoff_limit_counts_automatic_continuations_then_asks_parent(self):
         self.plan([{"result": HANDOFF}], [{"result": HANDOFF}], [{"result": HANDOFF}])
@@ -703,17 +759,18 @@ class ClaudeBudgetChecks(unittest.TestCase):
         self.assertNotEqual(state["session_id"], last_command[last_command.index("--session-id") + 1])
 
     def test_compaction_counts_missed_and_resets_phase(self):
-        self.plan([{"usage": 85000}, {"read": 1}, {"compact": True},
-                   {"usage": 85000}, {"read": 1}, {"result": "done"}])
+        self.plan([{"usage": 90000}, {"read": 1}, {"compact": True},
+                   {"usage": 90000}, {"read": 1}, {"result": "done"}])
         self.create()
         code, state = self.supervise()
         self.assertEqual(code, 0, state)
         self.assertEqual(state["budget_missed"], 1)
-        self.assertEqual(len(self.receipts()), 2)
+        self.assertEqual(len(self.receipts()), 3)
+        self.assertIn(budget.COMPACTED.format(git="(not a git repository or git failed)"), self.calls("input")[1:])
         self.assertEqual(state["budget_phase"], "warned")
 
     def test_submit_value_error_is_recorded_without_failing_turn(self):
-        self.plan([{"usage": 85000}, {"result": "done"}])
+        self.plan([{"usage": 90000}, {"result": "done"}])
         self.create()
         with patch.object(cli.steering, "submit", side_effect=ValueError("transport unavailable")):
             code, state = self.supervise()

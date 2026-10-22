@@ -266,7 +266,7 @@ class ClaudeBudgetForkChecks(unittest.TestCase):
                 self.config.write_text(json.dumps({"engines": {"claude": {"budget": enabled}}}))
                 fork = self.fork(source)
                 if enabled:
-                    self.assertEqual(fork["launch"]["budget"]["stop"], 95000)
+                    self.assertEqual(fork["launch"]["budget"]["stop"], 100000)
                     self.assertIsNone(fork["launch"]["budget_off_reason"])
                 else:
                     self.assertIsNone(fork["launch"]["budget"])

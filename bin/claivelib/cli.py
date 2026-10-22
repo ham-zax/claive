@@ -126,6 +126,16 @@ def parse_fallback_models(raw):
     return models
 
 
+def _report_steer(path, receipt, args):
+    deadline = time.monotonic() + args.wait
+    while receipt["status"] in {"pending", "sent"} and time.monotonic() < deadline:
+        time.sleep(0.05)
+        receipt = steering.receipt(path, receipt["id"])
+    print(json.dumps(receipt, indent=2) if args.json else
+          f"Steering {receipt['id']}: {receipt['status']} (provider acknowledgement does not prove consumption)")
+    return 1 if receipt["status"] in {"rejected", "not_delivered", "unconfirmed"} else 124 if args.wait and receipt["status"] in {"pending", "sent"} else 0
+
+
 def check_nested(message="claive workers may not launch workers (CLAIVE_WORKER_ID is set)"):
     if os.environ.get("CLAIVE_WORKER_ID") and os.environ.get("CLAIVE_ALLOW_NESTED") != "1":
         raise ValueError(message)
@@ -417,7 +427,8 @@ def compact_view(records, color=False, width=None, height=5):
         status = state["status"]
         age = duration(state.get("ended_at", time.time()) - state["started_at"])
         badge = "ASK" if state.get("needs_parent") else badges.get(status, status.upper())
-        warning = f" !{state.get('turn_task_failures', state.get('task_failures', 0))} turn/{state['task_failures']} total" if state.get("task_failures") else ""
+        # Nonzero tool exits are routine (a failing test before its fix): name them, not a worker failure.
+        warning = f" [exit≠0 {state.get('turn_task_failures', state.get('task_failures', 0))} turn/{state['task_failures']} total]" if state.get("task_failures") else ""
         phase = " | " + clean(state.get("phase", "working")) if status in ACTIVE else ""
         line = fit(f"{badge:7} {state['id']} {age:7} {clean(state['label'])}{warning}"
                    f" [{clean(Path(state['workspace']).name)}]{phase}")
@@ -456,9 +467,9 @@ def render(records, color=False, height=None):
                 last = str(reasons[-1])
                 if len(last) > 60:
                     last = last[:60] + "..."
-                label += f" [!{state.get('turn_task_failures', '?')} turn/{state['task_failures']} total: {clean(last)}]"
+                label += f" [exit≠0 {state.get('turn_task_failures', '?')} turn/{state['task_failures']} total: {clean(last)}]"
             else:
-                label += f" [!{state.get('turn_task_failures', '?')} turn/{state['task_failures']} total task failures]"
+                label += f" [exit≠0 {state.get('turn_task_failures', '?')} turn/{state['task_failures']} total]"
         workspace = clean(Path(state["workspace"]).name)
         prefix = f"{shown:12} {state['id']}  {age:8}  {state.get('steps', 0):5}  "
         detail = f"{label} / {workspace}"[:max(8, width - len(prefix))]
@@ -638,14 +649,15 @@ def supervise(job_id, control=None):
     def update_budget(event):
         if budget_values is None or state.get("terminal"):
             return
+        message = None
         if event.get("type") == "context_compacted":
             state["budget_missed"] += 1
             state["budget_phase"] = "none"
             gate["stop"] = None
+            message = budget.compaction_message(state["workspace"])
         elif event.get("type") == "context_usage":
             tokens = state["context_tokens"] = event["tokens"]
             phase = state["budget_phase"]
-            message = None
             if tokens >= budget_values["stop"] and phase != "stopping":
                 message = budget.stop_message(tokens, budget_values, with_template=phase == "none")
                 state["budget_phase"] = "stopping"
@@ -654,12 +666,12 @@ def supervise(job_id, control=None):
             elif tokens >= budget_values["warn"] and phase == "none":
                 message = budget.warn_message(tokens, budget_values)
                 state["budget_phase"] = "warned"
-            if message is not None:
-                save(path / "state.json", state)
-                try:
-                    steering.submit(path, message, source="budget")
-                except ValueError as error:
-                    state["budget_error"] = str(error)
+        if message is not None:
+            save(path / "state.json", state)
+            try:
+                steering.submit(path, message, source="budget")
+            except ValueError as error:
+                state["budget_error"] = str(error)
 
     def close_transport():
         if transport:
@@ -2102,6 +2114,11 @@ def parser():
     message.add_argument("--message-file")
     steer.add_argument("--wait", type=float, default=0, help="wait up to SECONDS for a provider acknowledgement")
     steer.add_argument("--json", action="store_true")
+    handoff = commands.add_parser("handoff", help="ask a running Claude budget worker for a handoff and a fresh session now")
+    handoff.add_argument("id")
+    handoff.add_argument("--note", help="text the worker must keep in the handoff")
+    handoff.add_argument("--wait", type=float, default=0, help="wait up to SECONDS for a provider acknowledgement")
+    handoff.add_argument("--json", action="store_true")
     runtime_cmd = commands.add_parser("runtime", help="report runtime provenance, drift and installed smoke checks")
     runtime_cmd.add_argument("--source-dir", help="source checkout to compare against this runtime")
     runtime_cmd.add_argument("--json", action="store_true")
@@ -2310,7 +2327,7 @@ def main(launcher=None):
         args.id = job_path(args.id).name
     # Resolve once per command so a concurrent rebind cannot redirect later reads
     # or writes in the same operation. Persisted links and output keep canonical IDs.
-    worker_actions = {"show", "logs", "cancel", "close", "usage", "followup", "effort", "answer", "verify", "accept", "scope", "steer", "send", "peek", "ask", "schedule", "fork"}
+    worker_actions = {"show", "logs", "cancel", "close", "usage", "followup", "effort", "answer", "verify", "accept", "scope", "steer", "send", "peek", "ask", "schedule", "fork", "handoff"}
     if args.action in worker_actions and (args.id.startswith("@") or not re.fullmatch(r"[0-9a-f]{12}", args.id)):
         args.id = job_path(args.id).name
     elif args.action == "wait":
@@ -2487,14 +2504,18 @@ def main(launcher=None):
             message = args.message
         if not 0 <= args.wait <= 3600:
             raise ValueError("--wait must be between 0 and 3600 seconds")
-        receipt = steering.submit(path, message)
-        deadline = time.monotonic() + args.wait
-        while receipt["status"] in {"pending", "sent"} and time.monotonic() < deadline:
-            time.sleep(0.05)
-            receipt = steering.receipt(path, receipt["id"])
-        print(json.dumps(receipt, indent=2) if args.json else
-              f"Steering {receipt['id']}: {receipt['status']} (provider acknowledgement does not prove consumption)")
-        return 1 if receipt["status"] in {"rejected", "not_delivered", "unconfirmed"} else 124 if args.wait and receipt["status"] in {"pending", "sent"} else 0
+        return _report_steer(path, steering.submit(path, message), args)
+    elif args.action == "handoff":
+        check_nested()
+        path = job_path(args.id)
+        state = load(path)
+        if state.get("engine") != "claude" or not isinstance(launch_config(state).get("budget"), dict):
+            raise ValueError("claive handoff needs a Claude worker launched with budget mode")
+        if not 0 <= args.wait <= 3600:
+            raise ValueError("--wait must be between 0 and 3600 seconds")
+        from claivelib import budget
+        message = budget.manual_message(state.get("context_tokens", 0), args.note)
+        return _report_steer(path, steering.submit(path, message, source="budget"), args)
     elif args.action in {"send", "ask"}:
         path = job_path(args.id)
         worker_sender = os.environ.get("CLAIVE_WORKER_ID")

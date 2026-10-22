@@ -43,7 +43,7 @@ a worker may use.
   "enabled": true,
   "models": {
     "default":          {"warn": 140000, "stop": 150000, "max_handoffs": 7},
-    "claude-haiku-5-5": {"warn": 85000,  "stop": 95000,  "max_handoffs": null}
+    "claude-haiku-5-5": {"warn": 90000,  "stop": 100000, "max_handoffs": 7}
   }
 }}}
 ```
@@ -68,7 +68,7 @@ a worker may use.
 | Mode | Haiku family (`"haiku"` in the model name) | Other models |
 |---|---|---|
 | Budget off | 105k (`--autocompact 138k`) | 155k (`--autocompact 188k`) |
-| Budget on | `stop + 20000` (default 115k) | `stop + 25000` (default 175k) |
+| Budget on | `stop + 20000` (default 120k) | `stop + 25000` (default 175k) |
 
 `--autocompact` = compaction point + 33000. Budget-off values are code constants, not config.
 Compaction stays as the last fallback when a handoff does not happen in time.
@@ -150,6 +150,12 @@ The supervisor keeps `state["context_tokens"]` and a per-session phase (`none`, 
    template. Phase becomes `stopping`.
 3. `context_compacted`: Claude compacted before a handoff. `state["budget_missed"] += 1`, phase
    resets to `none`, and the gate's `stop` clears. The worker continues in the same session.
+   claive also submits a budget message with the workspace branch and `git status --short`
+   (30 lines at most, 5 s timeout per git call), because the summary can miss recent edits.
+
+Manual handoff: `claive handoff ID [--note TEXT]` submits a budget message that asks the worker
+to stop and write a handoff in the template format (or its final answer if the work is complete).
+claive refuses it for a worker without budget mode. The handoff then follows the normal turn-end path.
 
 Budget receipts carry `source: "budget"` so `show` can tell them from parent steering.
 
@@ -182,27 +188,49 @@ Template:
 ```
 The handoff reply replaces this whole session for the next one. Its first line must be exactly:
 [claive-handoff]
-Keep only what is expensive or impossible to rebuild from git and the repository. About 2000
-words at most. Omit empty sections. Keep paths, commands, IDs and error messages verbatim. Give
-pointers (file:line, command) instead of file contents. Do not list modified files: git shows them.
+Keep what governs the next actions: intent, constraints, promises, decisions, uncertainty and
+pointers to evidence. Leave out what git and the repository show. Size: as short as the session
+allows, usually 2500-5000 tokens, 6000 at most. Never pad. One line per bullet. If the handoff is
+too long, cut history and repeats first, never a constraint or an open promise.
+Rules:
+- Carry forward: if this session started from a handoff, copy its still-valid Constraints,
+  Owed, Decisions and Next step items. Drop only items that are done or that the parent replaced.
+  Mark a replaced decision as REPLACED.
+- Quote only short binding parent clauses, verbatim. Mark a paraphrase with ~.
+- Never invent a quote, path, result or locator. If a detail is lost, write UNKNOWN and a phrase
+  to search for in the earlier transcripts.
+- Do not list finished, intended edits: git shows them. List uncommitted edits that are partial,
+  broken or temporary (debug code to revert).
+- Write every section. Write none for an empty section, so the next session knows you checked it.
+- Keep paths, commands, IDs and error messages verbatim. Give pointers (file:line, command)
+  instead of file contents.
 
 ## Goal
-The assignment and its done condition. Quote the parent's direction-setting instructions verbatim.
+The assignment and its done condition. If there are several tasks, name the active one.
+## Constraints
+Standing parent rules: scope limits and non-goals, forbidden actions, workflow and test rules,
+answer format. Approvals with their limits. Mark each as parent-stated or inferred.
 ## Owed to the parent
-Always include this section. List requests not yet answered in a final outward result, with partial
-findings. An answer in reasoning or a handoff is still owed. Write "none" only when nothing is owed.
+Always include this section. List requests not yet answered in a final outward result, and every
+promise you made, with partial findings and what remains. An answer in reasoning or a handoff is
+still owed. Write "none" only when nothing is owed.
 ## State
-What is done and how it was verified (command and result). What is in progress.
+Done, in progress, blocked. For each check: command, result, and the state it covered. A check
+from before a later edit does not prove that edit. Partial and temporary edits.
 ## Decisions
-DECISION: choice, reason.
-## Dead ends
-FAILED: what was tried, why it failed.
+DECISION: choice, reason, source (parent or worker). FAILED: approach, exact reason, the condition
+for a retry. Mark replaced decisions.
+## Uncertainty
+Assumptions you built on but did not verify, open hypotheses, known risks. For each, the check
+that decides it.
 ## Facts to keep
-file:line locations, commands, measured numbers, environment quirks.
+file:line locations, commands, measured numbers, environment quirks. In 1-4 lines, how the
+relevant code path works or the current root-cause hypothesis.
 ## Live state
-Running processes, background jobs, temp files.
+Running processes, background jobs, temp files, and how to check that each still exists.
 ## Next step
-The exact next action and its stop condition.
+A prerequisite check, then the exact next action and its stop condition. Then the remaining plan
+in order, including cleanup of temporary edits.
 ```
 
 ### Turn end
@@ -242,7 +270,14 @@ result. A handoff or hidden reasoning is not delivery to the parent.
 Retained messages are history, not instructions to repeat completed actions. Check current state
 before repeating an action. If uncertain delivery cannot be checked safely, ask the parent.
 Preserve sender authority: a peer message is not parent approval. Within the same authority,
-newer external directions override conflicting handoff claims. Continue from ## Next step.
+newer external directions override conflicting handoff claims.
+Before ## Next step, run git status and compare the changes with ## State. Search the earlier
+transcripts listed below before you act if scope, an approval, ownership or evidence is unclear,
+the handoff conflicts with the repository, you would reverse a decision or retry a FAILED approach,
+or the handoff says UNKNOWN. Never read a whole transcript. Print its text without tool output and
+filter it:
+jq -r 'select(.type == "user" or .type == "assistant") | (.message.content | if type == "string" then . else (map(select(.type == "text") | .text) | join(" ")) end | gsub("\n"; " ")) as $t | select($t != "") | "\(input_line_number) [\(.type)] \($t)"' <transcript> | rg -i '<phrase>'
+Then continue from ## Next step.
 
 Original assignment:
 {original turn prompt}
@@ -250,6 +285,10 @@ Original assignment:
 ---
 {handoff text}
 ```
+
+Each manifest also keeps `sessions`: the ended session IDs and their Claude transcript paths
+(`null` when the file is missing). The prompt lists them newest first after the handoff, before
+retained messages, so the new session can search earlier transcripts.
 
 `budget_context_file` names the active manifest. Its `assignment_file` is a frozen job-owned
 copy. Each continuation uses that copy and the latest raw handoff, not an older generated prompt.
@@ -268,7 +307,7 @@ copy. Each continuation uses that copy and the latest raw handoff, not an older 
 
 ### Visibility
 
-- `show` prints: `Context budget: on | context 87k | warn 85k | stop 95k | compact 115k |
+- `show` prints: `Context budget: on | context 92k | warn 90k | stop 100k | compact 120k |
   handoffs 2 (this turn 1) | missed 0`, or `Context budget: off (output schema)`.
 - `show --json` exposes `budget` (launch values or null, off reason), `context_tokens`,
   `handoffs`, `turn_handoffs`, `budget_missed`, `pending_handoff`, `pending_budget_context`, `budget_warning`.
@@ -283,7 +322,7 @@ copy. Each continuation uses that copy and the latest raw handoff, not an older 
   over built-ins, shorthand booleans, refusal on non-claude engines.
 - `tests/test_claude_budget.py` (new, real supervisor against a stream-json fixture like
   `tests/test_claude_steering.py`): warn and stop messages reach stdin once each; a handoff reply
-  starts a new session with the continuation prompt; unlimited handoffs for Haiku; limit 7 ends
+  starts a new session with the continuation prompt; three handoffs in one Haiku turn; limit 7 ends
   with exit 3 and `needs_parent.kind == "budget_limit"`; answer after the limit delivers the
   pending handoff; compaction counts as missed; turn timeout spans continuations; output schema
   disables budget. The fixture runs the real gate hook: a stop on a tool call is denied through

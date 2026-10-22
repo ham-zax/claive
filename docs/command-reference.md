@@ -397,6 +397,26 @@ Exit codes: 0 for queued/sent/acknowledged input, 1 for rejected/not-delivered/u
 
 Example: `claive steer @backend --message 'Check the parser first.' --wait 10 --json`.
 
+## `handoff`
+
+Ask a running Claude worker with budget mode for a handoff now. claive sends the handoff
+template as a budget message. The worker then continues in a new session from its handoff,
+or gives its final answer if the work is complete.
+
+```text
+claive handoff [--note NOTE] [--wait WAIT] [--json] id
+```
+
+| Option | Meaning |
+|---|---|
+| `--note` | Text the worker must keep in the handoff |
+| `--wait` | wait up to SECONDS for a provider acknowledgement. Default: 0 |
+| `--json` | Print JSON |
+
+Exit codes: as `steer`. A worker that is not Claude or has no budget mode exits 1.
+
+Example: `claive handoff @backend --note 'Keep the parser findings.' --wait 10`.
+
 ## `runtime`
 
 Report provenance, source drift and runtime smoke checks.

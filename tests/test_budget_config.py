@@ -41,13 +41,13 @@ class BudgetConfigChecks(unittest.TestCase):
 
     def test_missing_budget_uses_builtins(self):
         self.assertEqual(config.claude_budget(HAIKU),
-                         ({"warn": 85000, "stop": 95000, "max_handoffs": None, "compact": 115000}, None))
+                         ({"warn": 90000, "stop": 100000, "max_handoffs": 7, "compact": 120000}, None))
         self.assertEqual(config.claude_budget(SONNET),
                          ({"warn": 140000, "stop": 150000, "max_handoffs": 7, "compact": 175000}, None))
 
     def test_config_default_merges_per_key_over_builtin_model(self):
         self.policy({"models": {"default": {"warn": 80000}}})
-        for model, stop, maximum, margin in ((HAIKU, 95000, None, 20000), (SONNET, 150000, 7, 25000)):
+        for model, stop, maximum, margin in ((HAIKU, 100000, 7, 20000), (SONNET, 150000, 7, 25000)):
             with self.subTest(model=model):
                 self.assertEqual(config.claude_budget(model),
                                  ({"warn": 80000, "stop": stop, "max_handoffs": maximum,
@@ -57,14 +57,14 @@ class BudgetConfigChecks(unittest.TestCase):
         self.policy({"models": {"default": {"warn": 80000, "max_handoffs": 3},
                                 HAIKU: {"warn": 90000}, "custom": {"stop": 200000}}})
         self.assertEqual(config.claude_budget(HAIKU),
-                         ({"warn": 90000, "stop": 95000, "max_handoffs": 3, "compact": 115000}, None))
+                         ({"warn": 90000, "stop": 100000, "max_handoffs": 3, "compact": 120000}, None))
         self.assertEqual(config.claude_budget("custom"),
                          ({"warn": 80000, "stop": 200000, "max_handoffs": 3, "compact": 225000}, None))
 
     def test_boolean_shorthand_and_disabled_object(self):
         self.policy(True)
         enabled = config.claude_budget(HAIKU)
-        self.assertEqual(enabled[0]["stop"], 95000)
+        self.assertEqual(enabled[0]["stop"], 100000)
         self.assertIsNone(enabled[1])
         for value in (False, {"enabled": False}):
             with self.subTest(value=value):
@@ -73,8 +73,8 @@ class BudgetConfigChecks(unittest.TestCase):
 
     def test_invalid_model_values_are_rejected(self):
         for entry, message in (
-                ({"warn": 95000}, "warn must be less than stop"),
-                ({"warn": 96000}, "warn must be less than stop"),
+                ({"warn": 100000}, "warn must be less than stop"),
+                ({"warn": 101000}, "warn must be less than stop"),
                 ({"warn": 40000, "stop": 46000}, "stop must be between"),
                 ({"stop": 943000}, "stop must be between"),
                 ({"warn": 85500}, "multiple of 1000"),
@@ -158,7 +158,7 @@ class BudgetConfigChecks(unittest.TestCase):
                     self.assertIsNone(launch["budget"])
                     self.assertFalse(launch["steering"])
                 else:
-                    self.assertEqual(launch["budget"]["stop"], 95000)
+                    self.assertEqual(launch["budget"]["stop"], 100000)
                     self.assertTrue(launch["steering"])
                 self.assertEqual(turn_request(state).budget, launch["budget"])
 

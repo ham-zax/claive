@@ -52,9 +52,9 @@ claive denies the worker's tool calls (a PreToolUse hook; the denied tool error 
 worker writes a `[claive-handoff]` reply and claive continues the turn in a new session
 (inbox `budget_handoff`). After `max_handoffs` automatic continuations the next handoff exits 3
 (`budget_limit`): `claive answer` continues a reusable worker; for a one-shot worker, start a new
-worker from the saved context. Limits: `engines.claude.budget` (Haiku warn 85k/stop 95k, others 140k/150k;
+worker from the saved context. Limits: `engines.claude.budget` (Haiku warn 90k/stop 100k, others 140k/150k;
 `budget: false` turns it off; `--output-schema` launches run without it). `claive show` prints a
-"Context budget:" line. Spec: `docs/design-budget-mode.md`. `claive-orch` uses only
+"Context budget:" line. `claive handoff ID [--note TEXT]` asks a running budget worker for a handoff now. Spec: `docs/design-budget-mode.md`. `claive-orch` uses only
 Muse/Pi for its implementer/critic ladder; its roster does not authorize Claude/Codex
 workers. Engine sandbox, settings and option limits: `README.md` and
 `docs/harness-integration.md`. Codex parents also follow `claive-routing-codex`.
@@ -228,6 +228,8 @@ health check that never launches a model (`--live` adds one tiny Pi turn).
 Keep three claims separate: the supervisor records **execution**, the verifier
 records **checks**, and the parent records **acceptance**. Exit 0 or a worker's
 `done` report establishes only its own scope; neither grants acceptance.
+The `claive list` tag `[exit≠0 N turn/M total: ...]` counts nonzero tool exits, such as a failing test
+run before a fix. The tag is not the outcome: read the report before you judge a worker.
 
 For consequential work, declare checks and file ownership at launch
 (`--checks-file /abs/checks.json`, repeated `--owned-path`), then `claive verify ID`

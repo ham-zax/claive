@@ -100,6 +100,22 @@ class StartRobustnessChecks(unittest.TestCase):
                      "worker process started"):
             self.assertTrue(any(step in line for line in lines), step)
 
+    def test_cancel_unconfirmed_supervisor_prevents_worker_launch(self):
+        self.delay_supervisor("time.sleep(8)")
+        result = self.start()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        job = self.id_from(result)
+        cancelled = self.cli("cancel", job)
+        self.assertEqual(cancelled.returncode, 0, cancelled.stderr)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            state = self.state(job)
+            if state["status"] == "cancelled":
+                break
+            time.sleep(0.05)
+        self.assertEqual(state["status"], "cancelled")
+        self.assertFalse((self.registry / job / "events.jsonl").exists())
+
     def test_dead_spawn_fails_and_load_reports_interrupted(self):
         self.delay_supervisor("time.sleep(0.3); os._exit(23)")
         result = self.start()

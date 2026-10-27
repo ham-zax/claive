@@ -130,9 +130,11 @@ claive worktree clean [--older-than DUR] [--dry-run] [--discard-changed] [--json
 ```
 
 `list` shows logged worktrees, their job status, age, size, branch, changes and source.
-`clean` skips active workers and defaults to worktrees older than `24h`.
-Changed worktrees stay unless `--discard-changed` is set. Worktrees awaiting
-parent acceptance stay even with that flag. `--dry-run` removes nothing.
+`clean` defaults to worktrees older than `24h`. It skips worktrees used by any
+active worker and those with missing job state. Changed worktrees, including
+ignored dependency directories, stay unless `--discard-changed` is set.
+Worktrees awaiting parent acceptance stay even with that flag. Generated tool
+caches such as `__pycache__` do not keep a worktree. `--dry-run` removes nothing.
 Exit code: 0 on success.
 
 ## `open`

@@ -1,9 +1,24 @@
 """Append-only record of Claive-created worktrees."""
+from contextlib import contextmanager
 import fcntl
 import json
 import os
 from pathlib import Path
 import time
+
+
+@contextmanager
+def lifecycle_lock():
+    """Serialize managed-worktree creation, reuse, and removal."""
+    from claivelib import cli
+    path = cli.root() / "worktrees.lock"
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "r+") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
 
 
 def record(event, **fields):

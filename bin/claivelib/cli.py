@@ -352,9 +352,13 @@ def load(path, check_alive=True):
             else:
                 gone = time.time() - state["started_at"] > 300
             if gone:
-                state["status"] = "interrupted"
-                state["error"] = "worker supervisor did not start"
-                state["failure_kind"] = "interrupted"
+                if (path / "cancel.request").exists():
+                    state["status"] = "cancelled"
+                    state["error"] = "worker cancelled before its supervisor started"
+                else:
+                    state["status"] = "interrupted"
+                    state["error"] = "worker supervisor did not start"
+                    state["failure_kind"] = "interrupted"
     state["queue_depth"] = len(list((path / "requests").glob("*.json")))
     pending_instructions = []
     for item in sorted((path / "requests").glob("*.json")):
@@ -1135,14 +1139,10 @@ def _worktree_git(cwd, *args):
     return subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, timeout=120)
 
 
-DEPENDENCY_DIRS = {"node_modules", ".venv", "venv", ".tox", ".nox"}  # ignored and reinstallable
-
-
 def _worktree_changes(target, base_commit, branch=None):
     """Return why a writer worktree must be kept, or None when it holds nothing new.
 
-    Untracked and ignored files count, except tool caches and reinstallable dependency trees;
-    a failed git query counts too.
+    Untracked and ignored files count, except tool caches; a failed git query counts too.
     """
     from claivelib.orchestration import BYPRODUCT_DIRS
     status = _worktree_git(target, "status", "--porcelain", "--untracked-files=all", "--ignored")
@@ -1150,7 +1150,7 @@ def _worktree_changes(target, base_commit, branch=None):
         return "git status failed"
     for line in status.stdout.splitlines():
         parts = line[3:].strip('"').rstrip("/").split("/")
-        if line.startswith("!!") and (set(parts) & (BYPRODUCT_DIRS | DEPENDENCY_DIRS)
+        if line.startswith("!!") and (set(parts) & BYPRODUCT_DIRS
                                       or parts[-1].endswith((".pyc", ".pyo"))):
             continue
         return "has changes"
@@ -1169,6 +1169,22 @@ def remove_worktree(isolation, force=True):
         return (removed.stderr or removed.stdout).strip() or "git worktree remove failed"
     if branch:
         _worktree_git(source, "branch", "-D", branch)
+    return None
+
+
+def active_worktree_user(target, exclude=None):
+    """Find another live worker whose workspace lies in this worktree."""
+    target = Path(target).resolve()
+    for state in jobs():
+        if state.get("status") not in ACTIVE or state.get("id") == exclude:
+            continue
+        try:
+            isolation = launch_config(state).get("isolation") or {}
+        except (KeyError, TypeError, ValueError):
+            isolation = {}
+        for workspace in (state.get("workspace"), state.get("actual_workspace"), isolation.get("existing_path")):
+            if isinstance(workspace, str) and workspace and Path(workspace).resolve().is_relative_to(target):
+                return state["id"]
     return None
 
 
@@ -1197,11 +1213,17 @@ def worktree_rows():
 
 
 def worktree_command(action, older_than="24h", dry_run=False, discard_changed=False, json_output=False):
+    from claivelib import worktrees
+    rows = worktree_rows()
+    with worktrees.lifecycle_lock() if action == "clean" else contextlib.nullcontext():
+        return _worktree_command(action, older_than, dry_run, discard_changed, json_output, rows)
+
+
+def _worktree_command(action, older_than, dry_run, discard_changed, json_output, rows):
     from claivelib import wakes, worktrees
     age_limit = wakes.parse_duration(older_than)
     if age_limit is None:
         raise ValueError("--older-than must be a positive unit-suffixed duration such as 24h")
-    rows = worktree_rows()
     if action == "list":
         if json_output:
             print(json.dumps(rows, indent=2))
@@ -1228,6 +1250,9 @@ def worktree_command(action, older_than="24h", dry_run=False, discard_changed=Fa
         if row["status"] in ACTIVE or row["status"] == "unknown":
             results.append(dict(job=job, action="kept", reason="active"))
             continue
+        if row["status"] == "missing":
+            results.append(dict(job=job, action="kept", reason="missing job state"))
+            continue
         if row["changed"] and not discard_changed:
             results.append(dict(job=job, action="kept", reason="changes (use --discard-changed)"))
             continue
@@ -1242,6 +1267,13 @@ def worktree_command(action, older_than="24h", dry_run=False, discard_changed=Fa
             latest_status = "unknown"
         if latest_status in ACTIVE or latest_status == "unknown":
             results.append(dict(job=job, action="kept", reason="active"))
+            continue
+        if latest_status == "missing":
+            results.append(dict(job=job, action="kept", reason="missing job state"))
+            continue
+        user = active_worktree_user(target, exclude=job)
+        if user:
+            results.append(dict(job=job, action="kept", reason=f"in use by worker {user}"))
             continue
         if latest_state and acceptance.pending_worktree(latest_state):
             results.append(dict(job=job, action="kept", reason="pending acceptance"))
@@ -1304,6 +1336,15 @@ def worktree_command(action, older_than="24h", dry_run=False, discard_changed=Fa
 
 
 def release_worktree(state):
+    isolation = launch_config(state).get("isolation") or {}
+    if isolation.get("owner") != "claive":
+        return
+    from claivelib import worktrees
+    with worktrees.lifecycle_lock():
+        return _release_worktree(state)
+
+
+def _release_worktree(state):
     """Remove the worktree claive created for this worker (see MuseEngine.prepare_isolation).
 
     Runs before the worker's terminal state is saved, so `claive wait` sees `retained_worktree`.
@@ -1316,10 +1357,12 @@ def release_worktree(state):
     target, source, branch = isolation["existing_path"], isolation["source"], isolation.get("branch")
     from claivelib import worktrees
     contract = state.get("acceptance_contract", {})
-    reason = ("is retained for parent verification/acceptance" if contract.get("checks") or contract.get("owned_paths") is not None
+    user = active_worktree_user(target, exclude=state["id"])
+    reason = (f"is in use by worker {user}" if user
+              else "is retained for parent verification/acceptance" if contract.get("checks") or contract.get("owned_paths") is not None
               else _worktree_changes(target, isolation["base_commit"], branch))
     if reason is None:
-        error = remove_worktree(isolation)
+        error = remove_worktree(isolation, force=False)
         if error is None:
             worktrees.record_isolation("removed", state["id"], isolation)
             return
@@ -1631,6 +1674,16 @@ def warn_dirty_worktree(workspace, isolation):
 
 
 def create_job(args):
+    from claivelib import worktrees
+    registry = root().resolve()
+    workspace = Path(args.workspace).resolve()
+    existing = Path(args.worktree_existing).resolve() if args.worktree_existing else None
+    managed = args.worktree or workspace.is_relative_to(registry) or (existing and existing.is_relative_to(registry))
+    with worktrees.lifecycle_lock() if managed else contextlib.nullcontext():
+        return _create_job(args)
+
+
+def _create_job(args):
     workspace = Path(args.workspace)
     if not workspace.is_absolute() or not workspace.is_dir():
         raise ValueError("--workspace must be an existing absolute directory")
@@ -1792,7 +1845,7 @@ def create_job(args):
         if isolation["mode"] == "create":
             warn_dirty_worktree(workspace, launch["isolation"])
     except BaseException:
-        discard_job(path, launch)
+        discard_job(path, launch, _locked=True)
         raise
     try:
         turn_workspace = (launch["isolation"].get("existing_path") or str(workspace)) if engine_name in {"codex", "claude", "pi"} else str(workspace)
@@ -1850,20 +1903,37 @@ def create_job(args):
             from claivelib import mission as mission_mod
             mission_mod.link_auto(mission_id, "worker", job_id)
     except BaseException:
-        discard_job(path, launch)
+        discard_job(path, launch, _locked=True)
         raise
     return path, state
 
 
-def discard_job(path, launch):
+def discard_job(path, launch, _locked=False):
     """Undo a job no supervisor ever ran: its claive-created worktree, branch and job dir."""
     isolation = launch.get("isolation") or {}
     if isolation.get("owner") == "claive":
-        error = remove_worktree(isolation)
         from claivelib import worktrees
+        if not _locked:
+            with worktrees.lifecycle_lock():
+                return discard_job(path, launch, _locked=True)
+        user = active_worktree_user(isolation["existing_path"], exclude=path.name)
+        if user:
+            error = f"in use by worker {user}"
+        else:
+            try:
+                error = _worktree_changes(isolation["existing_path"], isolation["base_commit"], isolation.get("branch"))
+            except (OSError, ValueError, subprocess.SubprocessError) as failure:
+                error = str(failure)
+            if error is None:
+                error = remove_worktree(isolation, force=False)
         if error is not None:
+            if not (path / "state.json").exists():
+                save(path / "state.json", dict(schema_version=SCHEMA_VERSION, id=path.name,
+                     label="failed launch", status="failed", started_at=time.time(),
+                     workspace=isolation["source"], launch=launch,
+                     retained_worktree=isolation["existing_path"], error=str(error)))
             worktrees.record_isolation("kept", path.name, isolation, reason=f"could not be removed ({error})")
-            print(f"Worker {path.name}: worktree kept because Git could not remove it: {error}", file=sys.stderr)
+            print(f"Worker {path.name}: worktree kept because it could not be removed: {error}", file=sys.stderr)
             return
         if error is None:
             worktrees.record_isolation("removed", path.name, isolation)
@@ -3148,6 +3218,20 @@ def main(launcher=None):
             return 0
         pid = state.get("supervisor_pid")
         if not pid:
+            try:
+                spawn = json.loads((path / "spawn.json").read_text())
+                spawned_pid, spawned_identity = spawn["pid"], spawn["identity"]
+            except (OSError, ValueError, KeyError, TypeError):
+                spawned_pid, spawned_identity = None, None
+            if (isinstance(spawned_pid, int) and spawned_pid > 0 and spawned_identity
+                    and identity(spawned_pid) == spawned_identity):
+                save(path / "cancel.request", {"requested_at": time.time()})
+                try:
+                    os.killpg(spawned_pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                print(f"Cancellation requested for {args.id}. Check with claive wait {args.id}.")
+                return 0
             for _attempt in range(20):
                 time.sleep(0.1)
                 state = load(path)

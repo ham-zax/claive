@@ -199,8 +199,9 @@ logged, so Claive can list and clean them later when disk space runs low.
    `--discard-changed` is passed. When the source repo is gone, remove the directory with
    `shutil.rmtree` only when the path is inside the Claive state dir. Never touch a path outside
    the state dir, a worktree not in the log, a worker in `ACTIVE`, or a worktree awaiting
-   parent acceptance. Recheck changes before removal and keep detached branches with new
-   commits. Keep a worktree when Git refuses removal. Print one line per
+   parent acceptance. Keep trees used by another active worker or missing job state.
+   Recheck changes before removal and keep detached branches with new commits. Count ignored
+   dependency directories as changes. Keep a worktree when Git refuses removal. Print one line per
    worktree and a total with freed bytes. `--dry-run` changes nothing. Exit 0.
 5. `claive doctor`: add a `worktrees` check (never failing): count and total size of logged
    worktrees that still exist, and how many are older than 24 h.

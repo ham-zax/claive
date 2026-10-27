@@ -202,6 +202,24 @@ class ForkChecks(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("model nemotron-test is disallowed by claive policy", result.stderr)
 
+    def test_source_worktree_survives_while_fork_is_idle(self):
+        subprocess.run(["git", "init", "-q", str(self.workspace)], check=True)
+        (self.workspace / "tracked").write_text("base")
+        subprocess.run(["git", "-C", str(self.workspace), "add", "tracked"], check=True)
+        subprocess.run(["git", "-C", str(self.workspace), "-c", "user.name=Test", "-c",
+                        "user.email=test@example.com", "commit", "-qm", "base"], check=True)
+        source_process, source = self.open_fixture("--worktree", "--label", "source")
+        tree = Path(source["actual_workspace"])
+        result = self.command("fork", source["id"], "--label", "branch", "--prompt", "branch prompt")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        fork_id = re.search(r"Worker ([0-9a-f]{12})", result.stdout).group(1)
+        self.until_idle(fork_id)
+        self.assertEqual(self.command("close", source["id"]).returncode, 0)
+        source_process.wait(timeout=10)
+        self.assertEqual(self.state(fork_id)["status"], "idle")
+        self.assertTrue(tree.exists())
+        self.assertEqual(self.state(source["id"])["retained_worktree"], str(tree))
+
 
 class ClaudeBudgetForkChecks(unittest.TestCase):
     def setUp(self):
@@ -225,8 +243,9 @@ class ClaudeBudgetForkChecks(unittest.TestCase):
         cli.save(path / "state.json", state)
         return path, state
 
-    def fork(self, source):
-        args = cli.parser().parse_args(["fork", source["id"], "--prompt", "branch assignment"])
+    def fork(self, source, label=None):
+        extra = ["--label", label] if label else []
+        args = cli.parser().parse_args(["fork", source["id"], "--prompt", "branch assignment", *extra])
         return cli.create_fork(args)[1]
 
     def test_fork_inherits_budget_after_config_disables_it(self):
@@ -264,7 +283,7 @@ class ClaudeBudgetForkChecks(unittest.TestCase):
         for enabled in (False, True):
             with self.subTest(enabled=enabled):
                 self.config.write_text(json.dumps({"engines": {"claude": {"budget": enabled}}}))
-                fork = self.fork(source)
+                fork = self.fork(source, label=f"budget-{enabled}")
                 if enabled:
                     self.assertEqual(fork["launch"]["budget"]["stop"], 100000)
                     self.assertIsNone(fork["launch"]["budget_off_reason"])

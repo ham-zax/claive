@@ -202,7 +202,9 @@ See `docs/command-reference.md` for command-specific codes.
   or `--checks-file`. Use `--fit-checked` after assessing delegation fit. Every
   engine supports opt-in `--worktree` and one-time `--worktree-setup CMD`.
   Inspect logged trees with `claive worktree list` and `claive worktree clean --dry-run`.
-  Clean skips active workers and pending acceptance. Use `claive prune --interrupted`
+  Clean skips trees used by active workers, missing job state, and pending acceptance.
+  It keeps ignored dependency directories unless `--discard-changed` is passed.
+  Use `claive prune --interrupted`
   for old interrupted jobs after their worktrees are cleared.
 - Workers cannot launch claive workers (`CLAIVE_WORKER_ID` guard).
   Claude native subagents remain available through its default tools.

@@ -8,9 +8,11 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 
 from test_workers import FIXTURE_CLI, FIXTURE_WORKER, module
 from claivelib import worktrees
@@ -209,6 +211,40 @@ class WorktreeHousekeepingChecks(unittest.TestCase):
         self.assertTrue(changed.exists())
         self.assertEqual(self.records()[-1]["event"], "kept")
 
+    def test_failed_launch_keeps_new_files_without_a_git_lock(self):
+        job, state = self.make_tree("111111111111")
+        changed = job / "worktree" / "important"
+        changed.write_text("keep")
+        module.discard_job(job, state["launch"])
+        self.assertTrue(changed.exists())
+        self.assertEqual(self.records()[-1]["event"], "kept")
+
+    def test_release_does_not_force_away_late_changes(self):
+        job, state = self.make_tree("111111111111")
+        changed = job / "worktree" / "important"
+
+        def late_change(*_args):
+            changed.write_text("keep")
+            return None
+
+        with mock.patch.object(module, "_worktree_changes", side_effect=late_change):
+            module.release_worktree(state)
+        self.assertTrue(changed.exists())
+        self.assertEqual(self.records()[-1]["event"], "kept")
+
+    def test_failed_launch_keeps_a_recoverable_job_when_git_refuses(self):
+        job, state = self.make_tree("111111111111")
+        tree = job / "worktree"
+        (job / "state.json").unlink()
+        self.git("worktree", "lock", str(tree))
+        with mock.patch.object(worktrees.time, "time", return_value=time.time() - 172800):
+            module.discard_job(job, state["launch"])
+        self.assertEqual(json.loads((job / "state.json").read_text())["status"], "failed")
+        self.git("worktree", "unlock", str(tree))
+        result = self.command("worktree", "clean", "--discard-changed")
+        self.assertIn("cleaned 111111111111", result.stdout)
+        self.assertFalse(tree.exists())
+
     def test_branch_with_new_commits_is_kept_when_head_is_detached(self):
         job, state = self.make_tree("111111111111")
         tree = job / "worktree"
@@ -229,3 +265,78 @@ class WorktreeHousekeepingChecks(unittest.TestCase):
             module.worktree_command("clean")
         self.assertIn("kept 111111111111: changes", output.getvalue())
         self.assertTrue(changed.exists())
+
+    def test_active_worker_using_another_jobs_worktree_keeps_it(self):
+        owner, state = self.make_tree("111111111111")
+        tree = owner / "worktree"
+        other = self.registry / "222222222222"
+        other.mkdir()
+        module.save(other / "state.json", dict(schema_version=module.SCHEMA_VERSION,
+                    id=other.name, status="idle", started_at=time.time(),
+                    supervisor_pid=os.getpid(), supervisor_identity=module.identity(os.getpid()),
+                    workspace=str(tree), launch={}))
+        with mock.patch.object(worktrees.time, "time", return_value=time.time() - 172800):
+            module.release_worktree(state)
+        self.assertTrue(tree.exists())
+        module.save(owner / "state.json", state)
+        result = self.command("worktree", "clean", "--discard-changed")
+        self.assertIn("kept 111111111111: in use by worker 222222222222", result.stdout)
+        self.assertTrue(tree.exists())
+
+    def test_cleanup_keeps_tree_with_missing_job_state(self):
+        job, _ = self.make_tree("111111111111")
+        (job / "state.json").unlink()
+        result = self.command("worktree", "clean", "--discard-changed")
+        self.assertIn("kept 111111111111: missing job state", result.stdout)
+        self.assertTrue((job / "worktree").exists())
+
+    def test_reuse_and_removal_share_a_lifecycle_lock(self):
+        owner, state = self.make_tree("111111111111")
+        tree = owner / "worktree"
+        entered, resume, released = threading.Event(), threading.Event(), threading.Event()
+        args = SimpleNamespace(workspace=str(tree), worktree=False, worktree_existing=None)
+
+        def create_user(_args):
+            entered.set()
+            if not resume.wait(5):
+                raise RuntimeError("test did not release launch")
+            other = self.registry / "222222222222"
+            other.mkdir()
+            module.save(other / "state.json", dict(schema_version=module.SCHEMA_VERSION, id=other.name,
+                        status="starting", started_at=time.time(), workspace=str(tree), launch={}))
+
+        def release():
+            module.release_worktree(state)
+            released.set()
+
+        with mock.patch.object(module, "_create_job", side_effect=create_user):
+            starter = threading.Thread(target=module.create_job, args=(args,))
+            starter.start()
+            try:
+                self.assertTrue(entered.wait(3))
+                remover = threading.Thread(target=release)
+                remover.start()
+                self.assertFalse(released.wait(0.2))
+            finally:
+                resume.set()
+                starter.join(5)
+                if 'remover' in locals():
+                    remover.join(5)
+        self.assertTrue(released.is_set())
+        self.assertTrue(tree.exists())
+
+    def test_ignored_dependencies_are_kept_until_explicit_discard(self):
+        (self.repo / ".gitignore").write_text("node_modules/\n")
+        self.git("add", ".gitignore")
+        self.git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "ignore")
+        job, state = self.make_tree("111111111111")
+        changed = job / "worktree" / "node_modules" / "custom.js"
+        changed.parent.mkdir()
+        changed.write_text("user work")
+        with mock.patch.object(worktrees.time, "time", return_value=time.time() - 172800):
+            module.release_worktree(state)
+        module.save(job / "state.json", state)
+        self.assertTrue(changed.exists())
+        self.assertIn("kept 111111111111: changes", self.command("worktree", "clean").stdout)
+        self.assertTrue(changed.exists())
+        self.assertIn("cleaned 111111111111", self.command("worktree", "clean", "--discard-changed").stdout)

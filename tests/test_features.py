@@ -115,7 +115,7 @@ class FeatureChecks(unittest.TestCase):
         report = json.loads(result.stdout)
         names = [check["name"] for check in report["checks"]]
         self.assertEqual(names, ["python", "state_dir", "config", "muse", "pi", "claude", "codex", "engines", "pi_provider", "opencode2api",
-                                 "git", "quota", "interrupted", "runtime_provenance", "runtime_drift", "runtime_smoke"])
+                                 "git", "quota", "interrupted", "worktrees", "runtime_provenance", "runtime_drift", "runtime_smoke"])
         checks = {check["name"]: check for check in report["checks"]}
         self.assertTrue(report["ok"])
         self.assertTrue(checks["muse"]["ok"])

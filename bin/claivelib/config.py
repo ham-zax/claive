@@ -40,7 +40,7 @@ import os
 from pathlib import Path
 import re
 
-TOP_LEVEL_KEYS = {"default_engine", "roles", "providers", "workspaces", "engines", "teams"}
+TOP_LEVEL_KEYS = {"default_engine", "roles", "providers", "workspaces", "engines", "teams", "launch"}
 ENGINE_KEYS = {
     "enabled": bool, "reason": str, "default_model": str, "default_reasoning_effort": str,
     "disabled_models": (list, dict), "disabled_reasoning_efforts": (list, dict), "models": dict,
@@ -90,6 +90,15 @@ def load():
     unknown = sorted(set(data) - TOP_LEVEL_KEYS)
     if unknown:
         raise ValueError(f"invalid claive config {path}: unknown keys {', '.join(unknown)}")
+    launch = data.get("launch", {})
+    if not isinstance(launch, dict):
+        raise ValueError(f"invalid claive config {path}: launch must be an object")
+    for name, value in launch.items():
+        if name not in {"start_timeout", "git_timeout", "worktree_setup_timeout"}:
+            raise ValueError(f"invalid claive config {path}: launch: unknown key {name}")
+        maximum = 3600 if name == "worktree_setup_timeout" else 600
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 1 <= value <= maximum:
+            raise ValueError(f"invalid claive config {path}: launch.{name} must be a number from 1 to {maximum}")
     engine = data.get("default_engine")
     if engine is not None and (not isinstance(engine, str) or not engine):
         raise ValueError(f"invalid claive config {path}: default_engine must be a nonempty string")
@@ -195,6 +204,10 @@ def load():
         raise ValueError(f"invalid claive config {path}: default_engine {engine} is disabled in engines.{engine}")
     _validate_teams(data.get("teams", {}), path, set(BUILTIN_ROLES) | set(roles))
     return data
+
+
+def launch_setting(name, default):
+    return load().get("launch", {}).get(name, default)
 
 
 def _claude_budget_values(model, budget):

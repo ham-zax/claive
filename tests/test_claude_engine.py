@@ -69,8 +69,7 @@ class ClaudeChecks(unittest.TestCase):
         broken.write_text("[1]")
         with self.assertRaises(ValueError):
             self.engine.validate_launch(dict(launch, output_schema=str(broken)))
-        with self.assertRaises(ValueError):
-            self.engine.validate_launch(dict(launch, isolation={"mode": "create"}))
+        self.engine.validate_launch(dict(launch, isolation={"mode": "create"}))
         with self.assertRaises(ValueError):
             self.engine.validate_turn(self.request(max_model_steps=5))
         with self.assertRaises(ValueError):

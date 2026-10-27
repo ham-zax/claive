@@ -117,8 +117,7 @@ class CodexChecks(unittest.TestCase):
         launch = dict(self.engine.resolve_launch(), binary=str(self.binary))
         with self.assertRaises(ValueError):
             self.engine.validate_launch(dict(launch, output_schema="/x.json"))
-        with self.assertRaises(ValueError):
-            self.engine.validate_launch(dict(launch, isolation={"mode": "create"}))
+        self.engine.validate_launch(dict(launch, isolation={"mode": "create"}))
         with self.assertRaises(ValueError):
             self.engine.validate_turn(self.request(max_model_steps=5))
         with self.assertRaises(ValueError):

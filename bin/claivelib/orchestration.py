@@ -540,15 +540,17 @@ def implementer_choice(muse_available, pi_available, muse_quota_reset=None, conf
         if muse_quota_reset:
             reason = f"muse quota exhausted until {muse_quota_reset}"
         else:
-            reason = "muse binary not found"
+            reason = "muse unavailable or disabled"
         return {"engine": "pi", "model": "muse-spark-1.3-contributor-free", "reasoning_effort": "max",
                 "provider": "opencode2api", "fallback": True, "reason": reason}
     raise ValueError("no implementer available: neither muse nor pi is available")
 
 
 def _engine_available(engine):
-    """True when the engine binary is executable; any error means unavailable."""
+    """True when the engine is enabled and its binary is executable."""
     try:
+        from claivelib import config
+        config.check_engine(engine)
         if engine == "muse":
             from claivelib.engines import muse as module
         elif engine == "pi":

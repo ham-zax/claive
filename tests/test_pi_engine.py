@@ -306,7 +306,7 @@ class PiChecks(unittest.TestCase):
     def test_unsupported_initial_options_do_not_launch(self):
         for options in (("--max-model-steps", "100"), ("--output-schema", str(self.prompt)),
                         ("--provider", "openai"), ("--provider", "meta"),
-                        ("--web",), ("--worktree",), ("--worktree-existing", str(self.workspace)),
+                        ("--web",),
                         ("--reasoning-effort", "invalid"), ("--session-id", "../escape")):
             with self.subTest(options=options):
                 result = self.command("run", "--engine", "pi", "--workspace", str(self.workspace),

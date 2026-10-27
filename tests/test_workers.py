@@ -1,4 +1,6 @@
 import hermetic  # noqa: F401  (must run before claivelib reads the environment)
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -636,6 +638,7 @@ class WorkerChecks(unittest.TestCase):
         state_file = path / "state.json"
         state_file.write_text(json.dumps(state))
         process = mock.Mock()
+        process.pid = os.getpid()
         process.poll.return_value = None
         clock = [0.0]
 
@@ -646,10 +649,12 @@ class WorkerChecks(unittest.TestCase):
 
         with (mock.patch.object(module.subprocess, "Popen", return_value=process),
               mock.patch.object(module.time, "monotonic", side_effect=tick),
-              mock.patch.object(module.time, "sleep") as sleep):
-            with self.assertRaisesRegex(ValueError, "worker supervisor did not start \\(no PID after 5 s\\)"):
+              mock.patch.object(module.time, "sleep") as sleep,
+              mock.patch.object(module.config, "launch_setting", return_value=1),
+              contextlib.redirect_stderr(io.StringIO()) as stderr):
                 module.spawn_supervisor(path, state, "_supervise")
 
+        self.assertIn("warning: start not confirmed after", stderr.getvalue())
         self.assertEqual(json.loads(state_file.read_text()), state)
         self.assertTrue(path.is_dir())
         self.assertGreater(sleep.call_count, 1)
@@ -745,7 +750,7 @@ class WorkerChecks(unittest.TestCase):
         self.assertEqual(warning_result.returncode, 0)
         self.assertEqual(warning["status"], "completed")
         self.assertEqual(warning["task_failures"], 1)
-        self.assertIn("Task failures reported: 1", warning_result.stdout)
+        self.assertIn("Command failures during the turn (attempts, not the final result): 1", warning_result.stdout)
         self.assertIn("  - fixture task warning", warning_result.stdout)
 
         for mode in ("terminal-failure", "exit-failure", "malformed", "missing"):

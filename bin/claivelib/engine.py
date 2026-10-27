@@ -1,6 +1,8 @@
 """Engine-neutral turn request contract."""
 from dataclasses import dataclass, field
 import json
+from pathlib import Path
+import subprocess
 from typing import Optional, Tuple
 import uuid
 
@@ -120,8 +122,48 @@ class WorkerEngine:
         return None
 
     def prepare_isolation(self, launch, workspace, job_dir):
-        """Return the launch, adjusted for isolation claive must set up itself in job_dir."""
-        return launch
+        """Create a managed worktree for the worker."""
+        isolation = launch.get("isolation") or {}
+        if isolation.get("mode") != "create":
+            return launch
+        target = Path(job_dir) / "worktree"
+        base = isolation.get("base") or "HEAD"
+        resolved = subprocess.run(["git", "-C", workspace, "rev-parse", "--verify", "--quiet", base + "^{commit}"],
+                                  capture_output=True, text=True, timeout=60)
+        if resolved.returncode:
+            raise ValueError(f"cannot create the worktree: {base} is not a commit in a git repository at {workspace}")
+        base_commit = resolved.stdout.strip()
+        branch = None if launch.get("read_only") else f"claive/{Path(job_dir).name}"
+        command = ["git", "-C", workspace, "worktree", "add"]
+        command += ["--detach", str(target)] if branch is None else ["-b", branch, str(target)]
+        result = subprocess.run(command + [base_commit], capture_output=True, text=True, timeout=120)
+        if result.returncode:
+            detail = " ".join(result.stderr.split())[:300]
+            raise ValueError(f"cannot create the worktree at {base}: {detail}")
+        isolation = dict(mode="existing", base=None, existing_path=str(target), owner="claive",
+                         source=workspace, branch=branch, base_commit=base_commit)
+        from claivelib import worktrees
+        try:
+            worktrees.record_isolation("created", Path(job_dir).name, isolation)
+        except BaseException:
+            subprocess.run(["git", "-C", workspace, "worktree", "remove", "--force", str(target)],
+                           capture_output=True, timeout=120)
+            if branch:
+                subprocess.run(["git", "-C", workspace, "branch", "-D", branch], capture_output=True, timeout=120)
+            raise
+        return dict(launch, isolation=isolation)
+
+    def validate_isolation(self, launch):
+        isolation = launch.get("isolation") or {}
+        mode = isolation.get("mode", "none")
+        if mode not in {"none", "create", "existing"}:
+            raise ValueError(f"unsupported isolation mode: {mode}")
+        if mode == "existing":
+            path = Path(isolation.get("existing_path") or "")
+            if not path.is_absolute() or not path.is_dir():
+                raise ValueError("--worktree-existing must be an existing absolute directory")
+        if isolation.get("base") and mode != "create":
+            raise ValueError("--worktree-base requires --worktree")
 
     def session_usage(self, state):
         raise ValueError(f"worker engine {self.name or 'unknown'} does not provide session usage")

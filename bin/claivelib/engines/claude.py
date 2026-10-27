@@ -131,9 +131,7 @@ class ClaudeEngine(WorkerEngine):
         self._check_model(launch.get("model"))
         if launch.get("output_schema"):
             self._schema(launch["output_schema"])
-        isolation = launch.get("isolation") or {}
-        if isolation.get("mode", "none") != "none" or isolation.get("base"):
-            raise ValueError("Claude does not manage worktrees; pass an externally retained worktree as --workspace")
+        self.validate_isolation(launch)
 
     @staticmethod
     def _schema(path):

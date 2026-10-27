@@ -131,9 +131,7 @@ class PiEngine(WorkerEngine):
             raise ValueError("Pi does not support --output-schema")
         if launch.get("web"):
             raise ValueError("Pi does not support --web in this adapter")
-        isolation = launch.get("isolation") or {}
-        if isolation.get("mode", "none") != "none" or isolation.get("base"):
-            raise ValueError("Pi does not manage worktrees; pass an externally retained worktree as --workspace")
+        self.validate_isolation(launch)
 
     def validate_turn(self, request):
         if request.provider != "opencode2api":
@@ -311,7 +309,7 @@ class PiEngine(WorkerEngine):
         directory = launch.get("session_dir")
         if not identifier or not directory or not launch.get("session_logging"):
             raise ValueError("Pi usage needs a retained session")
-        path = self._session_file(directory, identifier, state["workspace"])
+        path = self._session_file(directory, identifier, state.get("actual_workspace") or state["workspace"])
         if path is None:
             raise ValueError("retained Pi session file is unavailable")
         calls = []

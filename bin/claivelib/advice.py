@@ -8,12 +8,12 @@ LARGE_BRIEF_BYTES = 4000
 
 def launch_notes(state, prompt_bytes=0):
     notes = []
-    if not (state.get("acceptance_contract") or {}).get("checks"):
+    if not state.get("fit_checked") and not (state.get("acceptance_contract") or {}).get("checks"):
         notes.append("Fit: no --checks-file. Delegate when an executable check exists and a wrong first "
                      "attempt is costly; small or tightly coupled work is faster inline.")
     if state.get("turn_timeout") is None:
         notes.append("Bound: no --turn-timeout; a stalled turn runs until cancelled.")
-    if not state.get("reusable") and prompt_bytes >= LARGE_BRIEF_BYTES:
+    if not state.get("fit_checked") and not state.get("reusable") and prompt_bytes >= LARGE_BRIEF_BYTES:
         notes.append(f"Scope: {prompt_bytes}-byte brief for a single-turn worker. Use open --detach + followup: "
                      "one small scoped task per turn, read its summary, then send the next.")
     return notes

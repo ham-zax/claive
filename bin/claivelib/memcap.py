@@ -8,6 +8,8 @@ faster than one poll can briefly exceed it, and a process that calls setsid()
 leaves the session and is not counted.
 """
 import argparse
+from contextlib import contextmanager, nullcontext
+import fcntl
 import os
 from pathlib import Path
 import re
@@ -22,6 +24,54 @@ EXCEEDED_EXIT = 137
 TIMEOUT_EXIT = 124
 UNITS = {"": 1, "B": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3, "T": 1024 ** 4}
 PAGE = os.sysconf("SC_PAGE_SIZE")
+
+
+class LockTimeout(Exception):
+    pass
+
+
+class LockCancelled(Exception):
+    pass
+
+
+@contextmanager
+def hold_lock(name, timeout=None, cancelled=None):
+    if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", name):
+        raise ValueError("invalid lock name")
+    if timeout is not None and timeout <= 0:
+        raise ValueError("--lock-timeout must be positive")
+    state = Path(os.environ.get("CLAIVE_DIR") or
+                 str(Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "claive"))
+    if not state.is_absolute():
+        raise ValueError("CLAIVE_DIR must be absolute")
+    locks = state / "locks"
+    locks.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (locks / f"{name}.lock").open("a+") as stream:
+        start = time.monotonic()
+        warned = False
+        while True:
+            if cancelled and cancelled():
+                raise LockCancelled()
+            try:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if not warned:
+                    stream.seek(0)
+                    holder = stream.read().strip() or "unknown"
+                    print(f"claive-memcap: waiting for lock {name} (held by pid {holder})", file=sys.stderr, flush=True)
+                    warned = True
+                if timeout is not None and time.monotonic() - start >= timeout:
+                    raise LockTimeout(f"timed out waiting for lock {name}")
+                time.sleep(min(0.1, max(0, timeout - (time.monotonic() - start))) if timeout else 0.1)
+        stream.seek(0)
+        stream.truncate()
+        stream.write(str(os.getpid()))
+        stream.flush()
+        try:
+            yield
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
 
 
 def parse_size(text):
@@ -143,6 +193,8 @@ def entrypoint(argv=None):
                "otherwise the command's exit code. Example: claive-memcap 2G -- npm test")
     parser.add_argument("limit", help="resident memory cap for the whole command, e.g. 512M or 2G")
     parser.add_argument("--timeout", type=float, help="kill the command after this many seconds")
+    parser.add_argument("--lock", help="serialize commands using a named lock")
+    parser.add_argument("--lock-timeout", type=float, help="limit the wait for the lock in seconds")
     parser.usage = "claive-memcap LIMIT [--timeout S] -- COMMAND [ARGS...]"
     argv = sys.argv[1:] if argv is None else list(argv)
     split = argv.index("--") if "--" in argv else len(argv)
@@ -153,10 +205,16 @@ def entrypoint(argv=None):
         limit = parse_size(args.limit)
         if args.timeout is not None and args.timeout <= 0:
             raise ValueError("--timeout must be positive")
+        if args.lock_timeout is not None and not args.lock:
+            raise ValueError("--lock-timeout requires --lock")
         # Default SIGTERM/SIGHUP handling would exit without killing the session.
         for signum in (signal.SIGTERM, signal.SIGHUP):
             signal.signal(signum, _raise_stopped)
-        result = run_capped(command, limit, args.timeout, capture=False, die_with_parent=True)
+        with hold_lock(args.lock, args.lock_timeout) if args.lock else nullcontext():
+            result = run_capped(command, limit, args.timeout, capture=False, die_with_parent=True)
+    except LockTimeout as error:
+        print(f"claive-memcap: {error}", file=sys.stderr)
+        return 75
     except (ValueError, OSError) as error:
         print(f"claive-memcap: {error}", file=sys.stderr)
         return 2

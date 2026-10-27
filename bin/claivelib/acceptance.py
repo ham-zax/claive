@@ -1,6 +1,7 @@
 """Parent-owned verification and acceptance, independent of worker execution."""
 import fnmatch
 import fcntl
+from contextlib import contextmanager
 from functools import wraps
 import hashlib
 import json
@@ -12,6 +13,8 @@ import signal
 import subprocess
 import tempfile
 import time
+
+from claivelib import config
 
 OUTCOMES = {"passed", "failed", "blocked", "not_run"}
 
@@ -41,6 +44,10 @@ def manifest(filename):
     if not path.is_absolute():
         raise ValueError("--checks-file must be absolute")
     value = json.loads(path.read_text())
+    return validate_manifest(value)
+
+
+def validate_manifest(value):
     if not isinstance(value, list):
         raise ValueError("checks manifest must be a list")
     names = set()
@@ -71,11 +78,19 @@ def manifest(filename):
 def snapshot(workspace):
     """Hash tracked and all untracked paths; retain dirty baseline and deletions."""
     workspace = Path(workspace)
-    result = subprocess.run(["git", "-C", str(workspace), "ls-files", "-z", "--cached", "--others"],
-                            capture_output=True, timeout=30)
+    timeout = config.launch_setting("git_timeout", 30)
+
+    def git(path, *args, **kwargs):
+        try:
+            return subprocess.run(["git", "-C", str(path), *args], timeout=timeout, **kwargs)
+        except subprocess.TimeoutExpired as error:
+            raise ValueError(f"git {args[0]} timed out after {timeout} s in {path} "
+                             f"(load {os.getloadavg()[0]:.2f}); raise launch.git_timeout in the claive config") from error
+
+    result = git(workspace, "ls-files", "-z", "--cached", "--others", capture_output=True)
     if result.returncode:
         raise ValueError("write ownership validation requires a Git workspace")
-    head = subprocess.run(["git", "-C", str(workspace), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=30)
+    head = git(workspace, "rev-parse", "HEAD", capture_output=True, text=True)
     files = {}
     for raw in set(result.stdout.split(b"\0")) - {b""}:
         name = os.fsdecode(raw)
@@ -90,8 +105,8 @@ def snapshot(workspace):
             files[name] = ["file", digest.hexdigest(), path.stat().st_mode & 0o777]
         elif path.is_dir():
             # A submodule is a tracked directory: bind its commit and dirtiness.
-            sub = subprocess.run(["git", "-C", str(path), "status", "--porcelain"], capture_output=True, timeout=30)
-            commit = subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"], capture_output=True, timeout=30)
+            sub = git(path, "status", "--porcelain", capture_output=True)
+            commit = git(path, "rev-parse", "HEAD", capture_output=True)
             files[name] = ["directory", commit.stdout.decode(errors="replace"), sub.stdout.decode(errors="replace")]
     return {"head": head.stdout.strip(), "files": files}
 
@@ -203,6 +218,20 @@ def settled(path, state):
     return target
 
 
+def pending_worktree(state):
+    contract = state.get("acceptance_contract", {})
+    needs_review = contract.get("checks") or contract.get("owned_paths") is not None
+    decision = state.get("evidence", {}).get("acceptance", {}).get("status", "pending")
+    return bool(needs_review and decision not in {"accepted", "rejected"})
+
+
+@contextmanager
+def parent_lock(path, state):
+    with (directory(path, state) / ".parent.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
 def aggregate(checks, required):
     outcomes = {item["name"]: item["status"] for item in checks}
     statuses = [outcomes.get(name, "not_run") for name in required] if required else list(outcomes.values())
@@ -215,9 +244,8 @@ def aggregate(checks, required):
 def serialized(function):
     @wraps(function)
     def locked(path, state, *args, **kwargs):
-        target = settled(path, state)
-        with (target / ".parent.lock").open("w") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        settled(path, state)
+        with parent_lock(path, state):
             return function(path, state, *args, **kwargs)
     return locked
 

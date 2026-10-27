@@ -94,9 +94,7 @@ class CodexEngine(WorkerEngine):
         self._check_model(launch.get("model"))
         if launch.get("output_schema"):
             raise ValueError("Codex does not support --output-schema in this adapter")
-        isolation = launch.get("isolation") or {}
-        if isolation.get("mode", "none") != "none" or isolation.get("base"):
-            raise ValueError("Codex does not manage worktrees; pass an externally retained worktree as --workspace")
+        self.validate_isolation(launch)
 
     @staticmethod
     def _check_model(model):

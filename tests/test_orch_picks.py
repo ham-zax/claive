@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ORCH = str(REPO_ROOT / "bin/claive-orch")
@@ -205,6 +206,20 @@ class PickCritic(unittest.TestCase):
 
 
 class ImplementerChoice(unittest.TestCase):
+    def test_disabled_muse_is_unavailable_and_pi_is_selected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config_path = Path(temporary) / "config.json"
+            config_path.write_text(json.dumps({"engines": {"muse": {"enabled": False}}}))
+            with mock.patch.dict(os.environ, {"CLAIVE_CONFIG": str(config_path)}), \
+                 mock.patch.object(orch.os, "access", return_value=True):
+                muse = orch._engine_available("muse")
+                pi = orch._engine_available("pi")
+                choice = orch.implementer_choice(muse, pi)
+        self.assertFalse(muse)
+        self.assertTrue(pi)
+        self.assertEqual(choice["engine"], "pi")
+        self.assertIn("disabled", choice["reason"])
+
     def test_muse_when_available(self):
         choice = orch.implementer_choice(muse_available=True, pi_available=True)
         self.assertEqual((choice["engine"], choice["model"], choice["reasoning_effort"], choice["fallback"]),

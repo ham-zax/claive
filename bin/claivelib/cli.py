@@ -236,7 +236,8 @@ def turn_request(state, prompt_file=None, reasoning_effort=None, max_model_steps
     launch = launch_config(state)
     return TurnRequest(
         binary=launch["binary"],
-        workspace=state["workspace"],
+        workspace=(state.get("actual_workspace") or state["workspace"])
+        if state.get("engine") in {"codex", "claude", "pi"} else state["workspace"],
         prompt_file=prompt_file or state["prompt_file"],
         session_id=worker_session_id(state),
         provider=launch["provider"],
@@ -333,10 +334,27 @@ def load(path, check_alive=True):
             state["status"] = "interrupted"
             state["error"] = "worker supervisor exited without a final result"
             state["failure_kind"] = "interrupted"
-        elif not pid and time.time() - state["started_at"] > 5:
-            state["status"] = "interrupted"
-            state["error"] = "worker supervisor did not start"
-            state["failure_kind"] = "interrupted"
+        elif not pid:
+            spawn_path = path / "spawn.json"
+            if spawn_path.exists():
+                spawn = json.loads(spawn_path.read_text())
+                pid, recorded = spawn["pid"], spawn["identity"]
+                if recorded is None and isinstance(pid, int) and pid > 0:
+                    try:
+                        os.kill(pid, 0)
+                        gone = False
+                    except ProcessLookupError:
+                        gone = True
+                    except PermissionError:
+                        gone = False
+                else:
+                    gone = identity(pid) != recorded
+            else:
+                gone = time.time() - state["started_at"] > 300
+            if gone:
+                state["status"] = "interrupted"
+                state["error"] = "worker supervisor did not start"
+                state["failure_kind"] = "interrupted"
     state["queue_depth"] = len(list((path / "requests").glob("*.json")))
     pending_instructions = []
     for item in sorted((path / "requests").glob("*.json")):
@@ -388,6 +406,56 @@ def duration(seconds):
     minutes, seconds = divmod(seconds, 60)
     hours, minutes = divmod(minutes, 60)
     return f"{hours}h{minutes:02}m" if hours else f"{minutes}m{seconds:02}s"
+
+
+def job_timestamp(state):
+    return state.get("finished_at") or state.get("updated_at") or state["started_at"]
+
+
+def short_age(seconds):
+    seconds = max(0, int(seconds))
+    if seconds >= 86400:
+        return f"{seconds // 86400}d"
+    if seconds >= 3600:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 60}m"
+
+
+def prune_interrupted(older_than, dry_run=False, json_output=False):
+    from claivelib import aliases, wakes
+    age = wakes.parse_duration(older_than)
+    if age is None:
+        raise ValueError("--older-than must be a positive unit-suffixed duration such as 24h")
+    now = time.time()
+    records = []
+    deleted = []
+    for child in sorted(root().iterdir()):
+        if not child.is_dir() or not re.fullmatch(r"[0-9a-f]{12}", child.name):
+            continue
+        try:
+            state = load(child)
+            if state.get("status") != "interrupted" or now - job_timestamp(state) <= age:
+                continue
+        except (OSError, ValueError, KeyError):
+            continue
+        if state.get("retained_worktree") or (child / "worktree").is_dir():
+            records.append({"id": child.name, "action": "kept", "reason": "worktree"})
+        elif dry_run:
+            records.append({"id": child.name, "action": "would delete"})
+        else:
+            shutil.rmtree(child)
+            deleted.append(child.name)
+            records.append({"id": child.name, "action": "deleted"})
+    if deleted:
+        aliases.remove_workers(set(deleted))
+    if json_output:
+        print(json.dumps({"jobs": records, "total": len(records)}, indent=2))
+    else:
+        for record in records:
+            detail = ": worktree (run claive worktree clean)" if record.get("reason") else ""
+            print(f"{record['action']} {record['id']}{detail}")
+        print(f"Total: {len(records)}")
+    return 0
 
 
 def summary(records):
@@ -492,6 +560,13 @@ def event_update(state, event):
     state["last_event"] = event.get("native_kind", kind)
     state["last_activity"] = time.time()
     state["last_observed_activity"] = event.get("native_kind", kind)
+    command = event.get("command")
+    if kind in {"task_warning", "tool_completed"} and isinstance(command, str) and command:
+        results = state.setdefault("turn_command_results", {})
+        results.pop(command, None)
+        results[command] = "fail" if kind == "task_warning" else "ok"
+        while len(results) > 20:
+            results.pop(next(iter(results)))
     if kind == "model_step":
         state["steps"] += 1
         state["phase"] = "model working"
@@ -551,7 +626,7 @@ FALLBACKABLE_FAILURES = {"timeout", "quota", "worker", "protocol"}
 
 PER_TURN_RESET_KEYS = ("ended_at", "error", "terminal", "terminal_reason", "budget_warning", "quota_exhausted",
                        "quota_reset_at", "fallback_requires_user_approval", "report", "report_state",
-                       "report_error", "needs_parent", "failure_kind", "active_tools")
+                       "report_error", "needs_parent", "failure_kind", "active_tools", "turn_command_results")
 
 
 def context_overflow_reason(reason):
@@ -590,7 +665,8 @@ def rebuild_for_fallback(state, engine, new_model):
     output_schema = launch.get("output_schema")
     session_logging = bool(launch.get("session_logging", True))
     isolation = dict(launch.get("isolation") or {})
-    workspace = state["workspace"]
+    workspace = ((state.get("actual_workspace") or state["workspace"])
+                 if engine.name in {"codex", "claude", "pi"} else state["workspace"])
     prompt_file = state["prompt_file"]
     effort = state["reasoning_effort"]
     steps = state.get("max_model_steps")
@@ -617,8 +693,19 @@ def rebuild_for_fallback(state, engine, new_model):
 
 def supervise(job_id, control=None):
     from claivelib import budget, inbox as inbox_mod
+    started = time.time()
     path = job_path(job_id)
+    try:
+        started = json.loads((path / "spawn.json").read_text())["spawned_at"]
+    except (OSError, ValueError, KeyError):
+        pass
+
+    def progress(step):
+        print(f"claive: +{time.time() - started:.2f}s {step}", flush=True)
+
+    progress("supervisor entered")
     state = load(path, check_alive=False)
+    progress("state loaded")
     for key in PER_TURN_RESET_KEYS:
         state.pop(key, None)
     state["malformed_events"] = 0
@@ -629,6 +716,7 @@ def supervise(job_id, control=None):
     state.setdefault("handoffs", 0)
     state.setdefault("budget_missed", 0)
     acceptance.begin(path, state)
+    progress("acceptance ready")
     (path / "result.txt").unlink(missing_ok=True)
     engine = get_engine(state.get("engine", DEFAULT_ENGINE))
     if not isinstance(state.get("fallbacks"), list):
@@ -724,9 +812,47 @@ def supervise(job_id, control=None):
     save(path / "state.json", state)
     attempt = 0
     try:
+        setup_failed = False
+        setup = launch_config(state).get("worktree_setup")
+        if setup and state.get("turn", 1) == 1:
+            from claivelib import memcap
+            setup_log = path / "worktree-setup.log"
+            setup_timeout = config.launch_setting("worktree_setup_timeout", 900)
+            setup_exit = None
+            try:
+                with memcap.hold_lock("heavy", cancelled=lambda: stopping), setup_log.open("w") as log:
+                    if not stopping:
+                        process = subprocess.Popen(["/bin/sh", "-c", setup], cwd=state["actual_workspace"],
+                                                   stdout=log, stderr=log, start_new_session=True)
+                        deadline = time.monotonic() + setup_timeout
+                        while process.poll() is None and not stopping and time.monotonic() < deadline:
+                            try:
+                                process.wait(timeout=min(0.1, max(0.001, deadline - time.monotonic())))
+                            except subprocess.TimeoutExpired:
+                                pass
+                        if process.poll() is None:
+                            try:
+                                os.killpg(process.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                            process.wait()
+                            setup_exit = memcap.TIMEOUT_EXIT
+                        else:
+                            setup_exit = process.returncode
+            except memcap.LockCancelled:
+                pass
+            if stopping:
+                setup_failed = True
+                state.update(status="cancelled", exit_code=130)
+            elif setup_exit:
+                setup_failed = True
+                state.update(status="failed", failure_kind="worktree_setup", exit_code=setup_exit,
+                             error=f"worktree setup failed (exit {setup_exit}); see {setup_log}")
         if engine.name == "claude" and isinstance(launch_config(state).get("budget"), dict):
             budget.begin_turn(path, state)
         while True:
+            if setup_failed:
+                break
             values = launch_config(state).get("budget")
             budget_values = values if engine.name == "claude" and isinstance(values, dict) else None
             state["context_tokens"] = 0
@@ -775,7 +901,10 @@ def supervise(job_id, control=None):
                 child = subprocess.Popen(state["command"], stdout=subprocess.PIPE, stderr=errors,
                                          stdin=subprocess.PIPE if initial_input is not None else subprocess.DEVNULL,
                                          bufsize=0, start_new_session=True,
-                                         cwd=state["workspace"], env=child_env)
+                                         cwd=(state.get("actual_workspace") or state["workspace"])
+                                         if engine.name in {"codex", "claude", "pi"} else state["workspace"],
+                                         env=child_env)
+                progress("worker process started")
                 transport = steering.Transport(path, state, child.stdin, initial_input) if initial_input is not None else None
                 if timeout_start is None:
                     timeout_start = time.monotonic()
@@ -1009,7 +1138,7 @@ def _worktree_git(cwd, *args):
 DEPENDENCY_DIRS = {"node_modules", ".venv", "venv", ".tox", ".nox"}  # ignored and reinstallable
 
 
-def _worktree_changes(target, base_commit):
+def _worktree_changes(target, base_commit, branch=None):
     """Return why a writer worktree must be kept, or None when it holds nothing new.
 
     Untracked and ignored files count, except tool caches and reinstallable dependency trees;
@@ -1025,16 +1154,17 @@ def _worktree_changes(target, base_commit):
                                       or parts[-1].endswith((".pyc", ".pyo"))):
             continue
         return "has changes"
-    ahead = _worktree_git(target, "rev-list", "--count", f"{base_commit}..HEAD")
-    if ahead.returncode or ahead.stdout.strip() != "0":
-        return "has new commits"
+    for ref in ("HEAD", f"refs/heads/{branch}") if branch else ("HEAD",):
+        ahead = _worktree_git(target, "rev-list", "--count", f"{base_commit}..{ref}")
+        if ahead.returncode or ahead.stdout.strip() != "0":
+            return "has new commits"
     return None
 
 
-def remove_worktree(isolation):
+def remove_worktree(isolation, force=True):
     """Remove a claive-created worktree (and its branch); return an error string when git refuses."""
     target, source, branch = isolation["existing_path"], isolation["source"], isolation.get("branch")
-    removed = _worktree_git(source, "worktree", "remove", "--force", target)
+    removed = _worktree_git(source, "worktree", "remove", *(["--force"] if force else []), target)
     if removed.returncode:
         return (removed.stderr or removed.stdout).strip() or "git worktree remove failed"
     if branch:
@@ -1042,27 +1172,160 @@ def remove_worktree(isolation):
     return None
 
 
+def worktree_rows():
+    from claivelib import worktrees
+    now = time.time()
+    rows = []
+    for item in worktrees.current():
+        job = item.get("job", "")
+        if not isinstance(job, str) or not re.fullmatch(r"[0-9a-f]{12}", job):
+            continue
+        try:
+            state = load(root() / job)
+            status = state["status"]
+        except FileNotFoundError:
+            status = "missing"
+        except (OSError, ValueError, KeyError):
+            status = "unknown"
+        try:
+            reason = _worktree_changes(item["path"], item.get("base_commit", ""), item.get("branch"))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            reason = "git status failed"
+        rows.append(dict(item, status=status, age=max(0, now - item.get("at", now)),
+                         size=worktrees.size(item["path"]), changed=reason is not None, change_reason=reason))
+    return rows
+
+
+def worktree_command(action, older_than="24h", dry_run=False, discard_changed=False, json_output=False):
+    from claivelib import wakes, worktrees
+    age_limit = wakes.parse_duration(older_than)
+    if age_limit is None:
+        raise ValueError("--older-than must be a positive unit-suffixed duration such as 24h")
+    rows = worktree_rows()
+    if action == "list":
+        if json_output:
+            print(json.dumps(rows, indent=2))
+        else:
+            for row in rows:
+                print(f"{row['job']} {row['status']} {short_age(row['age'])} {row['size']} bytes "
+                      f"branch {clean(row.get('branch') or 'detached')} changed {'yes' if row['changed'] else 'no'} "
+                      f"source {clean(row.get('source', ''))} path {clean(row['path'])}")
+        return 0
+    results = []
+    freed = 0
+    registry = root().resolve()
+    for row in rows:
+        job, target = row["job"], Path(row["path"])
+        if row["age"] <= age_limit:
+            continue
+        resolved = target.resolve()
+        expected = (registry / job / "worktree").resolve()
+        branch = row.get("branch")
+        if (not resolved.is_relative_to(registry) or resolved != expected
+                or branch not in (None, f"claive/{job}") or target.is_symlink()):
+            results.append(dict(job=job, action="kept", reason="outside managed layout"))
+            continue
+        if row["status"] in ACTIVE or row["status"] == "unknown":
+            results.append(dict(job=job, action="kept", reason="active"))
+            continue
+        if row["changed"] and not discard_changed:
+            results.append(dict(job=job, action="kept", reason="changes (use --discard-changed)"))
+            continue
+        try:
+            latest_state = load(root() / job)
+            latest_status = latest_state["status"]
+        except FileNotFoundError:
+            latest_state = None
+            latest_status = "missing"
+        except (OSError, ValueError, KeyError):
+            latest_state = None
+            latest_status = "unknown"
+        if latest_status in ACTIVE or latest_status == "unknown":
+            results.append(dict(job=job, action="kept", reason="active"))
+            continue
+        if latest_state and acceptance.pending_worktree(latest_state):
+            results.append(dict(job=job, action="kept", reason="pending acceptance"))
+            continue
+        if dry_run:
+            results.append(dict(job=job, action="would clean", bytes=row["size"]))
+            continue
+        with contextlib.ExitStack() as locks:
+            if latest_state and acceptance.directory(root() / job, latest_state).is_dir():
+                locks.enter_context(acceptance.parent_lock(root() / job, latest_state))
+                latest_state = load(root() / job)
+                if latest_state["status"] in ACTIVE or acceptance.pending_worktree(latest_state):
+                    results.append(dict(job=job, action="kept", reason="active or pending acceptance"))
+                    continue
+            if (target.is_symlink() or not target.resolve().is_relative_to(registry)
+                    or target.resolve() != (registry / job / "worktree").resolve()
+                    or not any(item.get("path") == row["path"] and item.get("at") == row.get("at")
+                               and item.get("job") == job for item in worktrees.current())):
+                results.append(dict(job=job, action="kept", reason="outside managed layout"))
+                continue
+            if not discard_changed:
+                try:
+                    reason = _worktree_changes(str(target), row.get("base_commit", ""), branch)
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    reason = "git status failed"
+                if reason:
+                    results.append(dict(job=job, action="kept", reason="changes (use --discard-changed)"))
+                    continue
+            source = row.get("source")
+            if not isinstance(source, str) or not source:
+                results.append(dict(job=job, action="kept", reason="missing source"))
+                continue
+            if not Path(source).is_dir():
+                shutil.rmtree(target)
+                error = None
+            else:
+                error = remove_worktree(dict(existing_path=str(target), source=source, branch=branch),
+                                        force=discard_changed)
+            if error:
+                results.append(dict(job=job, action="kept", reason=error))
+                continue
+            worktrees.record("cleaned", job=job, path=row["path"], branch=branch,
+                             source=source, base_commit=row.get("base_commit"))
+            state_path = root() / job / "state.json"
+            if latest_state and latest_state.get("retained_worktree") == str(target):
+                stored = json.loads(state_path.read_text())
+                if stored.get("retained_worktree") == str(target):
+                    stored.pop("retained_worktree")
+                    save(state_path, stored)
+            freed += row["size"]
+            results.append(dict(job=job, action="cleaned", bytes=row["size"]))
+    if json_output:
+        print(json.dumps(dict(worktrees=results, total=len(results), freed_bytes=freed), indent=2))
+    else:
+        for result in results:
+            reason = f": {result['reason']}" if result.get("reason") else ""
+            print(f"{result['action']} {result['job']}{reason}")
+        print(f"Total: {len(results)}; freed {freed} bytes")
+    return 0
+
+
 def release_worktree(state):
     """Remove the worktree claive created for this worker (see MuseEngine.prepare_isolation).
 
     Runs before the worker's terminal state is saved, so `claive wait` sees `retained_worktree`.
-    A writer's worktree and branch are kept when it has changes or new commits, and any
-    worktree is kept when git refuses to remove it.
+    Worktrees are kept when they have changes or new commits, or git refuses to remove them.
     """
     isolation = launch_config(state).get("isolation") or {}
     if (isolation.get("owner") != "claive" or state.get("retained_worktree")
             or not Path(isolation.get("existing_path") or "").is_dir()):
         return
     target, source, branch = isolation["existing_path"], isolation["source"], isolation.get("branch")
+    from claivelib import worktrees
     contract = state.get("acceptance_contract", {})
     reason = ("is retained for parent verification/acceptance" if contract.get("checks") or contract.get("owned_paths") is not None
-              else _worktree_changes(target, isolation["base_commit"]) if branch else None)
+              else _worktree_changes(target, isolation["base_commit"], branch))
     if reason is None:
         error = remove_worktree(isolation)
         if error is None:
+            worktrees.record_isolation("removed", state["id"], isolation)
             return
         reason = f"could not be removed ({error})"
     state["retained_worktree"] = target
+    worktrees.record_isolation("kept", state["id"], isolation, reason=reason)
     label = f"worktree {target}" + (f" (branch {branch})" if branch else "")
     try:
         print(f"Worker {state['id']}: {label} {reason} and is kept; remove it with: "
@@ -1339,6 +1602,34 @@ def create_fork(args):
     return path, state
 
 
+def warn_dirty_worktree(workspace, isolation):
+    timeout = config.launch_setting("git_timeout", 30)
+    result = subprocess.run(["git", "-C", str(workspace), "status", "--porcelain=v1", "-z", "--untracked-files=normal"],
+                            capture_output=True, timeout=timeout, check=True)
+    entries = iter(result.stdout.split(b"\0"))
+    statuses, paths = [], []
+    for entry in entries:
+        if not entry:
+            continue
+        status = os.fsdecode(entry[:2])
+        statuses.append(status)
+        paths.append(os.fsdecode(entry[3:]))
+        if "R" in status or "C" in status:
+            paths.append(os.fsdecode(next(entries)))
+    if not statuses:
+        return
+    staged = sum(status[0] not in " ?" for status in statuses)
+    unstaged = sum(status[1] not in " ?" for status in statuses)
+    untracked = sum(status == "??" for status in statuses)
+    paths = list(dict.fromkeys(paths))
+    base = isolation["base_commit"][:7]
+    print(f"warning: the worktree starts from {base} and lacks {len(statuses)} uncommitted paths in {workspace} "
+          f"(staged {staged}, unstaged {unstaged}, untracked {untracked}): "
+          f"{', '.join(clean(path) for path in paths[:10])}", file=sys.stderr)
+    print(f"To include them, commit by path: git -C {shlex.quote(str(workspace))} commit -m MSG -- "
+          + " ".join(shlex.quote(path) for path in paths), file=sys.stderr)
+
+
 def create_job(args):
     workspace = Path(args.workspace)
     if not workspace.is_absolute() or not workspace.is_dir():
@@ -1412,6 +1703,9 @@ def create_job(args):
     check_model_policy(effective_model)
     isolation = dict(mode="create" if args.worktree else "existing" if args.worktree_existing else "none",
                      base=args.worktree_base, existing_path=args.worktree_existing)
+    worktree_setup = getattr(args, "worktree_setup", None)
+    if worktree_setup is not None and isolation["mode"] != "create":
+        raise ValueError("--worktree-setup requires --worktree")
     budget_options = {}
     if engine_name == "claude":
         if getattr(args, "inherit_budget", False):
@@ -1432,6 +1726,8 @@ def create_job(args):
         workspace=str(workspace), remember_model=bool(args.model and getattr(args, "remember_model", True)),
         **budget_options,
     )
+    if worktree_setup is not None:
+        launch["worktree_setup"] = worktree_setup
     check_model_policy(launch.get("model"))
     if getattr(args, "enable_steering", False) and not engine.steering_capability().supported:
         raise ValueError(engine.steering_capability().reason)
@@ -1453,9 +1749,25 @@ def create_job(args):
         from claivelib import mission as mission_mod
         mission_mod.require_open(mission_id)
     check_manifest = acceptance.manifest(getattr(args, "checks_file", None))
+    for inline in getattr(args, "check", None) or []:
+        name, separator, command = inline.partition("=")
+        if not separator or not name.strip() or not command.strip():
+            raise ValueError("--check must be NAME=COMMAND with a nonempty name and command")
+        check_manifest.append({"name": name.strip(), "command": shlex.split(command), "required": True})
+    check_manifest = acceptance.validate_manifest(check_manifest)
     ownership = getattr(args, "owned_path", None)
     if ownership is not None:
         ownership = acceptance.owned_paths(ownership)
+    effective_label = args.label or (prompt.stem if prompt is not None else "prompt-input")
+    target_workspace = Path(args.worktree_existing or workspace).resolve()
+    if not read_only:
+        for other in jobs():
+            if (other["status"] == "starting" and other.get("label") == effective_label
+                    and not launch_config(other).get("read_only")
+                    and Path(other.get("actual_workspace") or other["workspace"]).resolve() == target_workspace):
+                raise ValueError(f"worker {other['id']} (label {effective_label}) has not confirmed its start "
+                                 f"in this workspace; run claive show {other['id']} before any relaunch, "
+                                 "cancel it, or pass another --label")
     # Check both sides: a later writer must not bypass an existing ownership lane.
     if not read_only and isolation["mode"] == "none":
         for other in jobs():
@@ -1477,11 +1789,15 @@ def create_job(args):
             prompt = path / "prompt-input.md"
             prompt.write_text(prompt_text, encoding="utf-8")
         launch = engine.prepare_isolation(launch, str(workspace), str(path))
+        if isolation["mode"] == "create":
+            warn_dirty_worktree(workspace, launch["isolation"])
     except BaseException:
-        shutil.rmtree(path, ignore_errors=True)
+        discard_job(path, launch)
         raise
     try:
-        initial_turn = dataclasses.replace(initial_turn, prompt_file=str(prompt), isolation=launch["isolation"])
+        turn_workspace = (launch["isolation"].get("existing_path") or str(workspace)) if engine_name in {"codex", "claude", "pi"} else str(workspace)
+        initial_turn = dataclasses.replace(initial_turn, prompt_file=str(prompt), isolation=launch["isolation"],
+                                           workspace=turn_workspace)
         save(path / "policy.json", dict(reasoning_effort=effort, max_model_steps=steps))
         effective_prompt, source_prompt = str(prompt), None
         if has_prompt_layers:
@@ -1489,7 +1805,7 @@ def create_job(args):
             (path / "prompt-0001.md").write_text(composed_prompt, encoding="utf-8")
             effective_prompt = str(path / "prompt-0001.md")
             initial_turn = TurnRequest(
-                binary=launch["binary"], workspace=str(workspace), prompt_file=effective_prompt,
+                binary=launch["binary"], workspace=turn_workspace, prompt_file=effective_prompt,
                 session_id=session_id, provider=launch["provider"], model=launch["model"],
                 reasoning_effort=effort, max_model_steps=steps,
                 read_only=launch["read_only"], web=launch["web"], output_schema=launch["output_schema"],
@@ -1501,13 +1817,15 @@ def create_job(args):
             )
         command = build_command(engine, initial_turn)
         state = dict(schema_version=SCHEMA_VERSION, engine=engine_name, session_id=session_id,
-                     id=job_id, label=args.label or prompt.stem, workspace=str(workspace), log_dir=str(path),
+                     id=job_id, label=effective_label, workspace=str(workspace), log_dir=str(path),
                      prompt_file=effective_prompt, command=command, launch=launch, status="starting", phase="starting",
                      started_at=time.time(), steps=0, task_failures=0, malformed_events=0,
                      model=launch.get("model"), reasoning_effort=effort, max_model_steps=steps,
                      reusable=args.action == "open", turn=1,
                      fallback_models=fallback_models, fallbacks=[])
         state["acceptance_contract"] = {"checks": check_manifest}
+        if getattr(args, "fit_checked", False):
+            state["fit_checked"] = True
         if ownership is not None:
             state["acceptance_contract"]["owned_paths"] = ownership
         if turn_timeout is not None:
@@ -1541,20 +1859,37 @@ def discard_job(path, launch):
     """Undo a job no supervisor ever ran: its claive-created worktree, branch and job dir."""
     isolation = launch.get("isolation") or {}
     if isolation.get("owner") == "claive":
-        remove_worktree(isolation)
+        error = remove_worktree(isolation)
+        from claivelib import worktrees
+        if error is not None:
+            worktrees.record_isolation("kept", path.name, isolation, reason=f"could not be removed ({error})")
+            print(f"Worker {path.name}: worktree kept because Git could not remove it: {error}", file=sys.stderr)
+            return
+        if error is None:
+            worktrees.record_isolation("removed", path.name, isolation)
     shutil.rmtree(path, ignore_errors=True)
 
 
 def spawn_supervisor(path, state, entry):
     """Start a detached supervisor and wait for its PID; discard the job if Popen fails."""
+    load = os.getloadavg()
+    limit = config.launch_setting("start_timeout", min(60, max(5, 5 * load[0] / (os.cpu_count() or 1))))
+    process = None
     try:
         with (path / "supervisor.log").open("w") as log:
+            print(f"claive: spawn at {datetime.datetime.now().astimezone().isoformat()} "
+                  f"load {load[0]:.2f} {load[1]:.2f} {load[2]:.2f}", file=log, flush=True)
+        with (path / "supervisor.log").open("a") as log:
             args = [f"claive-supervisor {state['id']}", launcher_path(), entry, state["id"]]
             process = subprocess.Popen(args, executable=sys.executable,
                                        stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                                        start_new_session=True)
+            save(path / "spawn.json", {"pid": process.pid, "identity": identity(process.pid),
+                                       "spawned_at": time.time()})
+            print(f"claive: supervisor pid {process.pid}", file=log, flush=True)
     except BaseException:
-        discard_job(path, launch_config(state))
+        if process is None:
+            discard_job(path, launch_config(state))
         raise
 
     def supervisor_pid():
@@ -1573,7 +1908,7 @@ def spawn_supervisor(path, state, entry):
         raise ValueError(f"worker supervisor did not start ({reason}); see {path / 'supervisor.log'}\n"
                          f"{log_tail}")
 
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + limit
     while True:
         if supervisor_pid():
             return
@@ -1591,7 +1926,10 @@ def spawn_supervisor(path, state, entry):
                 if supervisor_pid():
                     return
                 failed(f"exited with code {returncode}")
-            failed("no PID after 5 s")
+            print(f"warning: start not confirmed after {limit:g} s (load {load[0]:.2f}); "
+                  f"supervisor process {process.pid} is alive. Run claive show {state['id']} "
+                  "before any relaunch.", file=sys.stderr)
+            return
         time.sleep(min(0.05, remaining))
 
 
@@ -1642,8 +1980,8 @@ def report(state):
             print(f"Pending context: {clean(state['pending_budget_context'])} (restore missing inputs before recovery)")
     print(f"Queued follow-ups: {len(list((path / 'requests').glob('*.json')))} (delivered between turns)")
     if state.get("task_failures"):
-        print(f"Task failures reported: {state['task_failures']} cumulative; "
-              f"{state.get('turn_task_failures', 'unknown')} current turn; "
+        print(f"Command failures during the turn (attempts, not the final result): {state['task_failures']} cumulative; "
+              f"{state.get('turn_task_failures', 'unknown')} this turn; "
               f"{state.get('previous_turn_task_failures', 'unknown')} previous turn")
         for detail in state.get("task_failure_reasons", []):
             print(f"  - {clean(detail)}")
@@ -1888,6 +2226,7 @@ def doctor_checks(live=False):
     try:
         registry = root()
         lost = []
+        now = time.time()
         for child in registry.iterdir():
             if not child.is_dir() or not re.fullmatch(r"[0-9a-f]{12}", child.name):
                 continue
@@ -1896,11 +2235,31 @@ def doctor_checks(live=False):
             except (OSError, ValueError, KeyError):
                 continue
             if record.get("status") == "interrupted":
-                lost.append(record.get("id", child.name))
-        add("interrupted", not lost, False,
-            "no interrupted workers" if not lost else f"interrupted: {', '.join(sorted(lost))}")
+                lost.append((job_timestamp(record), record.get("id", child.name), record.get("label", "")))
+        lost.sort(reverse=True)
+        older = sum(now - stamp >= 86400 for stamp, _, _ in lost)
+        suffix = f"{older} older than 24h; run claive prune --interrupted"
+        detail = "interrupted: "
+        for stamp, identifier, label in lost[:5]:
+            remaining = 200 - len(detail) - len(suffix) - 2
+            age = short_age(now - stamp)
+            label_room = remaining - len(identifier) - len(age) - 2
+            if label_room < 1:
+                break
+            detail += f"{identifier} {clean(label)[:label_room]} {age}, "
+        detail = detail.rstrip(", ") + "; " + suffix
+        add("interrupted", not any(now - stamp < 86400 for stamp, _, _ in lost), False,
+            "no interrupted workers" if not lost else detail)
     except Exception as error:
         add("interrupted", True, False, f"registry unreadable: {error}"[:200])
+    try:
+        from claivelib import worktrees
+        current = worktrees.current()
+        total = sum(worktrees.size(item["path"]) for item in current)
+        old = sum(time.time() - item.get("at", time.time()) > 86400 for item in current)
+        add("worktrees", True, False, f"{len(current)} worktrees, {total} bytes, {old} older than 24h")
+    except Exception as error:
+        add("worktrees", True, False, f"worktree log unreadable: {error}"[:200])
     from claivelib import runtime
     checks.extend(runtime.doctor_checks())
     return checks
@@ -2016,6 +2375,8 @@ def parser():
         launch.add_argument("--project-file", help="override the team's project context for this launch")
         launch.add_argument("--enable-steering", action="store_true", help="opt into the duplex provider transport (Pi, Codex, Claude)")
         launch.add_argument("--checks-file", help="absolute JSON required-check manifest for parent verification")
+        launch.add_argument("--check", action="append", help="required check as NAME=COMMAND (repeatable)")
+        launch.add_argument("--fit-checked", action="store_true", help="skip delegation fit and scope reminders")
         launch.add_argument("--owned-path", action="append", help="workspace-relative allowed path or glob (repeatable)")
         launch.add_argument("--report", action="store_true", help="request a structured claive-report block")
         launch.add_argument("--reasoning-effort", "--effort", help="engine-specific effort; defaults to xhigh (Muse), max (Pi), xhigh (Claude) or xhigh (Codex)")
@@ -2025,6 +2386,7 @@ def parser():
         isolation.add_argument("--worktree", action="store_true")
         isolation.add_argument("--worktree-existing", help="resume a lane in its existing absolute worktree path")
         launch.add_argument("--worktree-base")
+        launch.add_argument("--worktree-setup", help="shell command run once in a new worktree")
         launch.add_argument("--web", action="store_true", help="compatibility flag; web is always on for Claude, Codex and Muse; Pi refuses it")
         launch.add_argument("--model")
         launch.add_argument("--session-id", help="reuse this engine's session ID with the same workspace and policy")
@@ -2139,6 +2501,20 @@ def parser():
     scope.add_argument("--reason", required=True)
     listing = commands.add_parser("list", help="list active workers and recent results")
     listing.add_argument("--json", action="store_true")
+    worktree = commands.add_parser("worktree", help="list and clean managed worktrees")
+    worktree_sub = worktree.add_subparsers(dest="worktree_action", required=True)
+    worktree_list = worktree_sub.add_parser("list")
+    worktree_list.add_argument("--json", action="store_true")
+    worktree_clean = worktree_sub.add_parser("clean")
+    worktree_clean.add_argument("--older-than", default="24h")
+    worktree_clean.add_argument("--dry-run", action="store_true")
+    worktree_clean.add_argument("--discard-changed", action="store_true")
+    worktree_clean.add_argument("--json", action="store_true")
+    prune = commands.add_parser("prune", help="remove old interrupted workers")
+    prune.add_argument("--interrupted", action="store_true", required=True)
+    prune.add_argument("--older-than", default="24h")
+    prune.add_argument("--dry-run", action="store_true")
+    prune.add_argument("--json", action="store_true")
     alias = commands.add_parser("alias", help="give workers persistent names, referenced as @name")
     alias_sub = alias.add_subparsers(dest="alias_action", required=True)
     alias_set = alias_sub.add_parser("set", help="bind a name to an existing worker")
@@ -2443,6 +2819,11 @@ def main(launcher=None):
         print(f"Closed channel {record['name']}: {channel_summary['close_reason']}; "
               f"{channel_summary['counts']['total']} messages; {channel_summary['duration']:.1f}s")
         return 0
+    elif args.action == "worktree":
+        return worktree_command(args.worktree_action, getattr(args, "older_than", "24h"),
+                                getattr(args, "dry_run", False), getattr(args, "discard_changed", False), args.json)
+    elif args.action == "prune":
+        return prune_interrupted(args.older_than, args.dry_run, args.json)
     elif args.action == "alias":
         from claivelib import aliases
         if args.alias_action == "set":

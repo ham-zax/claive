@@ -66,6 +66,21 @@ def update(name, worker=None, replace=False, output=None):
     return 0
 
 
+def remove_workers(workers):
+    """Remove bindings to deleted workers under the alias lock."""
+    from claivelib import cli
+    path = cli.root() / "aliases.json"
+    fd = os.open(path.with_suffix(".lock"), os.O_WRONLY | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data, dropped = _read(path)
+        if dropped:
+            print(f"warning: dropped invalid alias entries: {', '.join(dropped)}", file=sys.stderr)
+        retained = {name: worker for name, worker in data.items() if worker not in workers}
+        if retained != data or dropped:
+            cli.save(path, retained)
+
+
 def slug(text):
     """Turn a free-form label into a valid alias base name, or '' when nothing usable remains."""
     name = re.sub(r"[^a-z0-9_.-]+", "-", (text or "").lower())

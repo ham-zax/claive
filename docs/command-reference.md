@@ -20,7 +20,7 @@ A launch, queued request or completed process does not establish parent acceptan
 
 `run`, `start` and `open` share these options. Role values override engine
 config defaults. Explicit flags override role values. A read-only role stays
-read-only. Only Muse supports a model-step cap and managed worktrees.
+read-only. Only Muse supports a model-step cap.
 
 | Option | Meaning |
 |---|---|
@@ -36,14 +36,17 @@ read-only. Only Muse supports a model-step cap and managed worktrees.
 | `--project-file` | override the team's project context for this launch |
 | `--enable-steering` | opt into the duplex provider transport (Pi, Codex, Claude) |
 | `--checks-file` | absolute JSON required-check manifest for parent verification |
+| `--check` | required check as `NAME=COMMAND` (repeatable); combines with `--checks-file` |
+| `--fit-checked` | omit delegation fit and scope reminders |
 | `--owned-path` | workspace-relative allowed path or glob (repeatable) |
 | `--report` | request a structured claive-report block |
 | `--reasoning-effort`, `--effort` | Engine effort. Muse/Claude default xhigh, Pi max, Codex Luna max or Sol medium. Role/config defaults can override |
 | `--max-model-steps` | Optional positive Muse step cap. No default cap |
 | `--read-only` | Request the engine's read-only mechanism. Pi uses an instruction |
-| `--worktree` | Muse only. Create a linked worktree from the selected base |
+| `--worktree` | Create a linked worktree from the selected base |
 | `--worktree-existing` | resume a lane in its existing absolute worktree path |
-| `--worktree-base` | Muse base commit. Default HEAD |
+| `--worktree-base` | base commit. Default HEAD |
+| `--worktree-setup` | run a shell command once in the new worktree under the heavy lock |
 | `--web` | compatibility flag. web is always on for Claude, Codex and Muse. Pi refuses it |
 | `--model` | Engine model. Pins and config policy apply |
 | `--session-id` | reuse this engine's session ID with the same workspace and policy |
@@ -63,6 +66,14 @@ Claude, Codex and Muse always have web access. `--web` has no effect on them.
 Pi refuses `--web` and requests read-only behavior through prompt instructions.
 Codex steering/fork turns refuse `engines.codex.extra_args`.
 See [engine configuration](../README.md#per-host-engine-config).
+
+The config object `launch` accepts `start_timeout`, `git_timeout`, and
+`worktree_setup_timeout`, in seconds. The first two accept numbers from 1 to 600.
+The setup timeout accepts numbers from 1 to 3600 and defaults to 900 seconds.
+The default start timeout adapts to load, from 5 to 60 seconds. The Git timeout defaults to 30 seconds.
+
+`claive-memcap LIMIT --lock NAME [--lock-timeout S] -- COMMAND` holds a named lock
+while the command runs. A lock timeout exits 75.
 
 ## `run`
 
@@ -90,7 +101,38 @@ Options: [launch options](#launch-options).
 
 Exit codes: 0 after launch. Inspect the worker with `wait` for its outcome.
 
+If the supervisor is alive but has not confirmed its start, `start` prints a warning
+and returns 0. Run `claive show ID` before any relaunch.
+
 Example: `claive start --workspace /abs/repo --prompt-file /abs/task.md --turn-timeout 300`.
+
+## `prune`
+
+Remove interrupted workers older than the selected duration. Workers with a retained
+worktree stay in the registry. Aliases to removed workers are removed too.
+
+```text
+claive prune --interrupted [--older-than DUR] [--dry-run] [--json]
+```
+
+`--older-than` defaults to `24h`. Use a unit-suffixed duration such as `30m` or `2d`.
+`--dry-run` reports the selected workers without deleting them. `--json` prints JSON.
+Exit code: 0 on success.
+
+## `worktree`
+
+Claive creates worktrees only when a launch uses `--worktree`. Events are recorded
+in `worktrees.jsonl` in the Claive state directory.
+
+```text
+claive worktree list [--json]
+claive worktree clean [--older-than DUR] [--dry-run] [--discard-changed] [--json]
+```
+
+`list` shows logged worktrees, their job status, age, size, branch, changes and source.
+`clean` skips active workers and defaults to worktrees older than `24h`.
+Changed worktrees stay unless `--discard-changed` is set. `--dry-run` removes nothing.
+Exit code: 0 on success.
 
 ## `open`
 

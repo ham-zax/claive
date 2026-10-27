@@ -1,0 +1,13 @@
+# TASKS
+
+Workstream: parent feedback fixes (2026-10-27). Plan: `docs/plan-feedback-fixes-2026-10-27.md`.
+Run budget: 6 dispatches (T1-T3, T6, one review, one fix round). Answers to worker questions do not count.
+
+| id | status | depends | owner | acceptance | evidence |
+|---|---|---|---|---|---|
+| T1 | review | - | claive terra xhigh, worker dc4570bd6ad0 (@cfx-fixer) | plan T1 items 1-7; `tests/test_start_robustness.py` and T1 test command pass | Parent ran T1 test command: 57 tests OK (39.6 s). Diff read: items 1-7 present. Item 7 narrowed to `starting` workers (alias `-2` test). Worker saw one transient async failure on its first run. |
+| T2 | review | T1 | claive terra high (followup turn 3, dc4570bd6ad0) | plan T2 items 1-5; `tests/test_parent_ergonomics.py` and T2 test command pass | Parent ran T2 test command: 44 tests OK (17.4 s). Prune read under the risk rule: only 12-hex registry dirs, proven `interrupted`, older than limit; keeps worktrees; alias cleanup under lock. Item 5: engines emit no success event with a command, so only the header and reasons print. |
+| T3 | review | T2 | claive terra xhigh (followup) | plan T3 items 1-4; `tests/test_isolation_all_engines.py` and T3 test command pass | Parent ran T3 test command: 99 tests OK, 2 live Muse skips (40.3 s). Parent later fixed cancellation during setup or lock waits, quoted Git paths, and missing spawn identities. The affected suites passed 57 tests (24.5 s). |
+| T6 | review | T3 | claive terra high (followup), immediate parent review (destructive op) | plan T6 items 1-6; `tests/test_worktree_housekeeping.py` and T6 test command pass | Terra completed turn 7. Parent found and fixed cleanup risks for pending acceptance, failed Git removal, detached branches, changes after listing, changed read-only trees, and stale retained-worktree state. Parent ran T6 tests plus `test_features.py`: 72 tests OK, 2 live Muse skips (32 s). |
+| T4 | review | T6 | parent | skill, docs and config match the runtime; Muse disabled, Pi selected when unavailable; skillshare sync clean | Muse is disabled, and the orchestration picker selects Pi. `test_orch_picks.py`: 38 tests OK. Three Terra effort roles are configured. Skillshare synced 8 targets; both source files match the repository mirrors. Runtime installation is deferred to T5 so it records the final commit. |
+| T5 | in-progress | T4 | parent + Terra xhigh review | `just check` passes in main; one review, at most one fix round; install and push | Runtime changes integrated as `d8b4305`; the final suite and review are pending. |

@@ -46,9 +46,9 @@ that turn and keep the supervisor available.
 - Pi has no Muse filesystem/network sandbox. The instruction and working
   directory do not create an OS isolation boundary. Ownership checks find
   unauthorized changes after a turn.
-- `--max-model-steps`, `--output-schema`, `--web`, and worktree-management options
-  are rejected. Pi has no implicit step cap in this adapter. For an isolated lane,
-  create a worktree separately and supply its path as `--workspace`.
+- `--max-model-steps`, `--output-schema`, and `--web` are rejected. Pi has no
+  implicit step cap in this adapter. Use `--worktree` for a Claive-managed lane
+  or `--worktree-existing` for an existing worktree.
 - `engines.pi.extra_args` adds opt-in engine arguments. Claive refuses `--`
   and its owned flags. See the README config section.
 - Pi supports steering with `--enable-steering` and forks from idle reusable

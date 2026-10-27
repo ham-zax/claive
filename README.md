@@ -1,11 +1,11 @@
 # claive
 
-Harness-neutral coding-worker orchestration: any parent agent (Claude Code, Codex, or another harness that can run shell commands) can drive it. Muse Code is the default production engine and Pi the second engine. The generic worker core handles supervision, reusable turns, state, cancellation, logs, and the live terminal dashboard; Muse-specific command/event/usage behavior lives behind an engine adapter. Maintained source for Hamza's installation in `~/.local/bin`, `~/.codex/skills` and `~/.claude/skills`. Workers can also talk to each other: name reusable workers (`claive alias set NAME ID`) and run `claive conversation start @a @b --message-file F` to pass replies between them across engines and models (see [Conversations](#conversations-across-engines-and-models)). Commands: `claive` (worker manager), `claive-worker` (reusable-worker launcher), `claive-orch` (arbiter), and `claive-codex` (opens Codex beside the worker dashboard).
+Harness-neutral coding-worker orchestration for Claude Code, Codex, and shell parents. The worker core handles supervision, reusable turns, state, cancellation, logs, and the terminal dashboard. Engine adapters support Pi, Codex, Claude, and Muse, subject to host policy. Run `claive engines` to see available engines, models, and efforts. This host currently disables Muse and uses Pi for the verifier-driven implementer. Commands: `claive` (worker manager), `claive-worker` (reusable-worker launcher), `claive-orch` (arbiter), and `claive-codex` (Codex with a worker dashboard).
 
 Pi is available explicitly with `--engine pi`, using only `opencode2api`. Its initial model is
 `muse-spark-1.3-contributor-free`; new Pi workers inherit the last explicitly selected
 Pi model when `--model` is omitted. See [Pi setup, sessions, supported options and verification](docs/pi-engine.md).
-Muse remains the default engine. Use `claive-worker --engine pi` to select Pi.
+The built-in default is Muse when no host configuration selects another engine. This host selects Codex and disables Muse.
 
 Claude Code is available with `--engine claude` (headless `claude -p`, binary `~/.local/bin/claude` or
 `CLAUDE_WORKER_BINARY`). It defaults to `claude-haiku-5-5`. The claive config decides which models it may use:
@@ -14,7 +14,7 @@ timeout fallback is refused. Efforts are `low` to `max` (default `xhigh`). Conte
 at a warn and a stop limit claive asks the worker for a handoff and continues in a new session
 (see [docs/design-budget-mode.md](docs/design-budget-mode.md)). Claude's own compaction is the
 fallback at 105k (Haiku) or 155k (other models) tokens with budget mode off; `--max-model-steps`
-and worktree isolation are unsupported. `--output-schema /abs/schema.json` is passed as Claude's `--json-schema`, so the
+is unsupported. `--output-schema /abs/schema.json` is passed as Claude's `--json-schema`, so the
 result is the validated JSON object. `--enable-steering` switches to stream-json input for live steering
 (see [docs/steering.md](docs/steering.md)). Workers use `--tools default`.
 Write turns use `--permission-mode bypassPermissions`. Read-only turns use
@@ -36,8 +36,7 @@ so the job's session ID is replaced by it once the thread starts. Skills load by
 Workers omit the user's `config.toml` unless `engines.codex.user_config` is `true`
 or `CLAIVE_CODEX_USE_USER_CONFIG=1`. This opt-in includes configured MCP servers.
 Exec turns retain `--ignore-rules`. Read-only workers
-use the read-only sandbox, writers run with `--dangerously-bypass-approvals-and-sandbox` by default (`CLAIVE_CODEX_YOLO=0` restores the `workspace-write` sandbox with approvals off; read-only workers are always sandboxed). `--max-model-steps`, `--output-schema` and
-worktree isolation are unsupported.
+use the read-only sandbox, writers run with `--dangerously-bypass-approvals-and-sandbox` by default (`CLAIVE_CODEX_YOLO=0` restores the `workspace-write` sandbox with approvals off; read-only workers are always sandboxed). `--max-model-steps` and `--output-schema` are unsupported.
 
 Codex workers with `--enable-steering` use a separate App Server transport for
 turn-bound in-flight instructions; see [steering.md](docs/steering.md). Ordinary
@@ -254,7 +253,9 @@ claive serve --stop | --resume | --status     # stop switch, clear it, show stat
 
 On a server there is no parent session to launch, wait for, and answer workers, so `claive serve` plays that role for a durable queue in `$CLAIVE_DIR/goals/`. Each goal runs as an ordinary reusable worker (`claive open --detach --report`) on any engine, so `claive show/logs/wait` work on it; goals are read-only unless added with `--write` and must pass the `workspaces` allowlist both when added and at launch. One goal runs at a time by default (`--max-parallel`). A worker question parks the goal, records the question, posts a `goal` event to `claive inbox`, and the queue moves on; `claive goal answer` resumes the same worker, or the same session in a new worker if that worker was stopped. A goal past its wall-clock budget (default 2h; time parked does not count) is cancelled and marked `timed_out`. Quota, protocol and launch failures pause all launches with exponential backoff (30 s doubling to 30 min); a failed goal retries after a growing delay up to `--max-attempts` (default 3); launches refused by config or the allowlist fail at once. The stop switch `$CLAIVE_DIR/supervisor/stop` (set by `claive serve --stop`) is checked between turns: serve cancels its workers, requeues running goals, and exits 0, and nothing launches until `--resume`. SIGTERM leaves workers running and the next serve adopts or harvests them. Logs: `$CLAIVE_DIR/supervisor/serve.log` and stdout. A lock allows one serve per state directory. [systemd/claive-serve.service](systemd/claive-serve.service) is a user unit (`KillMode=process`, `Restart=on-failure`, explicit `PATH` and `PI_WORKER_BINARY`) with install steps in its header.
 
-The default Muse engine supplies `--workspace`, `--trust-workspace` and `--json`, and keeps Muse's sandbox enabled. Write turns also pass `--disable-approval`. Read-only turns use `--permission-profile :read-only --disable-write`, keep the shell on, and omit `--disable-approval`. Web tools stay on. Claive passes `--max-model-steps` only when a flag or role sets a cap. `--worktree` isolates the worker in a linked worktree at `--worktree-base` (default `HEAD`; uncommitted changes are not included). Muse 1.4.3 cannot create one itself (its sandbox makes `.git` read-only before `-w create` runs `git worktree add`), so claive creates it in the worker's state directory (`$CLAIVE_DIR/<id>/worktree`) and passes it as `-w existing`. It lasts for all turns of a reusable worker. Read-only workers get a detached worktree; writers get branch `claive/<id>`. When the worker closes, is cancelled or finishes, claive removes the worktree (and branch) unless a writer left changes (including untracked and ignored files other than tool caches such as `__pycache__` and dependency trees such as `node_modules` or `.venv`) or commits, or git refuses the removal (a locked worktree); then it keeps them, prints the `git worktree remove` command and records `retained_worktree` in `show --json`. A supervisor killed with SIGKILL skips this cleanup. Use `--worktree-existing /absolute/worktree` for a worktree you manage yourself. File ownership must remain disjoint. Run heavy builds and test suites one at a time.
+Every engine accepts the opt-in `--worktree` flag. Claive creates the worktree at `$CLAIVE_DIR/<id>/worktree` from `--worktree-base` (default `HEAD`) and warns about uncommitted source paths. Read-only workers use a detached worktree; writers use branch `claive/<id>`. The optional `--worktree-setup CMD` runs once under the shared heavy lock. Claive keeps changed worktrees, worktrees awaiting parent acceptance, and worktrees Git cannot remove. It appends lifecycle events to `worktrees.jsonl`. Use `claive worktree list` and `claive worktree clean --dry-run` to inspect cleanup candidates. `clean` skips active workers and pending acceptance; `--discard-changed` permits removal of changed candidates. Use `--worktree-existing /absolute/worktree` for a worktree you manage yourself. Serialize heavy jobs with `claive-memcap 1500M --lock heavy -- COMMAND`.
+
+When enabled, the Muse adapter supplies `--workspace`, `--trust-workspace` and `--json`, and keeps its sandbox enabled. Write turns also pass `--disable-approval`. Read-only turns use `--permission-profile :read-only --disable-write`, keep the shell on, and omit `--disable-approval`. Claive passes `--max-model-steps` only when a flag or role sets a cap.
 
 Web tools stay on. `--web` is accepted and has no effect on Muse. `--model` accepts only `muse-spark-1.3-contributor`. Other options include `--output-schema` and `--session-id`. `--no-session-log` is available only for deliberate single-turn runs, and is rejected for reusable workers. Run `claive-worker --help` for the full list. `--provider echo` is for transport checks and does not contact a live model; Muse does not accept reasoning effort with that provider, so the launcher omits model and effort options in that case.
 
@@ -272,7 +273,7 @@ Meta [prompt caching](https://dev.meta.ai/docs/prompt-caching) automatically reu
 
 ## Verified orchestration (`claive-orch`)
 
-`claive-orch` is a deterministic arbiter that sits on top of the worker manager. It implements a depth-first escalation ladder for verifier-gated coding work. Muse implements. A Pi critic from a different model family reviews the diff and the verifier output. The same Muse session then corrects the work. The verifier decides each round: a better or equal score is checkpointed as a commit on `orch/<run>/<lane>`, and a worse score is reverted. Only after a stall does arm D add one deliberately diverse second lane. The parent (Claude Code or Codex) asks `claive-orch next RUN` and performs exactly the one action it names. Models propose; deterministic code disposes.
+`claive-orch` is a deterministic arbiter for verifier-gated coding work. On this host, Pi implements because Muse is disabled. A Pi critic from another model family reviews the diff and verifier output. The implementer then corrects the work. The verifier decides each round: a better or equal score is checkpointed on `orch/<run>/<lane>`, and a worse score is reverted. Only after a stall does arm D add a different second lane. The parent asks `claive-orch next RUN` and performs the action it names.
 
 ```bash
 claive-orch init --repo /abs/repo --task-file /abs/task.md --verify 'python3 -m pytest -q' --arm D
@@ -345,7 +346,7 @@ On an explicit Muse subscription-quota exhaustion, the manager records the failu
 | `tests/test_orch.py` | Arbiter ladder, guards, and reporting checks |
 | `tests/test_features.py`, `tests/test_async.py` | Worker contract and async (inbox, batch, mission) checks |
 
-Requirements: Linux with Python 3. The default production engine requires Muse at `~/.local/bin/muse`; `MUSE_WORKER_BINARY` can select another absolute Muse executable. The combined terminal view also requires tmux and Codex on PATH. No third-party Python packages are required by the tools or their checks.
+Requirements: Linux with Python 3 and the binary for each enabled engine. `MUSE_WORKER_BINARY` can select a Muse executable when Muse is enabled. The combined terminal view also requires tmux and Codex on PATH. No third-party Python packages are required by the tools or their checks.
 
 Edit the two active `SKILL.md` files in the Skillshare source, run `skillshare sync`, then copy them into `skills/` here so the mirror matches (`install.sh` without `--runtime-only` fails while they differ). For CLI binaries, use:
 

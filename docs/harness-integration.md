@@ -71,7 +71,8 @@ be answered; start a new one with the decision included.
 
 ## Return to a named specialist
 
-After opening a reusable worker, bind it with `claive alias set backend ID`.
+Pass `--alias backend` or `--label backend` at launch to bind a reusable worker.
+If the launch left it unnamed, use `claive alias set backend ID`.
 Any parent using the same `$CLAIVE_DIR` can discover it with
 `claive alias list --json`, inspect it with `claive show @backend --json`, and
 queue related work with `claive followup @backend --prompt-file /abs/task.md`.
@@ -357,6 +358,9 @@ claive open --workspace /abs/repo --prompt-file /abs/task.md \
 
 The checks file is an array of objects such as
 `{"name":"analyzer","command":["systemd-analyze","verify","service.timer"],"required":true,"timeout":60}`.
+For a simple check, use `--check 'unit=python3 -m unittest'` instead. Repeat
+`--check` to add checks or combine it with a checks file. Use `--fit-checked`
+when the parent already assessed delegation fit and scope.
 Derive expected results from the requirement or independent data. Do not use the
 program's own output as the expected result.
 Commands use argv arrays, run from fresh scratch copies, and record output,
@@ -375,7 +379,11 @@ worktrees for writers. Muse and Codex provide native read-only restrictions.
 Pi requests read-only behavior from the model and supplies no enforcement.
 Concurrent writers with declared ownership must use separate worktrees.
 Managed worktrees with a verification/ownership contract are retained for the
-parent to verify and integrate; remove them after that workflow ends.
+parent to verify and integrate; cleanup skips them while acceptance is pending.
+All engines accept `--worktree` and `--worktree-setup`. The latter runs once
+under the heavy lock. Use `claive worktree list` and `claive worktree clean
+--dry-run` to inspect logged trees. Use `claive prune --interrupted` to remove
+old interrupted jobs after their worktrees are cleared.
 
 ```sh
 claive verify ID

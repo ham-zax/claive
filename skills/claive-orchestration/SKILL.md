@@ -30,8 +30,8 @@ The TTC experiment is deferred and is not part of this workflow.
   (`claive open --detach`) and send one small task with one checkable deliverable per
   turn. Read its summary, check the artifact, then `claive followup` the next task.
 - **Bound every turn.** Pass `--turn-timeout`. Make the first wait short
-  (`claive wait ID --timeout 300`); if it prints `Reasoning-heavy` or no file or report
-  has appeared, cancel and narrow the task or lower the effort.
+  (`claive wait ID --timeout 300`). If it prints `Reasoning-heavy` or no file or report
+  has appeared, ask the worker for a summary first. Cancel only if it cannot answer.
 - **No suitable authorized verifier?** Use direct work or plain `claive` delegation
   with focused evidence review. Do not introduce tests, scripts, or extra scope solely
   to force a task through the arbiter. A model review is not executable verification.
@@ -72,7 +72,9 @@ Treat pause guidance and intermediate handoffs as recovery information, never as
 
 **Check `claive engines [--json]` before choosing an engine.** It lists each engine's
 enabled state, the user's reason, default and disabled models and efforts, and steering
-transport. A launch the user disabled is refused: do not retry or work around it.
+transport. Use it to map dictated model and effort names. Muse is disabled on this
+host for now; use Pi for the `claive-orch` implementer. A disabled launch is refused:
+do not retry or work around it.
 
 ## Capability map
 
@@ -111,9 +113,8 @@ and `docs/command-reference.md` for the exact options.
 
 | Role | Default | Why |
 |---|---|---|
-| Implementer (lane a) | Muse `muse-spark-1.3-contributor` (effort `xhigh`; `max` for very complicated tasks) | Workhorse: follows instructions precisely |
-| Implementer fallback (Muse quota exhausted only) | Pi `muse-spark-1.3-contributor-free`, effort `max` | Same family through the free gateway; pre-approved by the user |
-| Critic (read-only) | Pi, in this order: `mimo-v2.6-flash-free`, `big-pickle`, `space-bunny-free`; rarely `longcat-2.5-preview-free` | A different family sees different blind spots; Muse is a weak critic of itself |
+| Implementer (lane a) | Pi `muse-spark-1.3-contributor-free`, effort `max` | Pi is the available implementer while Muse is disabled |
+| Critic (read-only) | Pi, in this order: `mimo-v2.6-flash-free`, `big-pickle`, `space-bunny-free`; rarely `longcat-2.5-preview-free` | Select a family different from the implementer |
 | Second candidate (lane b, arm D) | Pi, from the same list, a family different from lane a and the last critic, **plus a different strategy** | Diversity must be deliberate |
 | Reviewer (tie only) | Pi read-only, a different family from both lanes if possible | Called at most once |
 | Verifier | The verify command | Final judge |
@@ -125,7 +126,10 @@ used in the run or failing. `muse-spark-1.3-free` and
 never use them as critic or lane b against Muse.
 
 **Reasoning effort.** Pi models are free: run them at `max` (the Pi engine default;
-Pi clamps it to each model's highest level). Codex (`gpt-6.1-sol`) takes its effort
+Pi clamps it to each model's highest level). For Codex `gpt-6.1-terra`, use `xhigh`
+for complex or design work, `high` for specified mechanical work, and `medium` for
+low-stakes tasks. The host config provides `terra-complex`, `terra-mechanical`,
+and `terra-lowstakes` roles. Codex (`gpt-6.1-sol`) takes its effort
 from the kind of turn: `xhigh` for planning, logic or design debates and other important
 high-level discussion; `medium` (used when no effort is passed) or `low` for mechanical
 implementation where the brief states the exact steps; `high` for complex implementation
@@ -139,7 +143,7 @@ pass `--turn-timeout` and check the first result for that failure.
 **Pi rules.** Always pass `--model` (an explicit model also becomes Pi's global
 default, and omitting it inherits whatever was used last), plus `--engine pi
 --provider opencode2api`. Pi has no `--max-model-steps`, `--output-schema`,
-`--web`, or worktree flags. Both modes use `--tools '*'`, including bash.
+or `--web`. Pi supports managed worktrees. Both modes use `--tools '*'`, including bash.
 Read-only adds an instruction before and after the task, not a write barrier.
 Pi passes `--offline --no-extensions --no-prompt-templates --no-themes --no-approve`.
 Skills, MCP and context files load. The gateway models are
@@ -160,7 +164,8 @@ See `docs/command-reference.md` for command-specific codes.
 - **Launch without blocking:** `claive start ...` (one turn),
   `claive open --detach ...` (reusable; returns at once),
   `claive batch start PLAN.json` (parallel lanes of stages). Never use `&`,
-  `nohup`, or `sleep` polling loops.
+  `nohup`, or `sleep` polling loops. If start is not confirmed but the supervisor
+  is alive, inspect `claive show ID` before any relaunch.
 - **Name every worker you launch:** pass `--alias NAME` at launch, or pass a
   `--label` and the launch derives a name from the label. The launch prints
   `Alias: @NAME`. A taken `--alias` fails the launch. A taken derived name
@@ -193,6 +198,12 @@ See `docs/command-reference.md` for command-specific codes.
   Repeated `--context-file` adds up to ten bounded UTF-8 layers to the first turn.
   `--report` requests it without a role. `--output-schema /abs/schema.json` (Muse,
   Claude) makes the result schema-shaped JSON.
+- **Checks and worktrees:** add required checks with repeatable `--check NAME=CMD`
+  or `--checks-file`. Use `--fit-checked` after assessing delegation fit. Every
+  engine supports opt-in `--worktree` and one-time `--worktree-setup CMD`.
+  Inspect logged trees with `claive worktree list` and `claive worktree clean --dry-run`.
+  Clean skips active workers and pending acceptance. Use `claive prune --interrupted`
+  for old interrupted jobs after their worktrees are cleared.
 - Workers cannot launch claive workers (`CLAIVE_WORKER_ID` guard).
   Claude native subagents remain available through its default tools.
 
@@ -232,7 +243,7 @@ The `claive list` tag `[exit≠0 N turn/M total: ...]` counts nonzero tool exits
 run before a fix. The tag is not the outcome: read the report before you judge a worker.
 
 For consequential work, declare checks and file ownership at launch
-(`--checks-file /abs/checks.json`, repeated `--owned-path`), then `claive verify ID`
+(`--check NAME=CMD` or `--checks-file /abs/checks.json`, repeated `--owned-path`), then `claive verify ID`
 after the turn settles and `claive accept ID` as the parent; nothing is accepted
 automatically. Rules that matter:
 
@@ -240,8 +251,7 @@ automatically. Rules that matter:
   program's own output as the expected result.
 - Declare mandatory analyzers individually: a suite exiting 0 while skipping one
   does not prove it ran.
-- One writer per isolated worktree (Muse: `--worktree`; other engines: an
-  externally managed worktree as `--workspace`).
+- One writer per isolated worktree. Every engine supports `--worktree`.
 - A blocked or unrun mandatory check keeps acceptance pending; only an explicitly
   authorized parent exception (`--exception 'reason'`) resolves it. Failed mandatory
   checks cannot be excepted. Never invent an exception to obtain a green status.
@@ -270,7 +280,7 @@ interrupting it. IDs accept a unique 4..11 character prefix.
 
 **Workers talking to each other.** When two or more perspectives should react to each
 other's reasoning (design debate, proposer/critic rounds, cross-checking a diagnosis),
-open reusable workers, name them with `claive alias set NAME ID`, and run
+open reusable workers with `--alias NAME` or `--label NAME`, and run
 `claive conversation start @a @b --message-file /abs/topic.md --rounds 2 --timeout 300
 --json`. Each reply reaches the next worker as evidence, never as an instruction or a
 grant of permissions. Not for independent subtasks (use a batch) or anything with an
@@ -317,8 +327,8 @@ unverifiable chores, use plain `claive open` workers, each in its own worktree.
 
 - One writer per worktree. Read-only workers may share.
 - No fixed cap on concurrent workers (the models run remotely), but run **one heavy
-  job at a time** (tests, builds, verifiers), capped with `claive-memcap <N>G -- CMD`
-  or `systemd-run --user --scope -q -p MemoryMax=<N>G -p MemorySwapMax=0 -- CMD`.
+  job at a time** (tests, builds, verifiers), with `claive-memcap <N>G --lock heavy -- CMD`.
+  Apply the lock to the heavy command, not to a Claive launch that runs worktree setup.
   Check `uptime` first, re-run timings taken under load, and kill only processes you
   started.
 - Give each worker its scope, the files it owns, "do not commit, do not delegate,

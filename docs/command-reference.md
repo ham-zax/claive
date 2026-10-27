@@ -40,7 +40,7 @@ read-only. Only Muse supports a model-step cap.
 | `--fit-checked` | omit delegation fit and scope reminders |
 | `--owned-path` | workspace-relative allowed path or glob (repeatable) |
 | `--report` | request a structured claive-report block |
-| `--reasoning-effort`, `--effort` | Engine effort. Muse/Claude default xhigh, Pi max, Codex Luna max or Sol medium. Role/config defaults can override |
+| `--reasoning-effort`, `--effort` | Engine effort. Muse/Claude default xhigh, Pi max, Codex Terra xhigh, Luna max, or Sol medium. Role/config defaults can override |
 | `--max-model-steps` | Optional positive Muse step cap. No default cap |
 | `--read-only` | Request the engine's read-only mechanism. Pi uses an instruction |
 | `--worktree` | Create a linked worktree from the selected base |
@@ -131,7 +131,8 @@ claive worktree clean [--older-than DUR] [--dry-run] [--discard-changed] [--json
 
 `list` shows logged worktrees, their job status, age, size, branch, changes and source.
 `clean` skips active workers and defaults to worktrees older than `24h`.
-Changed worktrees stay unless `--discard-changed` is set. `--dry-run` removes nothing.
+Changed worktrees stay unless `--discard-changed` is set. Worktrees awaiting
+parent acceptance stay even with that flag. `--dry-run` removes nothing.
 Exit code: 0 on success.
 
 ## `open`

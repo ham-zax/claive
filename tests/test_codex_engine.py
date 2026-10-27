@@ -73,10 +73,20 @@ class CodexChecks(unittest.TestCase):
                     self.engine.validate_launch(dict(launch, model=model))
                 with self.assertRaisesRegex(ValueError, "locked"):
                     self.engine.build_command(self.request(model=model))
-        for effort in ("high", "xhigh", "medium"):
+        for effort in ("low", "high", "xhigh", "ultra"):
             with self.subTest(effort=effort):
                 with self.assertRaisesRegex(ValueError, "locked"):
                     self.engine.build_command(self.request(model="gpt-6-luna", reasoning_effort=effort))
+
+    def test_luna_accepts_medium_and_max(self):
+        for effort in ("medium", "max"):
+            for steering in (False, True):
+                with self.subTest(effort=effort, steering=steering):
+                    command = self.engine.build_command(
+                        self.request(model="gpt-6-luna", reasoning_effort=effort, steering=steering))
+                    flag = "--model" if steering else "-m"
+                    self.assertEqual(command[command.index(flag) + 1], "gpt-6-luna")
+                    self.assertIn(effort if steering else f'model_reasoning_effort="{effort}"', command)
 
     def test_sol_runs_at_low_to_xhigh_only(self):
         launch = dict(self.engine.resolve_launch(model="gpt-6.1-sol"), binary=str(self.binary))

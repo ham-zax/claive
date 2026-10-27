@@ -14,7 +14,7 @@ CODEX_MODEL = "gpt-6.1-terra"
 CODEX_PROVIDER = "openai"
 CODEX_EFFORT = "xhigh"
 # Efforts each allowed model accepts.
-CODEX_EFFORTS = {"gpt-6-luna": ("max",), "gpt-6.1-sol": ("low", "medium", "high", "xhigh"),
+CODEX_EFFORTS = {"gpt-6-luna": ("medium", "max"), "gpt-6.1-sol": ("low", "medium", "high", "xhigh"),
                  CODEX_MODEL: ("low", "medium", "high", "xhigh", "max", "ultra")}
 # Effort for a turn that names a model but no effort; other models keep the engine default.
 CODEX_DEFAULT_EFFORTS = {"gpt-6-luna": "max", "gpt-6.1-sol": "medium"}

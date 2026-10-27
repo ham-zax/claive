@@ -233,3 +233,5 @@ Test command: `tests/test_worktree_housekeeping.py tests/test_isolation_all_engi
 Integrate the reviewed work, run `just check` under the lock, run one independent read-only
 review (Terra `xhigh`), apply at most one fix round, install the final runtime, then report.
 The user also requested a push after verification.
+The user later requested a live `gpt-6-luna` test at `medium` after installation.
+The Codex model catalog lists that effort. Keep Luna's default at `max`.

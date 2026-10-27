@@ -23,7 +23,7 @@ Select an engine deliberately and follow the parent's current authorization poli
 | `muse` | Disabled on this host for now. When enabled, pinned to `muse-spark-1.3-contributor` |
 | `pi` | `--engine pi --provider opencode2api`; models selected explicitly or inherited; managed worktrees supported; no `--web` or model-step cap |
 | `claude` | `--engine claude`; default `claude-haiku-5-5`; managed worktrees supported; no model-step cap; output schema and steering supported |
-| `codex` | `--engine codex`; `gpt-6.1-terra` at `low` through `ultra` (default `xhigh`), `gpt-6-luna` at `max`, or `gpt-6.1-sol` at `low` through `xhigh` (default `medium`); managed worktrees supported; no output schema or model-step cap |
+| `codex` | `--engine codex`; `gpt-6.1-terra` at `low` through `ultra` (default `xhigh`), `gpt-6-luna` at `medium` or `max` (default `max`), or `gpt-6.1-sol` at `low` through `xhigh` (default `medium`); managed worktrees supported; no output schema or model-step cap |
 
 For Claude handoffs, exit-3 recovery, or an unanswered `ask` across sessions, follow
 **Claude budget recovery** in `claive-orchestration`.

@@ -164,12 +164,12 @@ class EnginePolicyChecks(unittest.TestCase):
     def test_engines_command_reports_the_models(self):
         self.policy(codex={"models": {"gpt-6-luna": {}, "gpt-6.1-sol": {"efforts": ["low", "xhigh"]}}})
         rows = {row["engine"]: row for row in json.loads(self.cli("engines", "--json").stdout)["engines"]}
-        self.assertEqual(rows["codex"]["models"], {"gpt-6-luna": ["max"], "gpt-6.1-sol": ["low", "xhigh"]})
+        self.assertEqual(rows["codex"]["models"], {"gpt-6-luna": ["medium", "max"], "gpt-6.1-sol": ["low", "xhigh"]})
         efforts = ["low", "medium", "high", "xhigh", "max"]
         self.assertEqual(rows["claude"]["models"], {model: efforts for model in
                          ("claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1")})
         self.assertIsNone(rows["pi"]["models"])
-        self.assertIn("models gpt-6-luna[max], gpt-6.1-sol[low,xhigh]", self.cli("engines").stdout)
+        self.assertIn("models gpt-6-luna[medium,max], gpt-6.1-sol[low,xhigh]", self.cli("engines").stdout)
 
     def test_engines_command_reports_the_policy(self):
         self.policy(claude={"enabled": False, "reason": "paused"},

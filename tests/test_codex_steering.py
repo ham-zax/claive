@@ -21,7 +21,7 @@ FIXTURE = '''#!/usr/bin/env python3
 import json,os,sys
 THREAD="01a12e77-d81b-7c61-8ceb-22cbea15eb32"
 TURN="01a12e77-d81b-7c61-8ceb-22cbea15eb33"
-MODEL=os.environ.get("CODEX_FIXTURE_MODEL","gpt-6-luna")
+MODEL=os.environ.get("CODEX_FIXTURE_MODEL","gpt-6.1-terra")
 assert not any("project_doc_max_bytes" in arg for arg in sys.argv)
 if "CODEX_FIXTURE_USER_CONFIG" in os.environ:
  from pathlib import Path
@@ -96,11 +96,11 @@ class CodexSteeringChecks(unittest.TestCase):
             time.sleep(0.03)
         self.fail(f"Codex app server turn did not start: {state}")
 
-    def test_sol_without_an_effort_runs_at_medium(self):
-        for model, effort in (("gpt-6-luna", "max"), ("gpt-6.1-sol", "medium")):
+    def test_default_effort_for_each_codex_model(self):
+        for model, effort in (("gpt-6.1-terra", "xhigh"), ("gpt-6-luna", "max"), ("gpt-6.1-sol", "medium")):
             with self.subTest(model=model):
                 self.env["CODEX_FIXTURE_MODEL"] = model
-                extra = () if model == "gpt-6-luna" else ("--model", model)
+                extra = () if model == "gpt-6.1-terra" else ("--model", model)
                 state = json.loads(self.cli("show", self.launch("start", *extra), "--json").stdout)
                 self.assertEqual((state["model"], state["reasoning_effort"]), (model, effort))
                 self.assertEqual(state["command"][state["command"].index("--effort") + 1], effort)

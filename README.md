@@ -30,7 +30,7 @@ Live check, 2026-10-15: `ExitPlanMode` is unavailable in `--print` mode.
 The model refused writes itself, so that check did not prove a harness-level write block.
 
 Codex is available with `--engine codex` (`codex exec --json`, binary from `CODEX_WORKER_BINARY` or the nvm install).
-It is strictly locked to these model and reasoning-effort pairs: `gpt-6-luna` at `max` (the default), and `gpt-6.1-sol` at `low`, `medium`, `high` or `xhigh` (`--model gpt-6.1-sol` with no effort runs at `medium`; `max` and `ultra` are refused for it). Any other `--model` or `--reasoning-effort` is refused.
+The default Codex model is `gpt-6.1-terra` at `xhigh`. Terra supports `low`, `medium`, `high`, `xhigh`, `max` and `ultra`. `gpt-6-luna` supports `max` only, and `gpt-6.1-sol` supports `low` through `xhigh` and defaults to `medium`. Any other `--model` or `--reasoning-effort` is refused.
 Compaction is left at Codex's own behaviour. Codex chooses its own thread ID,
 so the job's session ID is replaced by it once the thread starts. Skills load by default.
 Workers omit the user's `config.toml` unless `engines.codex.user_config` is `true`

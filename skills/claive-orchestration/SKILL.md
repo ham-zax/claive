@@ -45,7 +45,7 @@ The TTC experiment is deferred and is not part of this workflow.
 
 `claive` runs ordinary bounded tasks on `--engine muse|pi|claude|codex`. The runtime
 pins Muse to `muse-spark-1.3-contributor` and Codex to
-`gpt-6-luna` at `max` (or `gpt-6.1-sol` at `low`, `medium`, `high` or `xhigh`; `medium` when no effort is passed); Pi uses `opencode2api` and its selected model.
+`gpt-6.1-terra` at `low` through `ultra` (default `xhigh`), `gpt-6-luna` at `max`, or `gpt-6.1-sol` at `low` through `xhigh` (default `medium`); Pi uses `opencode2api` and its selected model.
 Claude defaults to `claude-haiku-5-5`; `engines.claude.models` in the claive config decides
 which Claude models are allowed. Claude context budget mode is on by default: at its stop limit
 claive denies the worker's tool calls (a PreToolUse hook; the denied tool error is expected), the

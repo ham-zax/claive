@@ -58,14 +58,14 @@ class CodexChecks(unittest.TestCase):
 
     def test_registry_resolves_the_engine(self):
         self.assertIsInstance(get_engine("codex"), CodexEngine)
-        self.assertEqual(self.engine.default_reasoning_effort, "max")
-        for model, effort in ((None, "max"), ("gpt-6-luna", "max"), ("gpt-6.1-sol", "medium")):
+        self.assertEqual(self.engine.default_reasoning_effort, "xhigh")
+        for model, effort in ((None, "xhigh"), ("gpt-6-luna", "max"), ("gpt-6.1-sol", "medium"), ("gpt-6.1-terra", "xhigh")):
             with self.subTest(model=model):
                 self.assertEqual(self.engine.default_effort_for(model), effort)
 
     def test_model_and_effort_are_locked(self):
         launch = dict(self.engine.resolve_launch(), binary=str(self.binary))
-        self.assertEqual(launch["model"], "gpt-6-luna")
+        self.assertEqual(launch["model"], "gpt-6.1-terra")
         self.engine.validate_launch(launch)
         for model in ("gpt-5.6-luna", "gpt-6-sol", None):
             with self.subTest(model=model):
@@ -76,7 +76,7 @@ class CodexChecks(unittest.TestCase):
         for effort in ("high", "xhigh", "medium"):
             with self.subTest(effort=effort):
                 with self.assertRaisesRegex(ValueError, "locked"):
-                    self.engine.build_command(self.request(reasoning_effort=effort))
+                    self.engine.build_command(self.request(model="gpt-6-luna", reasoning_effort=effort))
 
     def test_sol_runs_at_low_to_xhigh_only(self):
         launch = dict(self.engine.resolve_launch(model="gpt-6.1-sol"), binary=str(self.binary))
@@ -98,6 +98,20 @@ class CodexChecks(unittest.TestCase):
                     self.engine.build_command(self.request(model="gpt-6.1-sol", reasoning_effort=effort))
                 with self.assertRaisesRegex(ValueError, "locked"):
                     self.engine.build_command(self.request(model="gpt-6.1-sol", reasoning_effort=effort, steering=True))
+
+    def test_terra_launches_with_supported_efforts(self):
+        model = "gpt-6.1-terra"
+        self.engine.validate_launch(dict(self.engine.resolve_launch(model=model), binary=str(self.binary)))
+        for effort in ("low", "medium", "high", "xhigh", "max", "ultra"):
+            with self.subTest(effort=effort):
+                for steering in (False, True):
+                    command = self.engine.build_command(
+                        self.request(model=model, reasoning_effort=effort, steering=steering))
+                    flag = "--model" if steering else "-m"
+                    self.assertEqual(command[command.index(flag) + 1], model)
+                    self.assertIn(effort if steering else f'model_reasoning_effort="{effort}"', command)
+        with self.assertRaisesRegex(ValueError, "locked"):
+            self.engine.build_command(self.request(model=model, reasoning_effort="invalid"))
 
     def test_unsupported_options_are_rejected(self):
         launch = dict(self.engine.resolve_launch(), binary=str(self.binary))

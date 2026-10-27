@@ -10,13 +10,14 @@ from claivelib.engine import SteeringCapability, WorkerEngine
 from claivelib.config import engine_policy
 from claivelib.state import launch_config, session_id
 
-CODEX_MODEL = "gpt-6-luna"
+CODEX_MODEL = "gpt-6.1-terra"
 CODEX_PROVIDER = "openai"
-CODEX_EFFORT = "max"
-# Efforts each allowed model accepts: Luna only at max; Sol at low to xhigh, never max or ultra.
-CODEX_EFFORTS = {CODEX_MODEL: (CODEX_EFFORT,), "gpt-6.1-sol": ("low", "medium", "high", "xhigh")}
+CODEX_EFFORT = "xhigh"
+# Efforts each allowed model accepts.
+CODEX_EFFORTS = {"gpt-6-luna": ("max",), "gpt-6.1-sol": ("low", "medium", "high", "xhigh"),
+                 CODEX_MODEL: ("low", "medium", "high", "xhigh", "max", "ultra")}
 # Effort for a turn that names a model but no effort; other models keep the engine default.
-CODEX_DEFAULT_EFFORTS = {"gpt-6.1-sol": "medium"}
+CODEX_DEFAULT_EFFORTS = {"gpt-6-luna": "max", "gpt-6.1-sol": "medium"}
 
 
 def default_binary():

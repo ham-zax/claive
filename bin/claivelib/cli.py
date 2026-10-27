@@ -2018,7 +2018,7 @@ def parser():
         launch.add_argument("--checks-file", help="absolute JSON required-check manifest for parent verification")
         launch.add_argument("--owned-path", action="append", help="workspace-relative allowed path or glob (repeatable)")
         launch.add_argument("--report", action="store_true", help="request a structured claive-report block")
-        launch.add_argument("--reasoning-effort", "--effort", help="engine-specific effort; defaults to xhigh (Muse), max (Pi), xhigh (Claude) or max (Codex)")
+        launch.add_argument("--reasoning-effort", "--effort", help="engine-specific effort; defaults to xhigh (Muse), max (Pi), xhigh (Claude) or xhigh (Codex)")
         launch.add_argument("--max-model-steps", type=int, help="engine step cap, when supported")
         launch.add_argument("--read-only", action="store_true")
         isolation = launch.add_mutually_exclusive_group()

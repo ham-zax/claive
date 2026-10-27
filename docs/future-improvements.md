@@ -65,6 +65,17 @@ refused every write itself, so nobody has proved that the harness blocks a write
 A future check needs a write that the model tries and the harness denies
 (`permission_denials` in the result event).
 
+### A7. Test descendants after a harness interruption
+
+- **Seen:** On 2026-10-27, an interrupted parent session left its unittest process
+  running under `/init` after the test wrapper ended. The original session handle
+  could no longer report the wrapper's exit code.
+- **Proposal:** Investigate harness shutdown and `claive-memcap` process ownership.
+  Ensure an interrupted test run does not leave its own descendants running.
+- **Check:** Start a temporary test runner with a child and grandchild. Interrupt
+  the harness. Check that the owned descendants stop and the lock is released.
+  Keep unrelated workers running.
+
 ## B. Ideas from Sno Station
 
 Sno Station is a skill set for Claude Code and Codex: cross-vendor review, quota handover,

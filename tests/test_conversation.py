@@ -210,6 +210,39 @@ class ConversationChecks(unittest.TestCase):
         self.assertFalse(list((self.registry / first / "requests").glob("*.json")))
         self.assertFalse((self.registry / "conversations").exists())
 
+    def test_completed_state_is_published_only_after_its_receipt(self):
+        startup = self.path / "startup"
+        startup.mkdir()
+        published, release = self.path / "published", self.path / "release"
+        request_id = "e" * 32
+        # Pause immediately after the real completed-state write. This exposes
+        # the old ordering deterministically, without relying on scheduler timing.
+        (startup / "sitecustomize.py").write_text(
+            "import sys, time\nfrom pathlib import Path\n"
+            f"sys.path.insert(0, {str(REPO_ROOT / 'bin')!r})\n"
+            "from claivelib import cli\noriginal = cli.save\n"
+            "def save(path, value):\n"
+            "    original(path, value)\n"
+            f"    if path.name == 'state.json' and value.get('request_id') == {request_id!r} and value.get('status') == 'completed':\n"
+            f"        Path({str(published)!r}).touch()\n"
+            "        deadline = time.monotonic() + 8\n"
+            f"        while not Path({str(release)!r}).exists() and time.monotonic() < deadline:\n"
+            "            time.sleep(0.01)\n"
+            "cli.save = save\n"
+        )
+        worker = self.open(PYTHONPATH=str(startup))
+        response = self.registry / worker / "responses" / f"{request_id}.json"
+        try:
+            module.save(self.registry / worker / "requests" / "receipt-order.json",
+                        dict(request_id=request_id, prompt_file=str(self.prompt)))
+            self.eventually(published.exists)
+            waited = self.cli("wait", worker, "--timeout", "2")
+            self.assertEqual(waited.returncode, 0, waited.stderr)
+            self.assertTrue(response.exists(), "wait returned completion before its durable receipt")
+            self.assertEqual(json.loads(response.read_text())["request_id"], request_id)
+        finally:
+            release.touch()
+
     def test_receipts_survive_unrelated_followups_and_legacy_queue_requests(self):
         worker = self.open()
         initial_request = "e" * 32

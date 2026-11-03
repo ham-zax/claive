@@ -44,10 +44,6 @@ REPORT_CONTRACT = (
     "Use needs_decision instead of guessing when a choice would change design, "
     "public behaviour, data formats, scope, or acceptance criteria."
 )
-PREFERRED_MODELS = ("mimo-v2.6-flash-free", "big-pickle", "space-bunny-free",
-                    "muse-spark-1.3-contributor-free")
-
-
 def disallowed_model(model):
     name = str(model or "").lower()
     return "nemotron" in name or name.startswith("ling-3.1-flash")
@@ -1212,9 +1208,9 @@ def supervise(job_id, control=None):
                       {"count": state.get("turn_task_failures", 0), "details": state.get("turn_failure_details", [])})
     if control is None or stopping:
         release_worktree(state)
-    save(path / "state.json", state)
     from claivelib import turns
     turns.complete(path, state)
+    save(path / "state.json", state)
     _write_turn_event(state)
     return outcome_code(state)
 
@@ -2373,12 +2369,12 @@ def doctor_checks(live=False):
                 used = result
                 parts.append(f"{label} {url}: " + (f"{result['ms']} ms, {len(result['ids'])} models"
                                                    if result["ok"] else result["error"]))
-            missing = [name for name in PREFERRED_MODELS if name not in used["ids"]] if used["ok"] else []
+            missing = [name for name in pi_models_needed() if name not in used["ids"]] if used["ok"] else []
             if missing:
                 parts.append(f"missing: {', '.join(missing)}")
             if override:
                 parts.append("Pi turns use the override")
-            add("opencode2api", used["ok"], False, "; ".join(parts))
+            add("opencode2api", used["ok"] and not missing, default == "pi", "; ".join(parts))
         except Exception as error:
             add("opencode2api", False, False, str(error)[:200])
     if live:

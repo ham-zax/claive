@@ -1,6 +1,6 @@
 # claive
 
-Harness-neutral coding-worker orchestration for Claude Code, Codex, and shell parents. The worker core handles supervision, reusable turns, state, cancellation, logs, and the terminal dashboard. Engine adapters support AGY, Pi, Codex, Claude, and Muse, subject to host policy. Run `claive engines` to see available engines, models, and efforts. This host currently disables Muse and uses Pi for the verifier-driven implementer. Commands: `claive` (worker manager), `claive-worker` (reusable-worker launcher), `claive-orch` (arbiter), and `claive-codex` (Codex with a worker dashboard).
+Harness-neutral coding-worker orchestration for Claude Code, Codex, and shell parents. The worker core handles supervision, reusable turns, state, cancellation, logs, and the terminal dashboard. Engine adapters support AGY, Pi, Codex, Claude, and Muse, subject to host policy. Run `claive engines` to see available engines, models, and efforts. Engine availability and defaults come from each host configuration. Commands: `claive` (worker manager), `claive-worker` (reusable-worker launcher), `claive-orch` (arbiter), and `claive-codex` (Codex with a worker dashboard).
 
 AGY is available with `--engine agy`. It defaults to `gemini-3.8-flash-high`.
 Select `gemini-3.8-flash-medium` or `gemini-3.8-flash-low` for another effort.
@@ -13,7 +13,7 @@ See [AGY setup and limits](docs/agy-engine.md).
 Pi is available explicitly with `--engine pi`, using only `opencode2api`. Its initial model is
 `muse-spark-1.3-contributor-free`; new Pi workers inherit the last explicitly selected
 Pi model when `--model` is omitted. See [Pi setup, sessions, supported options and verification](docs/pi-engine.md).
-The built-in default is Muse when no host configuration selects another engine. This host selects Codex and disables Muse.
+The built-in default is Muse when no host configuration selects another engine. Run `claive engines` and `claive doctor` to inspect the current host.
 
 Claude Code is available with `--engine claude` (headless `claude -p`, binary `~/.local/bin/claude` or
 `CLAUDE_WORKER_BINARY`). It defaults to `claude-haiku-5-5`. The claive config decides which models it may use:
@@ -233,7 +233,7 @@ claive run --report --workspace /abs/repo --prompt-file /abs/task.md
 claive answer JOB_ID --message "Use design B."
 ```
 
-`doctor` is a read-only health check (exit 0 when all required checks pass); it launches a model only with `--live`. It runs `pi --version`, checks that every model claive may request from Pi is listed under `opencode2api` in Pi's `models.json` (`pi_provider`), and times `GET /models` on the provider. The default engine's binary and, when Pi is the default, `pi_provider` are required. `--role scout|worker|reviewer|oracle` selects engine, model, effort, read-only, and step-cap defaults (explicit flags win) and always enables the report contract; `--report` enables the contract without a role. The worker ends its answer with a `claive-report` JSON block (`done|blocked|needs_decision`); `run`/`wait` exit 3 when it asks for a decision, the dashboard shows `ASK`, and `status-line` counts `N need you`. `answer` queues a parent decision to a reusable worker waiting for one. Failed turns record `failure_kind` (`quota|protocol|worker|launch|supervisor|rejected|interrupted`), shown by `show`/`wait`/`run` and in `--json` output.
+`doctor` is a read-only health check (exit 0 when all required checks pass); it launches a model only with `--live`. It runs `pi --version`, checks that every model claive may request from Pi is listed under `opencode2api` in Pi's `models.json` (`pi_provider`), and times `GET /models` on the provider. The default engine's binary is required. When Pi is the default, its local model registrations and configured provider availability are required. `--role scout|worker|reviewer|oracle` selects engine, model, effort, read-only, and step-cap defaults (explicit flags win) and always enables the report contract; `--report` enables the contract without a role. The worker ends its answer with a `claive-report` JSON block (`done|blocked|needs_decision`); `run`/`wait` exit 3 when it asks for a decision, the dashboard shows `ASK`, and `status-line` counts `N need you`. `answer` queues a parent decision to a reusable worker waiting for one. Failed turns record `failure_kind` (`quota|protocol|worker|launch|supervisor|rejected|interrupted`), shown by `show`/`wait`/`run` and in `--json` output.
 
 ### Async workers, inbox, batches, and missions (any harness)
 
@@ -281,7 +281,7 @@ Meta [prompt caching](https://dev.meta.ai/docs/prompt-caching) automatically reu
 
 ## Verified orchestration (`claive-orch`)
 
-`claive-orch` is a deterministic arbiter for verifier-gated coding work. On this host, Pi implements because Muse is disabled. A Pi critic from another model family reviews the diff and verifier output. The implementer then corrects the work. The verifier decides each round: a better or equal score is checkpointed on `orch/<run>/<lane>`, and a worse score is reverted. Only after a stall does arm D add a different second lane. The parent asks `claive-orch next RUN` and performs the action it names.
+`claive-orch` is a deterministic arbiter for verifier-gated coding work. The configured roster selects the implementer and critic models. A Pi critic from another model family reviews the diff and verifier output. The implementer then corrects the work. The verifier decides each round: a better or equal score is checkpointed on `orch/<run>/<lane>`, and a worse score is reverted. Only after a stall does arm D add a different second lane. The parent asks `claive-orch next RUN` and performs the action it names.
 
 ```bash
 claive-orch init --repo /abs/repo --task-file /abs/task.md --verify 'python3 -m pytest -q' --arm D

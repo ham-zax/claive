@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 FAKE_PI = REPO / "tests/fake_pi.py"
@@ -97,6 +98,25 @@ class ProviderChecks(unittest.TestCase):
         code, checks = self.doctor(CLAIVE_ENGINE="pi", PI_WORKER_BINARY=str(broken))
         self.assertEqual(code, 1)
         self.assertIn("--version exited 9", checks["pi"]["detail"])
+
+    def test_endpoint_requires_configured_models_when_pi_is_default(self):
+        available = [model for model in MODELS if model != "space-bunny-free"]
+        with mock.patch(__name__ + ".MODELS", available):
+            code, checks = self.doctor(CLAIVE_ENGINE="pi")
+        self.assertEqual(code, 1)
+        self.assertTrue(checks["pi_provider"]["ok"], "local registration is complete")
+        self.assertFalse(checks["opencode2api"]["ok"])
+        self.assertTrue(checks["opencode2api"]["required"])
+        self.assertIn("space-bunny-free", checks["opencode2api"]["detail"])
+
+    def test_endpoint_does_not_require_unused_preferred_models(self):
+        self.config.write_text(json.dumps({"roles": {"oracle": {"model": "big-pickle"}}}))
+        available = [model for model in MODELS if model != "space-bunny-free"]
+        with mock.patch(__name__ + ".MODELS", available):
+            code, checks = self.doctor(CLAIVE_ENGINE="pi")
+        self.assertEqual(code, 0, checks)
+        self.assertTrue(checks["opencode2api"]["ok"])
+        self.assertNotIn("space-bunny-free", checks["opencode2api"]["detail"])
 
     def test_endpoint_latency_and_loopback_override(self):
         _code, checks = self.doctor()

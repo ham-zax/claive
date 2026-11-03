@@ -10,6 +10,7 @@ import uuid
 
 from claivelib.acceptance import atomic
 from claivelib.engines import get_engine
+from claivelib.engine import SteeringCapability
 from claivelib.state import launch_config
 
 
@@ -110,7 +111,11 @@ def withdraw(path, receipt_id):
 def summary(path, state):
     # Steering is a new explicit launch flag; reporting it needs no legacy command decoding.
     launch = state.get("launch") if isinstance(state.get("launch"), dict) else {}
-    capability = dataclasses.asdict(get_engine(state.get("engine", "muse")).steering_capability())
+    try:
+        capability = get_engine(state.get("engine", "muse")).steering_capability()
+    except ValueError as error:
+        capability = SteeringCapability(False, reason=str(error))
+    capability = dataclasses.asdict(capability)
     records = []
     for file in (path / "steering" / "receipts").glob("*.json"):
         try:

@@ -13,10 +13,12 @@ import shutil
 import tempfile
 
 LIVE = os.environ.get("CLAIVE_LIVE_TESTS") == "1"
+AGY_LIVE = os.environ.get("CLAIVE_AGY_LIVE") == "1"
+AGY_HOST_BINARY = os.environ.get("AGY_WORKER_BINARY") or shutil.which("agy")
 HOST_HOME = Path.home()
 
 for _name in list(os.environ):
-    if _name.startswith(("CLAIVE_", "MUSE_", "PI_", "CLAUDE_WORKER_", "CODEX_WORKER_", "AGY_WORKER_", "FAKE_AGY_")) or _name in {"TMUX", "XDG_CONFIG_HOME", "XDG_STATE_HOME"}:
+    if _name.startswith(("CLAIVE_", "MUSE_", "PI_", "CLAUDE_WORKER_", "CODEX_WORKER_", "AGY_", "FAKE_AGY_")) or _name in {"TMUX", "XDG_CONFIG_HOME", "XDG_STATE_HOME"}:
         del os.environ[_name]
 
 SANDBOX = Path(tempfile.mkdtemp(prefix="claive-tests-"))

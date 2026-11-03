@@ -91,7 +91,8 @@ class ClaudeChecks(unittest.TestCase):
         self.assertEqual(command[-2:], ["--", "--do the thing\n"])
         read_only = self.engine.build_command(self.request(read_only=True))
         self.assertEqual(read_only[read_only.index("--tools") + 1], "default")
-        self.assertEqual(read_only[read_only.index("--permission-mode") + 1], "plan")
+        # Read requests use a soft instruction, rather than a plan approval turn.
+        self.assertEqual(read_only[read_only.index("--permission-mode") + 1], "bypassPermissions")
         for read_only_turn, expected in ((False, command), (True, read_only)):
             with self.subTest(read_only=read_only_turn):
                 self.assertEqual(self.engine.build_command(self.request(read_only=read_only_turn, web=True)),

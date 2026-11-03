@@ -151,7 +151,10 @@ def cmd_add(args):
     budget = parse_duration(args.budget) if args.budget is not None else DEFAULT_BUDGET
     if args.max_attempts is not None and args.max_attempts < 1:
         raise ValueError("--max-attempts must be positive")
-    config.check_workspace([workspace], read_only=not args.write)
+    from claivelib.engines import default_engine, get_engine
+    role = cli_mod.resolved_roles().get(args.role, {})
+    engine = get_engine(args.engine or role.get("engine") or default_engine())
+    config.check_workspace([workspace], read_only=not args.write and engine.read_only_enforced)
     goal_id = uuid.uuid4().hex[:12]
     path = goals_dir() / goal_id
     path.mkdir(mode=0o700)

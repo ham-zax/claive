@@ -8,6 +8,12 @@ import uuid
 
 __all__ = ["TurnRequest", "WorkerEngine", "SteeringCapability"]
 
+SOFT_READ_NOTE = (
+    "Read-only task. Read and investigate only. Do not edit, create, or delete files. "
+    "Do not run commands that change files or external state. This is soft read mode, "
+    "an instruction without enforced write prevention."
+)
+
 
 @dataclass(frozen=True)
 class SteeringCapability:
@@ -49,6 +55,10 @@ class TurnRequest:
 
 class WorkerEngine:
     name = ""
+    cwd_is_worktree = True
+    read_only_enforced = False
+    handles_read_only_prompt = False
+    allows_startup_banner = False
     supports_fork = False
     default_reasoning_effort = "high"
     default_max_model_steps = None
@@ -57,6 +67,9 @@ class WorkerEngine:
     def default_effort_for(self, model):
         """Effort for a turn that names none; an engine with per-model defaults overrides this."""
         return self.default_reasoning_effort
+
+    def fallback_effort_for(self, model, current):
+        return current
 
     def supported_models(self):
         """Models and the efforts each accepts, or None when the engine takes any model.
@@ -93,6 +106,9 @@ class WorkerEngine:
 
     def validate_turn(self, request):
         """Reject unsupported turn options before launch or queue acceptance."""
+
+    def validate_prompt(self, text, read_only=False):
+        """Optional provider prompt limit, checked before job creation and on follow-up."""
 
     def child_env(self):
         """Extra environment variables for the worker process."""

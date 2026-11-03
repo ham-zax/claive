@@ -184,12 +184,18 @@ Workers use the engine's default tools. Claive passes no restricted tool list.
 
 | Engine | Read-only mechanism | Web | Steering | Fork | Step cap |
 |---|---|---|---|---|---|
-| Claude | `--tools default --permission-mode plan` | Always on | Stream JSON | Yes | Refused |
+| Claude | Default tools, soft-read instruction, not enforced | Always on | Stream JSON | Yes | Refused |
 | Codex | Read-only sandbox | Live search every turn | App Server | Yes | Refused |
 | Muse | `--permission-profile :read-only --disable-write`, shell on | Always on | Refused | Refused | Opt-in |
 | Pi | Full tools and a read-only instruction | `--web` refused | RPC | Yes | Refused |
+| AGY | Soft-read instruction, not enforced | `--web` refused | Refused | Refused | Refused |
 
 Steering needs `--enable-steering` at launch. Fork needs an idle reusable session.
+`--read-only` uses native enforcement where available and soft instructions otherwise.
+`--require-read-only` refuses engines without native enforcement before launch.
+Soft readers cannot use write-prohibited workspace entries or bypass writer conflicts.
+AGY uses model suffixes for effort and reports attempt aggregates with unknown
+model-call counts. See [AGY engine](agy-engine.md) for supported options and recovery.
 `--web` is accepted and has no effect on Claude, Codex and Muse.
 
 Claude write turns use `--permission-mode bypassPermissions`.

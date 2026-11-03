@@ -1,6 +1,14 @@
 # claive
 
-Harness-neutral coding-worker orchestration for Claude Code, Codex, and shell parents. The worker core handles supervision, reusable turns, state, cancellation, logs, and the terminal dashboard. Engine adapters support Pi, Codex, Claude, and Muse, subject to host policy. Run `claive engines` to see available engines, models, and efforts. This host currently disables Muse and uses Pi for the verifier-driven implementer. Commands: `claive` (worker manager), `claive-worker` (reusable-worker launcher), `claive-orch` (arbiter), and `claive-codex` (Codex with a worker dashboard).
+Harness-neutral coding-worker orchestration for Claude Code, Codex, and shell parents. The worker core handles supervision, reusable turns, state, cancellation, logs, and the terminal dashboard. Engine adapters support AGY, Pi, Codex, Claude, and Muse, subject to host policy. Run `claive engines` to see available engines, models, and efforts. This host currently disables Muse and uses Pi for the verifier-driven implementer. Commands: `claive` (worker manager), `claive-worker` (reusable-worker launcher), `claive-orch` (arbiter), and `claive-codex` (Codex with a worker dashboard).
+
+AGY is available with `--engine agy`. It defaults to `gemini-3.8-flash-high`.
+Select `gemini-3.8-flash-medium` or `gemini-3.8-flash-low` for another effort.
+The model suffix fixes the effort. Use `open --detach` and `followup` to resume.
+AGY supports managed worktrees and reports usage as attempt aggregates, with
+unknown model-call counts and cache ratios. Read-only requests use soft read.
+Use `--require-read-only` when native write prevention is required.
+See [AGY setup and limits](docs/agy-engine.md).
 
 Pi is available explicitly with `--engine pi`, using only `opencode2api`. Its initial model is
 `muse-spark-1.3-contributor-free`; new Pi workers inherit the last explicitly selected
@@ -17,8 +25,8 @@ fallback at 105k (Haiku) or 155k (other models) tokens with budget mode off; `--
 is unsupported. `--output-schema /abs/schema.json` is passed as Claude's `--json-schema`, so the
 result is the validated JSON object. `--enable-steering` switches to stream-json input for live steering
 (see [docs/steering.md](docs/steering.md)). Workers use `--tools default`.
-Write turns use `--permission-mode bypassPermissions`. Read-only turns use
-`--permission-mode plan`. `--setting-sources ""` keeps the parent's hooks and
+Claude turns use `--permission-mode bypassPermissions`. Read-only turns receive an
+explicit soft-read instruction. Claive reports that write prevention is not enforced. `--setting-sources ""` keeps the parent's hooks and
 permission rules out. MCP servers and skills load. WebSearch and WebFetch stay on.
 Claude workers load CLAUDE.md files through `--add-dir` and
 `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`. Claive adds the worker file
@@ -339,7 +347,7 @@ On an explicit Muse subscription-quota exhaustion, the manager records the failu
 | `docs/experiment/README.md` | Deferred TTC experiment note; no experiment materials are active |
 | `docs/harness-integration.md` | Host-neutral protocol for Claude Code, Codex, Pi agents, and shells |
 | `reference/global-AGENTS.md` | Snapshot of the configured global instructions |
-| `reference/agy-relay.sh` | Historical relay; not an active model route |
+| `reference/agy-relay.sh` | Historical relay; use the native `--engine agy` adapter |
 | `reference/opencode-relay.sh` | Existing incompatible OpenCode relay, for reference |
 | `reference/prompt-caching.md` | Meta documentation links and observed CLI behavior |
 | `tests/test_workers.py` | Isolated behavioral checks |
@@ -440,7 +448,7 @@ For example, a user can select Claude tools explicitly:
 
 A host whose `opencode2api` runs locally can route Pi turns over loopback instead of the public URL in `models.json` with `{"providers": {"opencode2api": {"base_url": "http://127.0.0.1:PORT/v1"}}}`. Only `localhost` and loopback addresses are accepted. Pi reads the URL only from `models.json`, so claive gives Pi turns an overlay agent directory (`$CLAIVE_DIR/pi-agent-overlay`: links to every entry of the real one plus a mode-600 `models.json` differing only in `baseUrl`), rebuilt each turn. The real `models.json` is never edited; `doctor` times both URLs, and workers record and print `Provider override:`.
 
-On a host where workers run unattended, `{"workspaces": [{"path": "~/repo/site", "write": false}, {"path": "~/repo/site/drafts", "write": true}]}` limits where workers may run. With the key present, `run`/`start`/`open`/`batch` refuse a `--workspace` or `--worktree-existing` whose real path (symlinks resolved) is outside every entry, and the deepest matching entry decides the mode: `write: false` requires `--read-only` or a read-only role. Without the key any workspace is allowed, as before. This limits the worker's cwd and requested write mode. Pi has no OS sandbox. Its read-only instruction does not enforce write protection, and tools can access absolute paths elsewhere. `doctor` reports the entry counts.
+On a host where workers run unattended, `{"workspaces": [{"path": "~/repo/site", "write": false}, {"path": "~/repo/site/drafts", "write": true}]}` limits where workers may run. With the key present, `run`/`start`/`open`/`batch` refuse a `--workspace` or `--worktree-existing` whose real path (symlinks resolved) is outside every entry, and the deepest matching entry decides the mode: `write: false` requires native enforced read-only. Soft-read workers cannot use that entry. Without the key any workspace is allowed, as before. This limits the worker's cwd and requested write mode. Pi has no OS sandbox. Its read-only instruction does not enforce write protection, and tools can access absolute paths elsewhere. `doctor` reports the entry counts.
 
 Run checks from the repository root. The suite is hermetic: `tests/hermetic.py` hides the host config, `CLAIVE_*` variables and installed Muse/Pi binaries. `CLAIVE_LIVE_TESTS=1` also runs the checks that drive the real Muse binary.
 

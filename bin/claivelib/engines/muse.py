@@ -18,6 +18,8 @@ def default_binary():
 
 
 class MuseEngine(WorkerEngine):
+    cwd_is_worktree = False
+    read_only_enforced = True
     name = "muse"
     default_model = MUSE_MODEL
     default_reasoning_effort = "xhigh"

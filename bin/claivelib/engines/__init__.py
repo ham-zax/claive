@@ -9,7 +9,8 @@ DEFAULT_ENGINE = "muse"
 _ENGINES = {}
 _MODULES = {"muse": ("muse", "MuseEngine"), "pi": ("pi", "PiEngine"),
             "claude": ("claude", "ClaudeEngine"),
-            "codex": ("codex", "CodexEngine")}
+            "codex": ("codex", "CodexEngine"), "agy": ("agy", "AgyEngine")}
+ENGINE_NAMES = tuple(_MODULES)
 
 
 def default_engine():
@@ -39,4 +40,4 @@ def unregister_engine(name):
     _ENGINES.pop(name, None)
 
 
-__all__ = ["DEFAULT_ENGINE", "default_engine", "get_engine", "register_engine", "unregister_engine"]
+__all__ = ["DEFAULT_ENGINE", "ENGINE_NAMES", "default_engine", "get_engine", "register_engine", "unregister_engine"]

@@ -7,6 +7,9 @@ from claivelib.engine import WorkerEngine
 
 class FixtureEngine(WorkerEngine):
     name = "fixture"
+    # Lifecycle tests model a native reader. Production adapters declare their
+    # own enforcement. Generic undeclared engines remain soft readers.
+    read_only_enforced = True
     supports_fork = True
     default_max_model_steps = 100
     supports_max_model_steps = True

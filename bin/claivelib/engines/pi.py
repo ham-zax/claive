@@ -24,6 +24,7 @@ def default_binary():
 
 
 class PiEngine(WorkerEngine):
+    handles_read_only_prompt = True
     name = "pi"
     supports_fork = True
     default_reasoning_effort = "max"  # free models; Pi clamps to each model's highest level

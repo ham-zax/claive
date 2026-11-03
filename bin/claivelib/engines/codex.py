@@ -43,6 +43,7 @@ def _use_user_config():
 
 
 class CodexEngine(WorkerEngine):
+    read_only_enforced = True
     name = "codex"
     supports_fork = True
     default_model = CODEX_MODEL

@@ -22,8 +22,8 @@ import uuid
 
 from claivelib import config, provider, acceptance, steering, procname
 from claivelib.ansi import strip_controls
-from claivelib.engine import TurnRequest
-from claivelib.engines import DEFAULT_ENGINE, default_engine, get_engine
+from claivelib.engine import SOFT_READ_NOTE, TurnRequest
+from claivelib.engines import DEFAULT_ENGINE, ENGINE_NAMES, default_engine, get_engine
 from claivelib.roles import ROLES, resolved_roles
 from claivelib.state import SCHEMA_VERSION, launch_config, session_id as worker_session_id
 
@@ -78,21 +78,81 @@ def check_engine_policy(engine_name, model=None, reasoning_effort=None):
 
 def build_command(engine, request):
     """The engine's command plus the user's engines.<name>.extra_args, placed before any '--'."""
+    validate_turn(engine.name, request)
+    request = soft_read_request(engine, request)
     command = engine.build_command(request)
     extra = config.engine_policy(engine.name).get("extra_args") or []
     if not extra:
         return command
     if engine.name == "codex" and (request.steering or request.fork_session_id):
         raise ValueError("engines.codex.extra_args apply to codex exec turns only, not to steering or fork turns")
-    split = command.index("--") if "--" in command else len(command)
+    split = command.index("-p") if engine.name == "agy" else command.index("--") if "--" in command else len(command)
     return command[:split] + list(extra) + command[split:]
+
+
+def soft_read_request(engine, request):
+    if not request.read_only or engine.read_only_enforced or engine.handles_read_only_prompt:
+        return request
+    import hashlib
+    text = SOFT_READ_NOTE + "\n\n" + Path(request.prompt_file).read_text(encoding="utf-8") + "\n\n" + SOFT_READ_NOTE
+    directory = root() / "read-prompts"
+    directory.mkdir(exist_ok=True, mode=0o700)
+    prompt = directory / (hashlib.sha256(text.encode()).hexdigest() + ".md")
+    prompt.write_text(text, encoding="utf-8")
+    return dataclasses.replace(request, prompt_file=str(prompt))
+
+
+def read_mode(state):
+    if not isinstance(state.get("launch"), dict) and not state.get("command"):
+        return "unknown"
+    if not launch_config(state).get("read_only"):
+        return "write"
+    try:
+        engine = get_engine(state.get("engine") or DEFAULT_ENGINE)
+    except ValueError:
+        return "unknown"
+    return "enforced" if engine.read_only_enforced else "soft"
+
+
+def load_policy(path, state):
+    """State is authoritative for new workers; historical workers keep their policy file."""
+    if isinstance(state.get("turn_policy"), dict):
+        try:
+            projection = json.loads((path / "policy.json").read_text())
+        except (OSError, ValueError):
+            projection = {}
+        if not isinstance(projection, dict):
+            projection = {}
+        if projection.get("override_for_model") == state.get("model") and "override_for_model" in projection:
+            return {key: projection.get(key, state["turn_policy"].get(key))
+                    for key in ("reasoning_effort", "max_model_steps")}
+        return dict(state["turn_policy"])
+    return json.loads((path / "policy.json").read_text())
+
+
+def save_policy(path, state, policy):
+    """Commit defaults with the launch atomically, then update the compatibility projection."""
+    policy = {key: policy[key] for key in ("reasoning_effort", "max_model_steps")}
+    state["turn_policy"] = dict(policy)
+    state.pop("policy_projection_error", None)
+    save(path / "state.json", state)
+    try:
+        save(path / "policy.json", policy)
+    except OSError as error:
+        state["policy_projection_error"] = str(error)
+        save(path / "state.json", state)
 
 
 def validate_turn(engine_name, request):
     """Apply the user's engines policy, then the engine's own turn rules."""
     check_engine_policy(engine_name, request.model, request.reasoning_effort)
     config.check_model_named(engine_name, request.model)
-    get_engine(engine_name).validate_turn(request)
+    engine = get_engine(engine_name)
+    engine.validate_turn(request)
+    directories = [request.workspace]
+    if request.isolation.get("existing_path"):
+        directories.append(request.isolation["existing_path"])
+    config.check_workspace(directories, request.read_only and engine.read_only_enforced)
 
 
 def parse_turn_timeout(raw):
@@ -237,7 +297,7 @@ def turn_request(state, prompt_file=None, reasoning_effort=None, max_model_steps
     return TurnRequest(
         binary=launch["binary"],
         workspace=(state.get("actual_workspace") or state["workspace"])
-        if state.get("engine") in {"codex", "claude", "pi"} else state["workspace"],
+        if get_engine(state.get("engine") or DEFAULT_ENGINE).cwd_is_worktree else state["workspace"],
         prompt_file=prompt_file or state["prompt_file"],
         session_id=worker_session_id(state),
         provider=launch["provider"],
@@ -560,6 +620,8 @@ TASK_FAILURE_REASONS = 5
 
 
 def event_update(state, event):
+    if state.get("attempt_failed"):
+        return
     kind = event.get("type", "activity")
     state["last_event"] = event.get("native_kind", kind)
     state["last_activity"] = time.time()
@@ -611,13 +673,33 @@ def event_update(state, event):
             recent = state.get("task_failure_reasons", [])[-(TASK_FAILURE_REASONS - 1):]
             state["task_failure_reasons"] = recent + [detail[:300]]
     elif kind in {"terminal_completed", "terminal_failed"}:
+        if event.get("usage_cumulative"):
+            if state.get("terminal"):
+                state.update(terminal="failed", terminal_reason="duplicate AGY result",
+                             failure_kind="protocol", attempt_failed=True, answer="")
+                return
+            from claivelib.usage import record_cumulative
+            try:
+                record_cumulative(state, event)
+            except ValueError as error:
+                state.update(terminal="failed", terminal_reason=str(error), failure_kind="protocol",
+                             attempt_failed=True, answer="", phase="finishing")
+                return
         state["terminal"] = event.get("terminal")
         state["terminal_reason"] = event.get("reason")
         state["answer"] = event.get("text", "")
         state["phase"] = "finishing"
+        if event.get("failure_kind") in FALLBACKABLE_FAILURES:
+            state["failure_kind"] = event["failure_kind"]
+        if kind == "terminal_failed" and event.get("usage_cumulative"):
+            state["attempt_failed"] = True
     elif kind == "session_bound":
         launch = state.get("launch") if isinstance(state.get("launch"), dict) else {}
         if launch.get("session_logging", state.get("session_logging", True)):
+            if event.get("strict") and state.get("session_id") not in (None, event["session_id"]):
+                state.update(terminal="failed", terminal_reason="AGY conversation id changed",
+                             failure_kind="protocol", attempt_failed=True, answer="", phase="finishing")
+                return
             state["session_id"] = event["session_id"]  # engines that choose their own session ID
     elif kind == "quota_exhausted":
         state["quota_exhausted"] = True
@@ -630,7 +712,8 @@ FALLBACKABLE_FAILURES = {"timeout", "quota", "worker", "protocol"}
 
 PER_TURN_RESET_KEYS = ("ended_at", "error", "terminal", "terminal_reason", "budget_warning", "quota_exhausted",
                        "quota_reset_at", "fallback_requires_user_approval", "report", "report_state",
-                       "report_error", "needs_parent", "failure_kind", "active_tools", "turn_command_results")
+                       "report_error", "needs_parent", "failure_kind", "active_tools", "turn_command_results",
+                       "attempt_failed", "turn_usage")
 
 
 def context_overflow_reason(reason):
@@ -670,9 +753,9 @@ def rebuild_for_fallback(state, engine, new_model):
     session_logging = bool(launch.get("session_logging", True))
     isolation = dict(launch.get("isolation") or {})
     workspace = ((state.get("actual_workspace") or state["workspace"])
-                 if engine.name in {"codex", "claude", "pi"} else state["workspace"])
+                 if engine.cwd_is_worktree else state["workspace"])
     prompt_file = state["prompt_file"]
-    effort = state["reasoning_effort"]
+    effort = engine.fallback_effort_for(new_model, state["reasoning_effort"])
     steps = state.get("max_model_steps")
     fresh_session = engine.resolve_session_id(None, session_logging)
     fresh_launch = engine.resolve_launch(
@@ -681,6 +764,7 @@ def rebuild_for_fallback(state, engine, new_model):
         isolation=isolation, session_id=fresh_session,
         session_root=str(root() / "sessions"), workspace=workspace,
     )
+    engine.validate_launch(fresh_launch)
     request = TurnRequest(
         binary=fresh_launch["binary"], workspace=workspace, prompt_file=prompt_file,
         session_id=fresh_session, provider=fresh_launch["provider"], model=fresh_launch["model"],
@@ -691,6 +775,8 @@ def rebuild_for_fallback(state, engine, new_model):
         session_dir=fresh_launch.get("session_dir"), steering=bool(fresh_launch.get("steering")),
     )
     check_engine_policy(engine.name, request.model, request.reasoning_effort)
+    validate_turn(engine.name, request)
+    fresh_launch["reasoning_effort"] = effort
     command = build_command(engine, request)
     return fresh_launch, command, fresh_session
 
@@ -802,6 +888,27 @@ def supervise(job_id, control=None):
             except OSError as error:
                 state["budget_error"] = str(error)
 
+    def consume_line(line):
+        nonlocal seen_init
+        try:
+            event = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            if engine.allows_startup_banner and not seen_init:
+                apply_events([dict(type="activity", native_kind="startup_banner")])
+                return
+            event = None
+        try:
+            if not isinstance(event, dict):
+                raise ValueError("event is not an object")
+            normalized = engine.normalize_event(event)
+            seen_init = True  # Any valid event ends startup-banner tolerance.
+            apply_events(normalized)
+        except (ValueError, UnicodeDecodeError):
+            state["malformed_events"] += 1
+            if engine.name == "agy":
+                state.update(attempt_failed=True, terminal="failed", failure_kind="protocol",
+                             terminal_reason="malformed AGY event", answer="")
+
     def stop_requested(_signum, _frame):
         nonlocal stopping
         stopping = True
@@ -857,6 +964,8 @@ def supervise(job_id, control=None):
         while True:
             if setup_failed:
                 break
+            seen_init = False
+            state["attempt"] = attempt + 1
             values = launch_config(state).get("budget")
             budget_values = values if engine.name == "claude" and isinstance(values, dict) else None
             state["context_tokens"] = 0
@@ -895,18 +1004,18 @@ def supervise(job_id, control=None):
             with (path / "events.jsonl").open(log_mode) as events, (path / "stderr.log").open(log_mode) as errors:
                 if budget_values is not None:
                     try:
-                        initial_input = engine.initial_input(turn_request(state))
+                        initial_input = engine.initial_input(soft_read_request(engine, turn_request(state)))
                         initial_input = budget.initial_input(path, state, engine, initial_input)
                     except (OSError, ValueError) as error:
                         budget.recovery_failure(path, state, "", str(error))
                         break
                 else:
-                    initial_input = engine.initial_input(turn_request(state))
+                    initial_input = engine.initial_input(soft_read_request(engine, turn_request(state)))
                 child = subprocess.Popen(state["command"], stdout=subprocess.PIPE, stderr=errors,
                                          stdin=subprocess.PIPE if initial_input is not None else subprocess.DEVNULL,
                                          bufsize=0, start_new_session=True,
                                          cwd=(state.get("actual_workspace") or state["workspace"])
-                                         if engine.name in {"codex", "claude", "pi"} else state["workspace"],
+                                         if engine.cwd_is_worktree else state["workspace"],
                                          env=child_env)
                 progress("worker process started")
                 transport = steering.Transport(path, state, child.stdin, initial_input) if initial_input is not None else None
@@ -960,27 +1069,18 @@ def supervise(job_id, control=None):
                             while b"\n" in pending:
                                 line, pending = pending.split(b"\n", 1)
                                 if line.strip():
-                                    try:
-                                        event = json.loads(line)
-                                        if not isinstance(event, dict):
-                                            raise ValueError("event is not an object")
-                                        apply_events(engine.normalize_event(event))
-                                    except (ValueError, UnicodeDecodeError):
-                                        state["malformed_events"] += 1
+                                    consume_line(line)
                         if time.monotonic() - last_save > 0.25:
                             save(path / "state.json", state)
                             last_save = time.monotonic()
                 if pending.strip():
-                    try:
-                        event = json.loads(pending)
-                        if not isinstance(event, dict):
-                            raise ValueError("event is not an object")
-                        apply_events(engine.normalize_event(event))
-                    except (ValueError, UnicodeDecodeError):
-                        state["malformed_events"] += 1
+                    consume_line(pending)
                 close_transport()
                 state["exit_code"] = child.wait()
                 child.stdout.close()
+            if engine.name == "agy":
+                from claivelib.usage import record_cumulative
+                record_cumulative(state)
             actual = engine.discover_workspace(
                 state["command"], (path / "stderr.log").read_text(errors="replace")
             )
@@ -1004,8 +1104,12 @@ def supervise(job_id, control=None):
                 state["status"] = "failed"
                 state["error"] = (f"exit={state['exit_code']}; terminal={state.get('terminal', 'missing')}; "
                                   f"malformed events={state['malformed_events']}")
+                if state.get("terminal_reason"):
+                    state["error"] += "; " + str(state["terminal_reason"])
                 if state.get("quota_exhausted"):
                     state["failure_kind"] = "quota"
+                elif state.get("failure_kind") in FALLBACKABLE_FAILURES:
+                    pass
                 elif context_overflow_reason(state.get("terminal_reason")):
                     state["failure_kind"] = "context_overflow"
                 elif state.get("malformed_events") or state.get("terminal") is None:
@@ -1048,7 +1152,8 @@ def supervise(job_id, control=None):
                     try:
                         fresh_launch, fresh_command, fresh_session = rebuild_for_fallback(
                             state, engine, next_model)
-                    except Exception:
+                    except Exception as error:
+                        state["fallback_error"] = str(error)
                         break
                     fallbacks.append({"model": state.get("model"),
                                       "failure_kind": state.get("failure_kind"),
@@ -1058,8 +1163,11 @@ def supervise(job_id, control=None):
                     state["launch"] = fresh_launch
                     state["command"] = fresh_command
                     state["session_id"] = fresh_session
+                    state["reasoning_effort"] = fresh_launch["reasoning_effort"]
                     timeout_start = None
-                    save(path / "state.json", state)
+                    policy = load_policy(path, state)
+                    policy["reasoning_effort"] = fresh_launch["reasoning_effort"]
+                    save_policy(path, state, policy)
                     attempt += 1
                     continue
             break
@@ -1080,6 +1188,8 @@ def supervise(job_id, control=None):
         else:
             state["status"] = "cancelled" if stopping else "failed"
             state["error"] = str(error)
+            if engine.name == "agy" and isinstance(error, OSError) and error.errno == 7:
+                state["error"] = "AGY process launch exceeds the OS argument limit (E2BIG); reduce the prompt size"
             if state["status"] == "failed":
                 state["failure_kind"] = "supervisor" if child is not None else "launch"
                 if state.get("report_contract"):
@@ -1471,8 +1581,11 @@ def reusable_worker(job_id):
                     pending[0].unlink()
                     print(f"Worker {job_id}: rejected missing prompt {clean(request['prompt_file'])}", flush=True)
                     continue
-                policy = json.loads((path / "policy.json").read_text())
+                policy = load_policy(path, state)
                 effort = request.get("reasoning_effort") or policy["reasoning_effort"]
+                engine = get_engine(state.get("engine", DEFAULT_ENGINE))
+                if "queued_model" in request and request["queued_model"] != state.get("model"):
+                    effort = engine.fallback_effort_for(state.get("model"), effort)
                 steps = request.get("max_model_steps") or policy["max_model_steps"]
                 isolation = dict((launch_config(state).get("isolation") or {}))
                 if isolation.get("mode") == "create":
@@ -1607,7 +1720,7 @@ def create_fork(args):
     if not launch.get("session_logging", True) or not source_session_id:
         raise ValueError(f"worker {source_id} has no retained session to fork")
     try:
-        policy = json.loads((source_path / "policy.json").read_text())
+        policy = load_policy(source_path, source)
     except (OSError, ValueError):
         policy = {}
 
@@ -1700,8 +1813,6 @@ def _create_job(args):
         raise ValueError("--max-model-steps must be positive")
     turn_timeout = parse_turn_timeout(getattr(args, "turn_timeout", None))
     fallback_raw = getattr(args, "fallback_models", None)
-    if args.action == "open" and fallback_raw is not None:
-        raise ValueError("--fallback-models is only supported for single-turn workers (run/start), not open")
     fallback_models = parse_fallback_models(fallback_raw)
     if fallback_models and getattr(args, "enable_steering", False):
         raise ValueError("steering cannot be combined with --fallback-models")
@@ -1735,11 +1846,14 @@ def _create_job(args):
         report_contract=REPORT_CONTRACT if report_contract else None,
     )
     engine_name = getattr(args, "engine", None) or (role_def["engine"] if role_def else None) or default_engine()
+    if args.action == "open" and fallback_raw is not None and engine_name != "agy":
+        raise ValueError("--fallback-models requires single-turn workers (run/start), except for AGY open workers")
     engine = get_engine(engine_name)
     check_engine_policy(engine_name)
     policy = config.engine_policy(engine_name)
     session_id = engine.resolve_session_id(args.session_id, not args.no_session_log)
-    effective_model = args.model or (role_def.get("model") if role_def else None) or policy.get("default_model")
+    effective_model = (args.model or (role_def.get("model") if role_def else None)
+                       or policy.get("default_model") or getattr(engine, "default_model", None))
     effort = (args.reasoning_effort or (role_def.get("reasoning_effort") if role_def else None)
               or policy.get("default_reasoning_effort") or engine.default_effort_for(effective_model))
     if args.max_model_steps is not None:
@@ -1750,9 +1864,12 @@ def _create_job(args):
         steps = role_def["max_model_steps"]
     else:
         steps = engine.default_max_model_steps
-    read_only = bool(args.read_only or (role_def and role_def.get("read_only")))
+    require_read_only = bool(getattr(args, "require_read_only", False))
+    read_only = bool(args.read_only or require_read_only or (role_def and role_def.get("read_only")))
+    if require_read_only and not engine.read_only_enforced:
+        raise ValueError(f"{engine_name} cannot enforce read-only; --require-read-only is unsupported")
     config.check_workspace([workspace] + ([Path(args.worktree_existing)] if args.worktree_existing else []),
-                           read_only)
+                           read_only and engine.read_only_enforced)
     check_model_policy(effective_model)
     isolation = dict(mode="create" if args.worktree else "existing" if args.worktree_existing else "none",
                      base=args.worktree_base, existing_path=args.worktree_existing)
@@ -1779,6 +1896,7 @@ def _create_job(args):
         workspace=str(workspace), remember_model=bool(args.model and getattr(args, "remember_model", True)),
         **budget_options,
     )
+    launch["read_mode"] = "enforced" if read_only and engine.read_only_enforced else "soft" if read_only else "write"
     if worktree_setup is not None:
         launch["worktree_setup"] = worktree_setup
     check_model_policy(launch.get("model"))
@@ -1797,6 +1915,11 @@ def _create_job(args):
         fork_session_dir=getattr(args, "fork_session_dir", None),
     )
     validate_turn(engine_name, initial_turn)
+    for fallback_model in fallback_models:
+        engine.validate_turn(dataclasses.replace(initial_turn, model=fallback_model,
+            reasoning_effort=engine.fallback_effort_for(fallback_model, effort)))
+    engine.validate_prompt(composed_prompt if has_prompt_layers else prompt_text if prompt is None
+                           else prompt.read_text(encoding="utf-8"), read_only)
     mission_id = getattr(args, "mission", None) or os.environ.get("CLAIVE_MISSION") or None
     if mission_id:
         from claivelib import mission as mission_mod
@@ -1813,21 +1936,21 @@ def _create_job(args):
         ownership = acceptance.owned_paths(ownership)
     effective_label = args.label or (prompt.stem if prompt is not None else "prompt-input")
     target_workspace = Path(args.worktree_existing or workspace).resolve()
-    if not read_only:
+    if not (read_only and engine.read_only_enforced):
         for other in jobs():
             if (other["status"] == "starting" and other.get("label") == effective_label
-                    and not launch_config(other).get("read_only")
+                    and read_mode(other) != "enforced"
                     and Path(other.get("actual_workspace") or other["workspace"]).resolve() == target_workspace):
                 raise ValueError(f"worker {other['id']} (label {effective_label}) has not confirmed its start "
                                  f"in this workspace; run claive show {other['id']} before any relaunch, "
                                  "cancel it, or pass another --label")
     # Check both sides: a later writer must not bypass an existing ownership lane.
-    if not read_only and isolation["mode"] == "none":
+    if not (read_only and engine.read_only_enforced) and isolation["mode"] == "none":
         for other in jobs():
             if (other["status"] in ACTIVE
                     and (ownership is not None or other.get("acceptance_contract", {}).get("owned_paths") is not None)
                     and Path(other.get("actual_workspace") or other["workspace"]).resolve() == workspace.resolve()
-                    and not launch_config(other).get("read_only")):
+                    and read_mode(other) != "enforced"):
                 raise ValueError("owned concurrent writers require isolated worktrees")
     if ownership is not None or check_manifest:
         if root().resolve().is_relative_to(Path(args.worktree_existing or str(workspace)).resolve()):
@@ -1848,7 +1971,7 @@ def _create_job(args):
         discard_job(path, launch, _locked=True)
         raise
     try:
-        turn_workspace = (launch["isolation"].get("existing_path") or str(workspace)) if engine_name in {"codex", "claude", "pi"} else str(workspace)
+        turn_workspace = (launch["isolation"].get("existing_path") or str(workspace)) if engine.cwd_is_worktree else str(workspace)
         initial_turn = dataclasses.replace(initial_turn, prompt_file=str(prompt), isolation=launch["isolation"],
                                            workspace=turn_workspace)
         save(path / "policy.json", dict(reasoning_effort=effort, max_model_steps=steps))
@@ -1876,6 +1999,8 @@ def _create_job(args):
                      model=launch.get("model"), reasoning_effort=effort, max_model_steps=steps,
                      reusable=args.action == "open", turn=1,
                      fallback_models=fallback_models, fallbacks=[])
+        state["turn_policy"] = dict(reasoning_effort=effort, max_model_steps=steps)
+        state["read_mode"] = launch["read_mode"]
         state["acceptance_contract"] = {"checks": check_manifest}
         if getattr(args, "fit_checked", False):
             state["fit_checked"] = True
@@ -2006,6 +2131,8 @@ def spawn_supervisor(path, state, entry):
 def report(state):
     path = job_path(state["id"])
     print(f"{state['id']} {state['status']} | {clean(state['label'])}")
+    mode = read_mode(state)
+    print(f"Read mode: {mode}" + (" (instruction only; not enforced)" if mode == "soft" else ""))
     session = worker_session_id(state)
     if session:
         print(f"Session: {session} | {state.get('engine', DEFAULT_ENGINE)} | {state.get('model')} | {state['reasoning_effort']}")
@@ -2192,7 +2319,7 @@ def doctor_checks(live=False):
         policies = config.load().get("engines", {})
     except ValueError:
         policies = {}
-    for name in ("muse", "pi", "claude", "codex"):
+    for name in ENGINE_NAMES:
         if policies.get(name, {}).get("enabled") is False:
             results[name] = False
             reason = policies[name].get("reason")
@@ -2339,7 +2466,7 @@ def engines_report(json_output=False):
     """What a parent may launch: the user's policy and the effective defaults for every engine."""
     check_engine_policy(None)
     default, rows = default_engine(), []
-    for name in ("muse", "pi", "claude", "codex"):
+    for name in ENGINE_NAMES:
         policy = config.engine_policy(name)
         row = dict(engine=name, enabled=policy.get("enabled", True), reason=policy.get("reason", ""),
                    default=name == default,
@@ -2351,8 +2478,10 @@ def engines_report(json_output=False):
             row.update(models=config.allowed_models(name, engine.supported_models()),
                        default_model=policy.get("default_model") or getattr(engine, "default_model", None),
                        default_reasoning_effort=(policy.get("default_reasoning_effort")
-                                                 or engine.default_reasoning_effort),
-                       steering=capability.mechanism if capability.supported else None)
+                                                 or engine.default_effort_for(policy.get("default_model")
+                                                     or getattr(engine, "default_model", None))),
+                       steering=capability.mechanism if capability.supported else None,
+                       read_only_enforced=engine.read_only_enforced, soft_read=not engine.read_only_enforced)
         except ValueError as error:
             row.update(enabled=False, reason=row["reason"] or str(error))
         rows.append(row)
@@ -2370,6 +2499,7 @@ def engines_report(json_output=False):
             f"{model}[{','.join(efforts) or 'any'}]" for model, efforts in models.items()) or "none")
         print(f"{row['engine']}{' (default)' if row['default'] else ''} model {row['default_model'] or 'engine default'}"
               f" effort {row['default_reasoning_effort']} steering {row['steering'] or 'no'}"
+              f" read {'enforced' if row.get('read_only_enforced') else 'soft (not enforced)'}"
               + allowed + "".join(f"; {item}" for item in blocked))
     return 0
 
@@ -2452,6 +2582,8 @@ def parser():
         launch.add_argument("--reasoning-effort", "--effort", help="engine-specific effort; defaults to xhigh (Muse), max (Pi), xhigh (Claude) or xhigh (Codex)")
         launch.add_argument("--max-model-steps", type=int, help="engine step cap, when supported")
         launch.add_argument("--read-only", action="store_true")
+        launch.add_argument("--require-read-only", action="store_true",
+                            help="require native write prevention; refuse soft read mode")
         isolation = launch.add_mutually_exclusive_group()
         isolation.add_argument("--worktree", action="store_true")
         isolation.add_argument("--worktree-existing", help="resume a lane in its existing absolute worktree path")
@@ -2467,7 +2599,7 @@ def parser():
         launch.add_argument("--turn-timeout",
                             help="fail a turn that runs longer than SECONDS (positive number)")
         launch.add_argument("--fallback-models",
-                            help="comma-separated fallback models for single-turn workers (run/start only)")
+                            help="comma-separated fallback models for run/start, and reusable AGY open workers")
         if action == "open":
             launch.add_argument("--detach", action="store_true", help="run the reusable loop in the background")
     fork = commands.add_parser("fork", help="start an independent reusable worker from an idle session")
@@ -2931,14 +3063,18 @@ def main(launcher=None):
             time.sleep(args.interval)
     elif args.action == "show":
         state = load(job_path(args.id))
+        state["read_mode"] = read_mode(state)
         from claivelib import peek
-        state["intent"] = peek.latest_intent(
-            job_path(args.id), get_engine(state.get("engine", DEFAULT_ENGINE)),
-            human_output=not args.json)
+        try:
+            engine = get_engine(state.get("engine", DEFAULT_ENGINE))
+        except ValueError:
+            state["intent"] = None
+        else:
+            state["intent"] = peek.latest_intent(job_path(args.id), engine, human_output=not args.json)
         if state["evidence"]["acceptance"]["status"] == "accepted":
             state["evidence"]["freshness"] = acceptance.check_freshness(job_path(args.id), state, state["evidence"])
         if state.get("reusable"):
-            state["next_turn_defaults"] = json.loads((job_path(args.id) / "policy.json").read_text())
+            state["next_turn_defaults"] = load_policy(job_path(args.id), state)
         print(json.dumps(state, indent=2)) if args.json else report(state)
     elif args.action == "peek":
         from claivelib import peek
@@ -3091,6 +3227,17 @@ def main(launcher=None):
         usage["recent"] = recent_usage(usage.get("calls", []))
         if args.json:
             print(json.dumps(usage, indent=2))
+        elif usage.get("granularity") == "attempt":
+            total = usage["totals"]
+            print(f"Session usage: {len(usage['aggregates'])} attempt aggregates | model calls unknown | "
+                  f"{total.get('input_tokens', 'unknown')} input | {total.get('output_tokens', 'unknown')} output")
+            turn = usage["turn"]
+            print(f"Turn {turn['index']}: {turn.get('input_tokens', 'unknown')} input | "
+                  f"{turn.get('output_tokens', 'unknown')} output | "
+                  f"{'complete' if turn['complete'] else 'incomplete'} usage; cache ratio unknown")
+            if not usage["usage_complete"]:
+                print("Session totals are incomplete; missing usage is unknown.")
+            print("Provider counters across retained attempts; not context size or an invoice.")
         elif not usage["model_calls"]:
             print("No provider token usage recorded; cache hits are unknown.")
         else:
@@ -3182,7 +3329,7 @@ def main(launcher=None):
             raise ValueError("worker is not available for policy changes")
         if args.max_model_steps is not None and args.max_model_steps < 1:
             raise ValueError("--max-model-steps must be positive")
-        policy = json.loads((path / "policy.json").read_text())
+        policy = load_policy(path, state)
         validate_turn(state.get("engine", DEFAULT_ENGINE), turn_request(
             state, reasoning_effort=args.reasoning_effort,
             max_model_steps=args.max_model_steps if args.max_model_steps is not None else policy["max_model_steps"],
@@ -3190,6 +3337,10 @@ def main(launcher=None):
         policy["reasoning_effort"] = args.reasoning_effort
         if args.max_model_steps is not None:
             policy["max_model_steps"] = args.max_model_steps
+        # An explicit command is a model-scoped override. Do not overwrite a
+        # concurrently running supervisor's state to change next-turn defaults.
+        if isinstance(state.get("turn_policy"), dict):
+            policy["override_for_model"] = state.get("model")
         save(path / "policy.json", policy)
         print(f"Worker {args.id}: default effort {args.reasoning_effort} for future turns; current request unchanged.")
     elif args.action == "close":
@@ -3279,7 +3430,7 @@ def main(launcher=None):
         answer_file = path / f"answer-{time.time_ns()}.md"
         answer_file.write_text(f"Parent question was:\n{question}\n\nParent decision:\n{decision}\n\n"
                                "Continue the assignment with this decision.\n")
-        policy = json.loads((path / "policy.json").read_text())
+        policy = load_policy(path, state)
         validate_turn(state.get("engine", DEFAULT_ENGINE), turn_request(
             state, prompt_file=str(answer_file),
             reasoning_effort=policy["reasoning_effort"], max_model_steps=policy["max_model_steps"],

@@ -43,7 +43,7 @@ The TTC experiment is deferred and is not part of this workflow.
 
 ## Engines and policy
 
-`claive` runs ordinary bounded tasks on `--engine muse|pi|claude|codex`. The runtime
+`claive` runs ordinary bounded tasks on `--engine muse|pi|claude|codex|agy`. The runtime
 pins Muse to `muse-spark-1.3-contributor` and Codex to
 `gpt-6.1-terra` at `low` through `ultra` (default `xhigh`), `gpt-6-luna` at `medium` or `max` (default `max`), or `gpt-6.1-sol` at `low` through `xhigh` (default `medium`); Pi uses `opencode2api` and its selected model.
 Claude defaults to `claude-haiku-5-5`; `engines.claude.models` in the claive config decides
@@ -82,12 +82,17 @@ Workers use the engine's default tools. Claive supplies no restricted tool list.
 
 | Engine | Read-only | Web | Steering | Fork | Step cap | `extra_args` |
 |---|---|---|---|---|---|---|
-| Claude | `--permission-mode plan`, default tools | Always on | Stream JSON | Yes | Refused | Yes |
+| Claude | Default tools, soft-read instruction, not enforced | Always on | Stream JSON | Yes | Refused | Yes |
 | Codex | Read-only sandbox | Live every turn | App Server | Yes | Refused | Exec only |
 | Muse | `:read-only` profile, `--disable-write`, shell on | Always on | Refused | Refused | Opt-in | Yes |
 | Pi | Full tools and an instruction, no enforcement | `--web` refused | RPC | Yes | Refused | Yes |
+| AGY | Soft-read instruction, no enforcement | Refused | Refused | Refused | Refused | Yes |
 
 Steering needs `--enable-steering` (Claude budget mode turns it on by default).
+AGY defaults to `gemini-3.8-flash-high`; medium and low model suffixes select effort.
+Read requests on AGY, Pi and Claude use soft instructions, not enforced write prevention.
+Use `--require-read-only` for a hard requirement. Soft read cannot bypass workspace
+write policy or ownership conflicts. AGY usage aggregates are not model calls.
 Fork needs an idle reusable session.
 `--web` has no effect on Claude, Codex and Muse.
 Claude write turns use `bypassPermissions`. `--setting-sources ""` keeps parent

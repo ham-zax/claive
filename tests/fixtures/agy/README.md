@@ -1,7 +1,7 @@
 # AGY Phase 0 recordings
 
-Implementation starts with protocol evidence. The production adapter is not
-implemented. Required design decisions still block Phase 1.
+These recordings support the native production adapter and its regression tests.
+See `docs/agy-engine.md` for supported behavior and remaining measurement limits.
 
 AGY version: 1.4.12. Capture date: 2026-11-03.
 `models.txt` records six models, including Gemini 3.8 Flash high, medium, and low.
@@ -28,8 +28,8 @@ No quota or authentication failure string is established by these fixtures.
 
 The captured init event contains a **top-level** `conversation_id`.
 Its nested `init` object has no such field. The design and earlier probe note
-mistakenly describe the whole event as lacking an ID. Future normalization
-must consider the top-level ID, then compare every later session ID.
+mistakenly described the whole event as lacking an ID. Normalization now
+checks the top-level ID, then compares every later session ID.
 The fixture tests preserve the actual field placement.
 
 ## Evidence and remaining gates
@@ -47,11 +47,11 @@ The fixture tests preserve the actual field placement.
 | Nested worker cwd | `nested` records `invoke_subagent` and the temporary repository path | Prior probe reports the nested file; cwd is not confinement |
 | Authentication and quota | Unknown | Do not revoke credentials or provoke quota |
 
-The usage consumer contract remains blocked. One edit result contains several
-model steps. A turn result cannot be labelled one provider call. Missing usage
-must remain distinct from zero. Cache ratios remain unknown for these samples.
-Fallback persistence also needs a recoverable source of truth before code changes.
-Read-mode policy needs the shared soft-read design before AGY registration.
+One edit result contains several model steps. The adapter reports attempt
+aggregates with unknown provider-call counts. Missing usage remains distinct
+from zero. Cache ratios remain unknown for these samples. State stores fallback
+launch and defaults together. Capability-based soft-read policy applies at launch
+and follow-up. The earlier Phase 0 contract blockers are resolved in the design.
 
 ## Replay
 
@@ -61,7 +61,9 @@ The executable `tests/fake_agy.py` selects a fixture through
 NDJSON filenames without their extension. `--output-format json` supports
 `success.json`. Unknown scenarios return exit 2 without output.
 
-The replay accepts future adapter launch arguments but does not execute prompts,
+Captured replay accepts adapter launch arguments but does not execute prompts,
 create sessions, enforce permissions, or rewrite conversation IDs. Resume tests
 must use the fixture IDs. A future lifecycle fake must add explicit session
-behavior before it can prove supervisor integration.
+behavior before it can prove supervisor integration. Separate synthetic lifecycle
+scenarios now provide those behaviors for `tests/test_agy_engine.py` through
+`FAKE_AGY_STORE`. They do not change the captured fixtures or their provenance.

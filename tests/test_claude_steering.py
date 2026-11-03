@@ -107,7 +107,7 @@ class ClaudeSteeringChecks(unittest.TestCase):
                 steered = engine.build_command(TurnRequest(**options))
                 self.assertEqual(steered[steered.index("--tools") + 1], "default")
                 self.assertEqual(steered[steered.index("--permission-mode") + 1],
-                                 "plan" if read_only else "bypassPermissions")
+                                 "bypassPermissions")
                 self.assertEqual(steered[steered.index("--setting-sources") + 1], "")
                 self.assertNotIn("--strict-mcp-config", steered)
                 self.assertNotIn("--disable-slash-commands", steered)

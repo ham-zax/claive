@@ -172,7 +172,7 @@ class ClaudeEngine(WorkerEngine):
         command = [
             request.binary, "--print", "--output-format", "stream-json", "--verbose",
             "--model", request.model, "--effort", request.reasoning_effort,
-            "--tools", "default", "--permission-mode", "plan" if request.read_only else "bypassPermissions",
+            "--tools", "default", "--permission-mode", "bypassPermissions",
             "--autocompact", f"{(point + AUTOCOMPACT_OFFSET) // 1000}k",
             # Isolate user/project settings so the parent's hooks and permission rules do not run in workers.
             "--setting-sources", "",

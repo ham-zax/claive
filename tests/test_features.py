@@ -32,6 +32,17 @@ REPORT_ASK = """I need a choice.
 
 
 class FeatureChecks(unittest.TestCase):
+    def test_engine_enumeration_matches_operator_surfaces(self):
+        from claivelib.engines import ENGINE_NAMES
+        listed = self.run_cli("engines", "--json", cli=CLI)
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertEqual([row["engine"] for row in json.loads(listed.stdout)["engines"]], list(ENGINE_NAMES))
+        report = json.loads(self.run_cli("doctor", "--json", cli=CLI).stdout)
+        checks = {row["name"]: row for row in report["checks"]}
+        self.assertTrue(set(ENGINE_NAMES) <= set(checks))
+        self.assertFalse(checks["agy"]["ok"])
+        self.assertIn("missing or not executable", checks["agy"]["detail"])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="claive-features-")
         self.path = Path(self.temp.name)
@@ -114,7 +125,7 @@ class FeatureChecks(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = json.loads(result.stdout)
         names = [check["name"] for check in report["checks"]]
-        self.assertEqual(names, ["python", "state_dir", "config", "muse", "pi", "claude", "codex", "engines", "pi_provider", "opencode2api",
+        self.assertEqual(names, ["python", "state_dir", "config", "muse", "pi", "claude", "codex", "agy", "engines", "pi_provider", "opencode2api",
                                  "git", "quota", "interrupted", "worktrees", "runtime_provenance", "runtime_drift", "runtime_smoke"])
         checks = {check["name"]: check for check in report["checks"]}
         self.assertTrue(report["ok"])

@@ -60,6 +60,10 @@ OWNED_FLAGS = {
              "--session-id", "--workspace", "-w", "--worktree-existing", "--worktree-base"},
     "pi": {"--mode", "--print", "-p", "--provider", "--model", "--thinking", "--session", "--session-id",
            "--session-dir", "--no-session", "--fork", "--continue", "-c", "--resume", "-r"},
+    "agy": {"-p", "--print", "--prompt", "--prompt-interactive", "-i", "--input-format", "--output-format",
+            "--model", "--effort", "--conversation", "--continue", "-c", "--print-timeout",
+            "--dangerously-skip-permissions", "--mode", "--sandbox", "--json-schema", "--project",
+            "--new-project", "--add-dir", "--settings"},
 }
 ROLE_KEYS = {
     "engine": str, "model": str, "reasoning_effort": str, "read_only": bool,
@@ -393,7 +397,7 @@ def check_workspace(directories, read_only):
         _base, write = max(matches, key=lambda match: len(match[0].parts))
         if not write and not read_only:
             raise ValueError(f"workspace {real} is read-only in the claive config workspaces allowlist; "
-                             "pass --read-only or use a read-only role")
+                             "select enforced read-only or use a writable workspace entry")
 
 
 def default_engine(builtin):

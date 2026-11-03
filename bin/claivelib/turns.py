@@ -1,6 +1,5 @@
 """Queue follow-ups and retain immutable, request-specific delivery receipts."""
 import fcntl
-import json
 import math
 import os
 from pathlib import Path
@@ -30,15 +29,20 @@ def queue(path, prompt_file, label=None, reasoning_effort=None, max_model_steps=
             raise ValueError("--prompt-file must be an existing nonempty absolute file")
         if max_model_steps is not None and max_model_steps < 1:
             raise ValueError("--max-model-steps must be positive")
-        policy = json.loads((path / "policy.json").read_text())
+        policy = cli.load_policy(path, state)
         cli.validate_turn(state.get("engine", DEFAULT_ENGINE), cli.turn_request(
             state, prompt_file=str(prompt),
             reasoning_effort=reasoning_effort or policy["reasoning_effort"],
             max_model_steps=max_model_steps if max_model_steps is not None else policy["max_model_steps"],
         ))
+        from claivelib.engines import get_engine
+        get_engine(state.get("engine", DEFAULT_ENGINE)).validate_prompt(
+            prompt.read_text(encoding="utf-8"), bool(cli.launch_config(state).get("read_only")))
         request_id = uuid.uuid4().hex
         request = dict(prompt_file=str(prompt), label=label,
                        reasoning_effort=reasoning_effort, max_model_steps=max_model_steps)
+        if state.get("schema_version") == cli.SCHEMA_VERSION:
+            request["queued_model"] = state.get("model")
         if message_id is not None:
             if not isinstance(message_id, str) or not re.fullmatch(r"[0-9a-f]{32}", message_id):
                 raise ValueError("invalid queued message ID")
@@ -84,7 +88,7 @@ def validate(request):
             raise ValueError("queued stop_file must be an absolute path")
     if "requires_no_parent" in request and not isinstance(request["requires_no_parent"], bool):
         raise ValueError("queued requires_no_parent must be a boolean")
-    for key in ("reasoning_effort", "label"):
+    for key in ("reasoning_effort", "label", "queued_model"):
         if request.get(key) is not None and not isinstance(request[key], str):
             raise ValueError(f"queued {key} must be a string")
     steps = request.get("max_model_steps")

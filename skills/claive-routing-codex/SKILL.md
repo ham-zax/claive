@@ -13,13 +13,14 @@ For a task with an executable check, use the verifier-gated ladder only when aut
 
 ## Current engine boundaries (Claive main, October 2026)
 
-The general `claive` worker manager supports **four engines**; the optional
+The general `claive` worker manager supports **five engines**; the optional
 `claive-orch` verifier-driven arbiter currently selects **Muse/Pi** candidates.
 Do not confuse the arbiter's model policy with a limitation of the worker manager.
 Select an engine deliberately and follow the parent's current authorization policy.
 
 | Engine | Runtime contract |
 | --- | --- |
+| `agy` | `--engine agy`; Gemini 3.8 Flash high, medium or low. Effort must match the model suffix. Soft read is not enforced. Resume through followup. No steering, fork, web, schema or step cap |
 | `muse` | Disabled on this host for now. When enabled, pinned to `muse-spark-1.3-contributor` |
 | `pi` | `--engine pi --provider opencode2api`; models selected explicitly or inherited; managed worktrees supported; no `--web` or model-step cap |
 | `claude` | `--engine claude`; default `claude-haiku-5-5`; managed worktrees supported; no model-step cap; output schema and steering supported |

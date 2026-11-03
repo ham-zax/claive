@@ -20,6 +20,7 @@ def launch_notes(state, prompt_bytes=0):
 
 
 def heavy_call_note(calls):
+    calls = [call for call in calls if call.get("granularity", "call") == "call"]
     heavy = [call["output_tokens"] for call in calls
              if isinstance(call.get("output_tokens"), int) and call["output_tokens"] >= HEAVY_CALL_OUTPUT_TOKENS]
     if not heavy:

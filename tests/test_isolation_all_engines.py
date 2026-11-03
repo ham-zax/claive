@@ -36,11 +36,12 @@ class IsolationChecks(unittest.TestCase):
         self.git("add", "tracked")
         self.git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
         self.fixture = self.base / "worker"
-        self.fixture.write_text("#!/usr/bin/python3\n" + 'import json, os, sys\nfrom pathlib import Path\nPath(os.environ["TEST_CWD"]).write_text(os.getcwd())\nif os.environ.get("TEST_DIRTY"):\n    Path("worker-change").write_text("changed")\nengine = os.environ["TEST_ENGINE"]\nif engine == "pi":\n    os.execv(os.environ["TEST_PI"], [os.environ["TEST_PI"], *sys.argv[1:]])\nif engine == "codex":\n    print(json.dumps({"type": "turn.completed"}), flush=True)\nelse:\n    print(json.dumps({"type": "result", "subtype": "success", "result": "ok", "is_error": False}), flush=True)\n')
+        self.fixture.write_text("#!/usr/bin/python3\n" + 'import json, os, sys\nfrom pathlib import Path\nPath(os.environ["TEST_CWD"]).write_text(os.getcwd())\nif os.environ.get("TEST_DIRTY"):\n    Path("worker-change").write_text("changed")\nengine = os.environ["TEST_ENGINE"]\nif engine == "pi":\n    os.execv(os.environ["TEST_PI"], [os.environ["TEST_PI"], *sys.argv[1:]])\nif engine == "codex":\n    print(json.dumps({"type": "turn.completed"}), flush=True)\nelif engine == "agy":\n    identifier = "isolation-conversation"\n    print(json.dumps({"event": "init", "conversation_id": identifier, "init": {"cwd": os.getcwd()}}), flush=True)\n    print(json.dumps({"event": "result", "result": {"conversation_id": identifier, "status": "SUCCESS", "response": "ok"}}), flush=True)\nelse:\n    print(json.dumps({"type": "result", "subtype": "success", "result": "ok", "is_error": False}), flush=True)\n')
         self.fixture.chmod(0o755)
         self.env = dict(os.environ, CLAIVE_DIR=str(self.registry), TEST_CWD=str(self.base / "cwd"),
                         TEST_PI=str(ROOT / "tests/fake_pi.py"), CODEX_WORKER_BINARY=str(self.fixture),
-                        CLAUDE_WORKER_BINARY=str(self.fixture), PI_WORKER_BINARY=str(self.fixture))
+                        CLAUDE_WORKER_BINARY=str(self.fixture), PI_WORKER_BINARY=str(self.fixture),
+                        AGY_WORKER_BINARY=str(self.fixture))
 
     def tearDown(self):
         self.temp.cleanup()
@@ -59,7 +60,7 @@ class IsolationChecks(unittest.TestCase):
         return result, state
 
     def test_all_engines_use_managed_worktree_and_release_or_keep(self):
-        for engine in ("codex", "claude", "pi"):
+        for engine in ("codex", "claude", "pi", "agy"):
             for dirty in (False, True):
                 with self.subTest(engine=engine, dirty=dirty):
                     result, state = self.launch(engine, "--worktree", **({"TEST_DIRTY": "1"} if dirty else {}))
@@ -122,7 +123,7 @@ class IsolationChecks(unittest.TestCase):
         self.assertIsNone(module.identity(int(pid_file.read_text())))
 
     def test_followup_uses_worktree_and_setup_runs_once(self):
-        for engine in ("codex", "claude", "pi"):
+        for engine in ("codex", "claude", "pi", "agy"):
             with self.subTest(engine=engine):
                 marker = self.base / f"setup-{engine}"
                 env = dict(self.env, TEST_ENGINE=engine)

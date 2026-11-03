@@ -76,6 +76,20 @@ A future check needs a write that the model tries and the harness denies
   the harness. Check that the owned descendants stop and the lock is released.
   Keep unrelated workers running.
 
+### A8. AGY implementation retrospective proposals, 2026-11-03
+
+- Expand the reusable historical-record test set to include minimal status
+  records, legacy policy files, and declared native read capabilities. Run that
+  set before a full suite when shared worker contracts change.
+- Preserve a reproducible fixture sanitizer that joins split text deltas before
+  it replaces sensitive paths. Check assembled text as well as individual lines.
+  The current AGY fixtures and their hashes remain checked by the existing tests.
+- Use the same persistence lock for fault injection and the normal writer.
+  An unlocked receipt-corruption test lost its injected fault to an acknowledgement.
+  The repaired test now uses that lock. Apply the pattern to future fault tests.
+
+These are proposals for later work. They add no new runtime behavior or CI gate.
+
 ## B. Ideas from Sno Station
 
 Sno Station is a skill set for Claude Code and Codex: cross-vendor review, quota handover,

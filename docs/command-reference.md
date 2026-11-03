@@ -29,7 +29,7 @@ read-only. Only Muse supports a model-step cap.
 | `--context-file` | add a bounded UTF-8 context layer to the first prompt (repeatable) |
 | `--label` | Display label |
 | `--alias` | Bind `@NAME` to the new worker. The name must be unused |
-| `--engine` | muse, pi, claude or codex |
+| `--engine` | muse, pi, claude, codex or agy |
 | `--role` | Built-in or custom role |
 | `--team` | Configured team name. Requires --member and forbids --role |
 | `--member` | Team member name. Requires --team |
@@ -42,7 +42,8 @@ read-only. Only Muse supports a model-step cap.
 | `--report` | request a structured claive-report block |
 | `--reasoning-effort`, `--effort` | Engine effort. Muse/Claude default xhigh, Pi max, Codex Terra xhigh, Luna max, or Sol medium. Role/config defaults can override |
 | `--max-model-steps` | Optional positive Muse step cap. No default cap |
-| `--read-only` | Request the engine's read-only mechanism. Pi uses an instruction |
+| `--read-only` | Native enforced reading where supported. AGY, Pi and Claude use a reported soft instruction |
+| `--require-read-only` | Require native write prevention. Refuse engines with only soft read mode |
 | `--worktree` | Create a linked worktree from the selected base |
 | `--worktree-existing` | resume a lane in its existing absolute worktree path |
 | `--worktree-base` | base commit. Default HEAD |
@@ -55,7 +56,7 @@ read-only. Only Muse supports a model-step cap.
 | `--provider` | Engine provider. Pi accepts only opencode2api |
 | `--mission` | link the new worker to a mission |
 | `--turn-timeout` | fail a turn that runs longer than SECONDS (positive number) |
-| `--fallback-models` | comma-separated fallback models for single-turn workers (run/start only) |
+| `--fallback-models` | comma-separated fallback models for run/start. AGY also supports reusable open workers |
 
 First-prompt order: role, team header, collaboration, project, context files,
 task, report contract. Context layers repeat up to ten times.
@@ -1111,7 +1112,7 @@ claive goal add --title TITLE --prompt-file PROMPT_FILE --workspace WORKSPACE [-
 | `--prompt-file` | Existing nonempty absolute task file. Required |
 | `--workspace` | Existing absolute workspace directory. Required |
 | `--role` | Built-in or custom role |
-| `--engine` | muse, pi, claude or codex |
+| `--engine` | muse, pi, claude, codex or agy |
 | `--model` | Engine model. Pins and config policy apply |
 | `--write` | let the worker edit the workspace |
 | `--budget` | wall-clock budget: seconds, or 30m / 2h (default 2h) |

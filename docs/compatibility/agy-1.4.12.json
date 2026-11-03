@@ -1,0 +1,42 @@
+{
+  "engine": "agy",
+  "tested_cli_version": "1.4.12",
+  "tested_on": "2026-11-03",
+  "release_kind": "initial native adapter",
+  "adapter_changes": [
+    "Native tracked launch with managed worktree cwd",
+    "Strict conversation binding and exact resume identity",
+    "Model-suffix effort and recoverable high-to-low fallback",
+    "Queued follow-ups adapt effort after a model fallback",
+    "Cumulative usage deltas with explicit gaps and unknown model-call counts",
+    "Soft-read reporting and enforcement-aware workspace policy",
+    "Timeout, malformed-stream, and partial-counter handling"
+  ],
+  "version_command": ["agy", "--version"],
+  "supported_models": {
+    "gemini-3.8-flash-high": "high",
+    "gemini-3.8-flash-medium": "medium",
+    "gemini-3.8-flash-low": "low"
+  },
+  "implementation": "bin/claivelib/engines/agy.py",
+  "fixture_manifest": "tests/fixtures/agy/manifest.json",
+  "contract": "docs/agy-engine.md",
+  "wire_format": "stream-json NDJSON",
+  "observed_contract": {
+    "init_conversation_id": "outer envelope",
+    "step_and_result_conversation_id": "nested event body",
+    "resume_flag": "--conversation",
+    "usage": "cumulative result totals within a conversation",
+    "thinking_tokens": "included in output for recorded samples",
+    "cache_counter_semantics": "unverified; preserve native observations without arithmetic",
+    "read_only": "soft instruction; not enforced",
+    "print_timeout": "exit zero and SUCCESS may still mean timeout",
+    "prompt_utf8_byte_guard": 100000
+  },
+  "verification": {
+    "hermetic": "just test-one tests/test_agy_engine.py tests/test_agy_fixtures.py",
+    "live": "CLAIVE_AGY_LIVE=1 just test-one tests/test_agy_live.py",
+    "regression": "just check"
+  },
+  "upgrade_policy": "Add a version-named record for each newly tested CLI version. Preserve old fixtures and version records for comparison. Include a Tested-AGY-Version commit footer on AGY changes. This record is a tested baseline, not an executable version pin."
+}

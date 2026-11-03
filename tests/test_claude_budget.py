@@ -72,9 +72,14 @@ for action in plan:
     elif "rewrite_task" in action:
         (root / "task.md").write_text(action["rewrite_task"])
     elif "corrupt_receipt" in action:
+        import fcntl
         for file in (root / "state").glob("*/steering/receipts/*.json"):
-            if json.loads(file.read_text()).get("source") != "budget":
-                file.write_text("{")
+            # Inject corruption under the writer's lock. Otherwise a concurrent
+            # acknowledgement can replace the broken file before it is observed.
+            with (file.parents[2] / ".steering.lock").open("w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                if json.loads(file.read_text()).get("source") != "budget":
+                    file.write_text("{")
     elif "handoff" in action:
         import subprocess
         state_file = next((root / "state").glob("*/state.json"))

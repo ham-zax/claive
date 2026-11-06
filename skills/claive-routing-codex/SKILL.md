@@ -11,7 +11,7 @@ The canonical copy is the Skillshare source at `~/.config/skillshare/skills/clai
 
 For a task with an executable check, use the verifier-gated ladder only when authorized. The `claive-orchestration` skill explains its Pi implementer, cross-family critic, and arbiter. This skill governs Codex launch mechanics. The TTC experiment is deferred and has no active skill; do not auto-load or reinstall its former materials.
 
-## Current engine boundaries (Claive main, October 2026)
+## Current engine boundaries (Claive main, November 2026)
 
 The general `claive` worker manager supports **five engines**; the optional
 `claive-orch` verifier-driven arbiter currently selects **Muse/Pi** candidates.
@@ -22,7 +22,7 @@ Select an engine deliberately and follow the parent's current authorization poli
 | --- | --- |
 | `agy` | `--engine agy`; Gemini 3.8 Flash high, medium or low. Effort must match the model suffix. Soft read is not enforced. Resume through followup. No steering, fork, web, schema or step cap |
 | `muse` | Disabled on this host for now. When enabled, pinned to `muse-spark-1.3-contributor` |
-| `pi` | `--engine pi --provider opencode2api`; models selected explicitly or inherited; managed worktrees supported; no `--web` or model-step cap |
+| `pi` | `--engine pi`; provider and model come from the config (`claive engines` shows both); models selected explicitly or inherited; managed worktrees supported; no `--web` or model-step cap |
 | `claude` | `--engine claude`; default `claude-haiku-5-5`; managed worktrees supported; no model-step cap; output schema and steering supported |
 | `codex` | `--engine codex`; `gpt-6.1-terra` at `low` through `ultra` (default `xhigh`), `gpt-6-luna` at `medium` or `max` (default `max`), or `gpt-6.1-sol` at `low` through `xhigh` (default `medium`); managed worktrees supported; no output schema or model-step cap |
 
@@ -64,6 +64,35 @@ shell so its session remains visible in `/ps`; use `claive start` or
 `claive open --detach` only when genuinely detached execution is needed.
 Keep the terminal session ID, Claive worker ID, and engine session UUID distinct.
 
+## Configuration
+
+Validate the active file before a launch: `claive config check`. The file is YAML or
+JSON at `$CLAIVE_CONFIG`, else `config.yaml`, `config.yml` or `config.json` in
+`~/.config/claive/`.
+
+- **Isolated run:** copy the file, `export CLAIVE_CONFIG=/abs/path.yaml`, then
+  `claive config check`. The supervisor inherits the path, so follow-ups use it.
+- **One-off override:** `claive run --set '{...}' ...` deep-merges a YAML or JSON
+  object over the file. A dedicated flag still wins, and the worker keeps it for
+  follow-ups. The file does not change.
+- **Per-model effort:** `default_model_efforts` sets an effort for one model. With no
+  value Claive passes no effort flag, so the engine uses the model's own level.
+  `disabled_model_efforts` refuses an effort for one model only.
+- **Provider policy:** `providers.<name>.enabled: false` refuses a provider with a
+  reason. `claive engines` shows the effective state.
+- **Do not edit the shared host file while another agent uses it.** Use a copy.
+
+The old engine-wide `default_reasoning_effort` and `disabled_reasoning_efforts` keys
+are removed. They fail with the replacement in the message.
+
+```sh
+claive config path
+claive config check
+claive config show
+claive config init
+claive config migrate
+```
+
 ## Model and reasoning
 
 Use `gpt-6.1-terra` for Codex workers. Run `claive engines` to map dictated model and effort names. Do not silently substitute another model or provider. Native host subagents require an explicit request.
@@ -73,8 +102,8 @@ Use `gpt-6.1-terra` for Codex workers. Run `claive engines` to map dictated mode
 - **`medium`:** low-stakes work.
 - **Named roles:** `terra-complex`, `terra-mechanical`, and `terra-lowstakes` select these efforts on this host.
 - **Sol:** `gpt-6.1-sol` accepts `low` through `xhigh` and defaults to `medium`; it refuses `max` and `ultra`.
-- **Pi workers: always `max`** (the Pi engine default). They are free; Pi clamps `max` to each model's highest supported level.
-- **Pi models:** prefer `mimo-v2.6-flash-free`, `big-pickle`, `space-bunny-free`; `longcat-2.5-preview-free` only rarely. Do not use `nemotron-*` or `ling-3.1-flash-free`.
+- **Pi workers:** effort is per model. The host config sets `default_model_efforts` for the chosen model; with no value Pi uses its own level.
+- **Pi models:** use the model shown by `claive engines` or named in the brief. Do not assume a free model; the host may use Mistral or a local provider.
 
 The orchestrator can select effort per turn or change an existing worker's future default at any time. Changes apply to the next request; they cannot change an in-flight API call. Muse has no default step cap. It passes `--max-model-steps` only when a flag or role/config value sets it. Pi rejects this flag. A step cap is not a monetary budget or timeout.
 
@@ -92,10 +121,10 @@ Request a concise report: outcome, files changed, checks with results, supportin
 
 ## Launch and observe workers
 
-Default to `/home/hamza/.local/bin/claive-worker` inside Codex's managed shell tool. The launcher opens a reusable worker and remains alive between related turns, so a yielded shell call is a managed background terminal and appears in the native running-terminal indicator and `/ps`. The installed manager is `/home/hamza/.local/bin/claive`; its generic supervisor owns state, follow-ups, cancellation, and logs, while each engine adapter builds its commands and interprets its events and usage. Private logs are retained under `${XDG_STATE_HOME:-$HOME/.local/state}/claive`. `CLAIVE_DIR` can select another absolute registry directory. The custom dashboard and tmux pane are optional additional views.
+Default to `claive-worker` inside Codex's managed shell tool. The launcher opens a reusable worker and remains alive between related turns, so a yielded shell call is a managed background terminal and appears in the native running-terminal indicator and `/ps`. The installed manager is `claive`; its generic supervisor owns state, follow-ups, cancellation, and logs, while each engine adapter builds its commands and interprets its events and usage. Private logs are retained under `${XDG_STATE_HOME:-$HOME/.local/state}/claive`. `CLAIVE_DIR` can select another absolute registry directory. The custom dashboard and tmux pane are optional additional views.
 
 ```bash
-exec /home/hamza/.local/bin/claive-worker \
+exec claive-worker \
   --workspace "$task_workspace" \
   --prompt-file "$task_prompt" \
   --label "Implement assigned feature" \
@@ -115,11 +144,11 @@ For Pi, use the same launcher with `--engine pi --provider opencode2api` and omi
 Read-only adds an instruction through `--append-system-prompt` and after the task.
 This is a request to the model, not enforcement. Pi has no OS sandbox.
 It passes `--offline --no-extensions --no-prompt-templates --no-themes --no-approve`.
-Skills, MCP and context files load. See `/home/hamza/repo/claive/docs/pi-engine.md` for the verified runtime contract.
+Skills, MCP and context files load. See `docs/pi-engine.md` in the Claive checkout for the verified runtime contract.
 
 The shell session ID and the 12-character worker ID printed by `claive-worker` identify different objects; the retained worker `session_id` (a Codex thread ID for this engine) is a third identifier. Report both when a session is yielded. Keep ownership through the related task chain and final closure. Do not append `&`, use `nohup`/`disown`, or replace the default with `claive start`: those detach the worker from Codex's managed terminal. `start` is available for deliberately detached jobs and returns immediately; such jobs remain visible in the registry dashboard but not in Codex's terminal indicator.
 
-Async options (host-neutral; full protocol in `/home/hamza/repo/claive/docs/harness-integration.md`). When several workers run at once, or a worker would outlive the shell session, use `claive open --detach` (reusable, returns at once) or `claive start`, then `claive wait ID1 ID2 --any --timeout S` (first worker to settle; exit 124 means still running), with `S` below the tool's time limit; add `--inbox codex` to also return on new inbox events. Give a reusable worker context with `claive send ID --message ... [--mode note|wake|now]` (`note` waits for its next turn); question it with `claive ask ID --message ... --timeout 120` (0 answered, 124 withdrawn/expired) and read its recent steps with `claive peek ID`. At the start of each turn, and after context compaction, run `claive inbox --consumer codex` to see finished turns since the last read; `ASK` lines carry a worker's question (answer with `claive answer ID --message ...`; exit 3 means the same). Parallel staged work: `claive batch start /abs/plan.json`, then `claive batch wait ID`. Multi-turn efforts: `claive mission new --title T --goal-file F`, `export CLAIVE_MISSION=<id>`, record decisions with `claive mission note`, and resume with `claive mission show ID` (its `Next:` line). Unattended server queue: `claive goal add` plus `claive serve`; answer parked goals with `claive goal answer ID --message ...`. Name a reusable worker at launch with `--alias NAME` or `--label NAME`; use `claive alias set NAME ID` only if the launch left it unnamed. Workers can talk to each other: `claive conversation start @a @b --message-file /abs/topic.md --rounds 2 --timeout 300 --json` runs a bounded exchange between existing idle reusable workers and forwards each reply to the next (exit 3 = a question, 124/130 = inspect `pending_request.response_file` first; see `claive-orchestration`). Workers cannot launch workers or start conversations.
+Async options (host-neutral; full protocol in `docs/harness-integration.md` in the Claive checkout). When several workers run at once, or a worker would outlive the shell session, use `claive open --detach` (reusable, returns at once) or `claive start`, then `claive wait ID1 ID2 --any --timeout S` (first worker to settle; exit 124 means still running), with `S` below the tool's time limit; add `--inbox codex` to also return on new inbox events. Give a reusable worker context with `claive send ID --message ... [--mode note|wake|now]` (`note` waits for its next turn); question it with `claive ask ID --message ... --timeout 120` (0 answered, 124 withdrawn/expired) and read its recent steps with `claive peek ID`. At the start of each turn, and after context compaction, run `claive inbox --consumer codex` to see finished turns since the last read; `ASK` lines carry a worker's question (answer with `claive answer ID --message ...`; exit 3 means the same). Parallel staged work: `claive batch start /abs/plan.json`, then `claive batch wait ID`. Multi-turn efforts: `claive mission new --title T --goal-file F`, `export CLAIVE_MISSION=<id>`, record decisions with `claive mission note`, and resume with `claive mission show ID` (its `Next:` line). Unattended server queue: `claive goal add` plus `claive serve`; answer parked goals with `claive goal answer ID --message ...`. Name a reusable worker at launch with `--alias NAME` or `--label NAME`; use `claive alias set NAME ID` only if the launch left it unnamed. Workers can talk to each other: `claive conversation start @a @b --message-file /abs/topic.md --rounds 2 --timeout 300 --json` runs a bounded exchange between existing idle reusable workers and forwards each reply to the next (exit 3 = a question, 124/130 = inspect `pending_request.response_file` first; see `claive-orchestration`). Workers cannot launch workers or start conversations.
 
 For cancellation use `claive cancel WORKER_ID`, then collect the managed session's final output. Forcibly killing a terminal can bypass supervisor cleanup; if interrupted, inspect the registry and stop any surviving worker. Use:
 
@@ -163,7 +192,7 @@ Prefer `--prompt-file` over a positional prompt for more than a few lines. Write
 Use the tracked launcher above for routine work. If a task requires a Muse option the manager does not expose, extend the manager within authorized scope or report the limitation; do not silently bypass monitoring. This underlying invocation documents the manager's contract. It assumes `task_workspace`, `task_prompt`, and `task_logs` already contain absolute paths and `task_session` is the retained UUID for this lane, the prompt exists, and the log directory exists:
 
 ```bash
-if /home/hamza/.local/bin/muse exec \
+if muse exec \
   --workspace "$task_workspace" \
   --trust-workspace \
   --disable-approval \

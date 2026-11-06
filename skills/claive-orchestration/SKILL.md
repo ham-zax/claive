@@ -45,7 +45,7 @@ The TTC experiment is deferred and is not part of this workflow.
 
 `claive` runs ordinary bounded tasks on `--engine muse|pi|claude|codex|agy`. The runtime
 pins Muse to `muse-spark-1.3-contributor` and Codex to
-`gpt-6.1-terra` at `low` through `ultra` (default `xhigh`), `gpt-6-luna` at `medium` or `max` (default `max`), or `gpt-6.1-sol` at `low` through `xhigh` (default `medium`); Pi uses `opencode2api` and its selected model.
+`gpt-6.1-terra` at `low` through `ultra` (default `xhigh`), `gpt-6-luna` at `medium` or `max` (default `max`), or `gpt-6.1-sol` at `low` through `xhigh` (default `medium`); Pi uses the configured default provider and its selected model (`claive engines` shows both).
 Claude defaults to `claude-haiku-5-5`; `engines.claude.models` in the claive config decides
 which Claude models are allowed. Claude context budget mode is on by default: at its stop limit
 claive denies the worker's tool calls (a PreToolUse hook; the denied tool error is expected), the
@@ -72,9 +72,51 @@ Treat pause guidance and intermediate handoffs as recovery information, never as
 
 **Check `claive engines [--json]` before choosing an engine.** It lists each engine's
 enabled state, the user's reason, default and disabled models and efforts, and steering
-transport. Use it to map dictated model and effort names. Muse is disabled on this
-host for now; use Pi for the `claive-orch` implementer. A disabled launch is refused:
+transport. Use it to map dictated model and effort names. A disabled launch is refused:
 do not retry or work around it.
+
+## Configuration and isolated runs
+
+The host config is YAML or JSON at `$CLAIVE_CONFIG`, else `config.yaml`,
+`config.yml` or `config.json` in `~/.config/claive/`. Validate it before a launch:
+
+```sh
+claive config check
+```
+
+Do not edit the shared host file while another agent uses it. For a parallel wave,
+copy it and export the path:
+
+```sh
+cp ~/.config/claive/config.yaml /tmp/wave3.yaml
+export CLAIVE_CONFIG=/tmp/wave3.yaml
+claive config check
+```
+
+The supervisor inherits `CLAIVE_CONFIG`, so follow-ups use the same file. Override one
+key for one worker without a file edit:
+
+```sh
+claive run --set '{engines: {pi: {default_model_efforts: {deepseek-v4-1-flash-1017: low}}}}' ...
+```
+
+`--set` deep-merges over the file, a dedicated flag still wins, and the worker record
+keeps it for follow-ups.
+
+Effort is per model. `default_model_efforts` sets an effort for one model; with no
+value Claive passes no effort flag and the engine uses the model's own level.
+`disabled_model_efforts` refuses an effort for one model. `providers` disables a
+provider with a reason. The old engine-wide `default_reasoning_effort` and
+`disabled_reasoning_efforts` keys are removed and fail with the replacement.
+
+Inspect before choosing:
+
+```sh
+claive config check
+claive engines
+claive engine config NAME
+claive models NAME
+```
 
 ## Capability map
 

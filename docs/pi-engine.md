@@ -164,8 +164,12 @@ On 2026-11-06, Pi 1.5.0 with provider `mistral` and model
 `deepseek-v4-1-flash-1017` served 16,000 of 16,155 input tokens from cache on the
 second turn of a reusable worker (99%). The cold first turn reported 512 cached
 tokens. Two long-running workers reported 83% and 86% overall cache hit ratios.
-`claive usage ID` prints `cached_tokens` and `cache_hit_ratio`. A change of model,
-provider, session or system prompt starts a new prefix and a cold cache.
+Direct Pi with the same provider and model, using `--session-id` and
+`--session-dir`, served 23,296 of 23,320 input tokens from cache on the second
+turn (99.9%). The `deepseek` provider could not be tested because its account
+reported insufficient balance. `claive usage ID` prints `cached_tokens` and
+`cache_hit_ratio`. A change of model, provider, session or system prompt starts a
+new prefix and a cold cache.
 
 `tests/fixtures/pi/*.jsonl` contains sanitized versions of those captured event
 sequences. Prompts, identifiers, paths and message bodies are replaced; thinking

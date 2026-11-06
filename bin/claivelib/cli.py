@@ -795,6 +795,8 @@ def previous_turn_incident(state):
 def rebuild_for_fallback(state, engine, new_model):
     launch = launch_config(state)
     provider = launch.get("provider")
+    if engine.name == "pi" and "/" in new_model:
+        provider, new_model = split_pi_model(new_model, None)
     read_only = bool(launch.get("read_only"))
     web = bool(launch.get("web"))
     output_schema = launch.get("output_schema")

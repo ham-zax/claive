@@ -59,7 +59,7 @@ model-step cap.
 | `--provider` | Engine provider. Pi accepts any provider it knows; see `claive pi provider list` |
 | `--mission` | link the new worker to a mission |
 | `--turn-timeout` | fail a turn that runs longer than SECONDS (positive number) |
-| `--fallback-models` | comma-separated fallback models for run/start. AGY also supports reusable open workers |
+| `--fallback-models` | comma-separated fallback models for run/start. Pi accepts `provider/model` to switch provider. AGY also supports reusable open workers |
 
 `--set` is the general override for a key that has no dedicated flag:
 

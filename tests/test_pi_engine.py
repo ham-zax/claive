@@ -322,6 +322,26 @@ class PiChecks(unittest.TestCase):
         self.assertIsNone(state["session_id"])
         self.assertNotEqual(self.command("usage", state["id"]).returncode, 0)
 
+    def test_fallback_parses_a_pi_provider(self):
+        result, state = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        previous = {name: os.environ.get(name) for name in ("PI_WORKER_BINARY", "PI_CODING_AGENT_DIR")}
+        os.environ["PI_WORKER_BINARY"] = str(REPO / "tests/fake_pi.py")
+        os.environ["PI_CODING_AGENT_DIR"] = str(self.agent_dir)
+        try:
+            launch, command, session = cli.rebuild_for_fallback(
+                self.state(state["id"]), PiEngine(), "mistral/deepseek-v4-1-flash-1017")
+        finally:
+            for name, value in previous.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+        self.assertEqual(launch["provider"], "mistral")
+        self.assertEqual(launch["model"], "deepseek-v4-1-flash-1017")
+        self.assertIn("mistral", command)
+        self.assertIn("deepseek-v4-1-flash-1017", command)
+
     def test_usage_all_sums_retained_sessions(self):
         result, first = self.launch()
         self.assertEqual(result.returncode, 0, result.stderr)

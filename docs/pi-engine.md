@@ -30,6 +30,19 @@ already know the chosen model.
 Thinking supports `off`, `minimal`,
 `low`, `medium`, `high`, `xhigh`, and `max`; Pi may clamp it to model capabilities.
 
+To try the free DeepSeek model on `opencode2api` three times, then fall back to the
+paid Mistral model, put the chain in the launch flags:
+
+```sh
+claive run --engine pi --provider opencode2api --model deepseek-v4.1-flash-free \
+  --fallback-models opencode2api/deepseek-v4.1-flash-free,opencode2api/deepseek-v4.1-flash-free,mistral/deepseek-v4-1-flash-1017 \
+  ...
+```
+
+Each entry runs in a fresh session. The first two entries retry the primary. The
+third switches provider. Claive does not hardcode the chain; it lives in the command.
+`--fallback-models` applies to `run` and `start`, not Pi `open` workers.
+
 The existing `followup`, `effort`, `wait`, `close`, and `cancel` commands apply to
 Pi workers. Unsupported effort or step-limit requests are rejected before queue
 or policy changes. Errors discovered while constructing a queued command reject

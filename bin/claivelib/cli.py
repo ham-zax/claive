@@ -1869,10 +1869,7 @@ def _create_job(args):
     if args.max_model_steps is not None and args.max_model_steps < 1:
         raise ValueError("--max-model-steps must be positive")
     turn_timeout = parse_turn_timeout(getattr(args, "turn_timeout", None))
-    fallback_raw = getattr(args, "fallback_models", None)
-    fallback_models = parse_fallback_models(fallback_raw)
-    if fallback_models and getattr(args, "enable_steering", False):
-        raise ValueError("steering cannot be combined with --fallback-models")
+    cli_fallback_raw = getattr(args, "fallback_models", None)
     if args.action == "open" and args.no_session_log:
         raise ValueError("reusable workers require session logging to preserve follow-up history")
     if args.session_id and args.no_session_log:
@@ -1903,11 +1900,17 @@ def _create_job(args):
         report_contract=REPORT_CONTRACT if report_contract else None,
     )
     engine_name = getattr(args, "engine", None) or (role_def["engine"] if role_def else None) or default_engine()
-    if args.action == "open" and fallback_raw is not None and engine_name != "agy":
+    if args.action == "open" and cli_fallback_raw is not None and engine_name != "agy":
         raise ValueError("--fallback-models requires single-turn workers (run/start), except for AGY open workers")
     engine = get_engine(engine_name)
     check_engine_policy(engine_name)
     policy = config.engine_policy(engine_name)
+    fallback_raw = cli_fallback_raw
+    if fallback_raw is None and (args.action != "open" or engine_name == "agy"):
+        fallback_raw = policy.get("fallback_models")
+    fallback_models = parse_fallback_models(fallback_raw)
+    if fallback_models and getattr(args, "enable_steering", False):
+        raise ValueError("steering cannot be combined with --fallback-models")
     session_id = engine.resolve_session_id(args.session_id, not args.no_session_log)
     requested_provider, requested_model = (split_pi_model(args.model, args.provider)
                                            if engine_name == "pi" else (args.provider, args.model))
@@ -2672,7 +2675,8 @@ def engines_report(json_output=False):
         row = dict(engine=name, enabled=policy.get("enabled", True), reason=policy.get("reason", ""),
                    default=name == default,
                    disabled_models=policy.get("disabled_models", []),
-                   disabled_model_efforts=policy.get("disabled_model_efforts", {}))
+                   disabled_model_efforts=policy.get("disabled_model_efforts", {}),
+                   fallback_models=policy.get("fallback_models", []))
         try:
             engine = get_engine(name)
             capability = engine.steering_capability()
@@ -2714,6 +2718,8 @@ def engines_report(json_output=False):
         binary = (row.get("config") or {}).get("binary")
         if binary:
             print(f"  binary {binary['value']} ({binary['source']})")
+        if row.get("fallback_models"):
+            print("  fallbacks " + ", ".join(row["fallback_models"]))
         if row.get("providers"):
             print(f"  providers (default {row['default_provider']}): " + ", ".join(
                 f"{item['provider']} ({'ready' if item['ready'] else 'not ready' if item['ready'] is False else 'unknown'}"

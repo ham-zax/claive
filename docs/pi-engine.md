@@ -41,7 +41,9 @@ claive run --engine pi --provider opencode2api --model deepseek-v4.1-flash-free 
 
 Each entry runs in a fresh session. The first two entries retry the primary. The
 third switches provider. Claive does not hardcode the chain; it lives in the command.
-`--fallback-models` applies to `run` and `start`, not Pi `open` workers.
+The same chain can live in the config under `engines.pi.fallback_models`; the
+command-line flag overrides it. `--fallback-models` applies to `run` and `start`, not
+Pi `open` workers.
 
 The existing `followup`, `effort`, `wait`, `close`, and `cancel` commands apply to
 Pi workers. Unsupported effort or step-limit requests are rejected before queue

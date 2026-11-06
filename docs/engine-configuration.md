@@ -80,6 +80,7 @@ engines:
 | `disabled_models` | list or `{name: reason}` | refuse these models |
 | `disabled_model_efforts` | `{model: [effort] or {effort: reason}}` | refuse these efforts for that model only |
 | `extra_args` | list of strings | appended to the command; owned flags refused |
+| `fallback_models` | list of model names | models tried after a fallbackable failure; Pi accepts `provider/model` |
 | `providers` | `{name: {enabled: bool, reason: str}}` | refuse a provider label; for Pi it also drives the provider list and the default |
 | `enabled` | boolean | refuse the engine outright |
 | `reason` | string | why it is disabled, shown to the parent |
@@ -168,6 +169,30 @@ AGY declare a per-model effort in their catalogs, so they always pass one.
 Precedence for the binary and provider is: command-line flag, then the config
 file, then the engine's `*_WORKER_BINARY` environment variable, then the built-in
 path. The environment variables keep working, so an existing host needs no change.
+
+## Fallbacks
+
+`fallback_models` is the ordered list tried after a fallbackable failure: timeout,
+quota, worker or protocol. A Pi entry may name `provider/model` to switch provider.
+The command-line `--fallback-models` overrides the list.
+
+```yaml
+engines:
+  pi:
+    default_provider: opencode2api
+    default_model: deepseek-v4.1-flash-free
+    default_model_efforts:
+      deepseek-v4.1-flash-free: max
+      deepseek-v4-1-flash-1017: max
+    fallback_models:
+      - opencode2api/deepseek-v4.1-flash-free
+      - opencode2api/deepseek-v4.1-flash-free
+      - mistral/deepseek-v4-1-flash-1017
+```
+
+The first two entries retry the primary. The third switches to Mistral. `run` and
+`start` use the list. Pi `open` workers ignore it; only AGY `open` workers support
+fallbacks.
 
 ## Model tiers
 

@@ -76,6 +76,13 @@ so a host can adopt a model released after this build without a code change:
     {"engines": {"claude": {"extra_models": {"claude-opus-6": {"efforts": ["high", "xhigh"]}}}}}
 
 `claive models` prints the three tiers; see docs/engine-configuration.md.
+
+"fallback_models" is the ordered list of models tried after a fallbackable failure. A Pi
+entry may name "provider/model" to switch provider. The command-line --fallback-models
+overrides the list:
+
+    {"engines": {"pi": {"fallback_models": ["opencode2api/deepseek-v4.1-flash-free",
+                                            "mistral/deepseek-v4-1-flash-1017"]}}}
 """
 from copy import deepcopy
 import json
@@ -118,7 +125,7 @@ ENGINE_KEYS = {
     "enabled": bool, "reason": str, "default_model": str, "default_model_efforts": dict,
     "disabled_models": (list, dict), "disabled_model_efforts": dict, "models": dict,
     "user_config": bool, "extra_args": list, "budget": (bool, dict),
-    "providers": dict, "default_provider": str,
+    "fallback_models": list, "providers": dict, "default_provider": str,
     "binary": str, "provider": str, "env": dict, "prompt_limit": int, "extra_models": dict,
 }
 # Every engine accepts these; each engine module declares the default it falls back to.
@@ -409,6 +416,9 @@ def validate(data, path):
             limit = policy["prompt_limit"]
             if isinstance(limit, bool) or limit < 1:
                 raise ValueError(f"{where}.prompt_limit must be a positive integer")
+        if "fallback_models" in policy and not all(
+                isinstance(item, str) and item for item in policy["fallback_models"]):
+            raise ValueError(f"{where}.fallback_models must hold nonempty model names")
         listed = policy.get("disabled_models", [])
         reasons = listed.values() if isinstance(listed, dict) else []
         if not all(isinstance(item, str) and item for item in listed) or not all(
@@ -830,6 +840,7 @@ engines:
     # default_provider: mistral
     # default_model: deepseek-v4-1-flash-1017
     # default_model_efforts: {deepseek-v4-1-flash-1017: max}
+    # fallback_models: [opencode2api/deepseek-v4.1-flash-free, mistral/deepseek-v4-1-flash-1017]
     # env: {ANTHROPIC_LOG: debug}
     # prompt_limit: 200000
     # models:                      # allowlist: narrows the engine's catalog

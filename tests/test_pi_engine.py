@@ -322,6 +322,22 @@ class PiChecks(unittest.TestCase):
         self.assertIsNone(state["session_id"])
         self.assertNotEqual(self.command("usage", state["id"]).returncode, 0)
 
+    def test_config_fallbacks_apply_without_the_flag(self):
+        config_path = self.root / "config.yaml"
+        config_path.write_text("engines:\n  pi:\n    fallback_models:\n"
+                               "      - mistral/deepseek-v4-1-flash-1017\n")
+        self.env["CLAIVE_CONFIG"] = str(config_path)
+        result, state = self.launch(mode="failure")
+        self.assertEqual(self.state(state["id"]).get("fallback_models"),
+                         ["mistral/deepseek-v4-1-flash-1017"])
+
+    def test_cli_fallbacks_override_the_config(self):
+        config_path = self.root / "config.yaml"
+        config_path.write_text("engines:\n  pi:\n    fallback_models: [mistral/deepseek-v4-1-flash-1017]\n")
+        self.env["CLAIVE_CONFIG"] = str(config_path)
+        result, state = self.launch("--fallback-models", "opencode2api/other-model", mode="failure")
+        self.assertEqual(self.state(state["id"]).get("fallback_models"), ["opencode2api/other-model"])
+
     def test_fallback_parses_a_pi_provider(self):
         result, state = self.launch()
         self.assertEqual(result.returncode, 0, result.stderr)

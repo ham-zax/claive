@@ -147,6 +147,12 @@ class Providers(Base):
             config.load()
         self.assertIn("engines.claude.provider bedrock is disabled", str(caught.exception))
 
+    def test_fallback_models_must_hold_names(self):
+        self.write("config.yaml", "engines:\n  pi:\n    fallback_models: [ok, '']\n")
+        with self.assertRaises(ValueError) as caught:
+            config.load()
+        self.assertIn("fallback_models must hold nonempty model names", str(caught.exception))
+
     def test_a_disabled_default_provider_is_refused(self):
         self.write("config.yaml", "engines:\n  pi:\n    default_provider: mistral\n    providers:\n"
                                   "      mistral:\n        enabled: false\n")

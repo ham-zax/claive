@@ -160,6 +160,13 @@ The adapter needed no change because it passes only the provider name. On
 2026-10-06 a read-only `claive run --engine pi` turn completed through that
 server with `space-bunny-free`; no local gateway was listening.
 
+On 2026-11-06, Pi 1.5.0 with provider `mistral` and model
+`deepseek-v4-1-flash-1017` served 16,000 of 16,155 input tokens from cache on the
+second turn of a reusable worker (99%). The cold first turn reported 512 cached
+tokens. Two long-running workers reported 83% and 86% overall cache hit ratios.
+`claive usage ID` prints `cached_tokens` and `cache_hit_ratio`. A change of model,
+provider, session or system prompt starts a new prefix and a cold cache.
+
 `tests/fixtures/pi/*.jsonl` contains sanitized versions of those captured event
 sequences. Prompts, identifiers, paths and message bodies are replaced; thinking
 deltas are omitted. They retain the relevant native event order, completion

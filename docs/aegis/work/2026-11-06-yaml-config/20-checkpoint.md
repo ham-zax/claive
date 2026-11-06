@@ -74,6 +74,18 @@ Verification: focused tests pass. A live Pi turn with
 session line. A merged config that disabled the default model was refused with
 "(with --set overrides)".
 
+## Usage report and batching
+
+- `claive usage --all [--since HOURS] [--json]` sums retained provider usage across
+  workers. It prints total input, cached input, uncached input, output and the cache
+  ratio, plus one row per worker. `--since` accepts `12h`, `24h` or `12`.
+- The skills now nudge batching: one coherent slice per brief, no micro-task
+  follow-ups, small tool output, reassess after about 10 follow-ups, and check usage
+  before and after a wave.
+- Live 12h totals: 928.5M input, 888.0M cached, 40.4M uncached, 2.6M output, 95.6%
+  cache. At $0.30 input, $1.20 output and $0.007 cache per million, the cost is
+  $22.91. The six Wave 4 workers are $20.74 of that.
+
 ## Open
 
 - The working tree still holds the earlier AGY and Pi multi-provider changes.

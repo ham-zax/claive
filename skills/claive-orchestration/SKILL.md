@@ -118,6 +118,24 @@ claive engine config NAME
 claive models NAME
 ```
 
+## Cost and batching
+
+Each call resends the whole conversation. Cost scales with calls × context, not with
+the number of files changed. A worker with 400 follow-ups and a 340k context costs
+far more than one worker with 20 larger turns.
+
+- Batch related work into one brief. One coherent slice per worker, not one
+  micro-task per follow-up.
+- Put every related file, check and acceptance criterion in the first prompt.
+- Do not use a follow-up for a small edit. Add it to the same brief.
+- Keep the context small: targeted reads and summaries, no large file or log dumps.
+- If a worker needs more than about 10 follow-ups, stop and reassess. The brief was
+  too narrow or the context is too large.
+- Check `claive usage ID --json` for one worker and `claive usage --all --since 12h`
+  for the host. Run it before and after a wave.
+- Prefer a cheaper model for mechanical steps. Reserve the frontier model for
+  reasoning and design.
+
 ## Capability map
 
 Workers use the engine's default tools. Claive supplies no restricted tool list.

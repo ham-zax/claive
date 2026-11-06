@@ -2879,6 +2879,73 @@ def config_migrate(force=False):
     return 0
 
 
+def parse_hours(raw):
+    """Parse a --since value: 12, 12h or 1.5."""
+    text = str(raw).strip().lower()
+    if text.endswith("h"):
+        text = text[:-1]
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected hours such as 12h, not {raw!r}") from None
+    if value <= 0:
+        raise argparse.ArgumentTypeError("hours must be positive")
+    return value
+
+
+def usage_all_report(since_hours=None, json_output=False):
+    """Sum retained provider usage across workers, optionally limited to a time window."""
+    cutoff = time.time() - since_hours * 3600 if since_hours is not None else None
+    rows, skipped = [], 0
+    for path in sorted(root().glob("*/state.json")):
+        try:
+            state = load(path.parent, check_alive=False)
+        except (OSError, ValueError):
+            continue
+        last = max(state.get("ended_at") or 0, state.get("last_activity") or 0,
+                   state.get("started_at") or 0)
+        if cutoff is not None and last < cutoff:
+            continue
+        try:
+            usage = get_engine(state.get("engine", DEFAULT_ENGINE)).session_usage(state)
+        except (OSError, ValueError, KeyError):
+            skipped += 1
+            continue
+        totals = usage.get("totals") or {}
+        rows.append({"id": state.get("id") or path.parent.name, "label": state.get("label"),
+                     "engine": state.get("engine"), "model": state.get("model"),
+                     "turn": state.get("turn"), "status": state.get("status"),
+                     "last_activity": last, "model_calls": usage.get("model_calls"),
+                     "input_tokens": totals.get("input_tokens"),
+                     "cached_tokens": totals.get("cached_tokens"),
+                     "output_tokens": totals.get("output_tokens"),
+                     "cache_hit_ratio": usage.get("cache_hit_ratio")})
+    totals = {key: sum(row[key] for row in rows if isinstance(row.get(key), int))
+              for key in ("input_tokens", "cached_tokens", "output_tokens")}
+    inputs = totals.get("input_tokens", 0)
+    cached = totals.get("cached_tokens", 0)
+    uncached = inputs - cached if "cached_tokens" in totals and cached <= inputs else None
+    ratio = cached / inputs if inputs and "cached_tokens" in totals else None
+    result = {"workers": rows, "totals": totals, "uncached_input_tokens": uncached,
+              "cache_hit_ratio": ratio, "skipped": skipped, "since_hours": since_hours}
+    if json_output:
+        print(json.dumps(result, indent=2))
+        return 0
+    window = f" in the last {since_hours:g}h" if since_hours is not None else ""
+    print(f"Workers{window}: {len(rows)}" + (f" | {skipped} without retained usage" if skipped else ""))
+    print(f"Input: {totals.get('input_tokens', 0):,} | Cached: {totals.get('cached_tokens', 0):,} | "
+          f"Output: {totals.get('output_tokens', 0):,}")
+    if uncached is not None:
+        print(f"Uncached input: {uncached:,}")
+    if ratio is not None:
+        print(f"Reported input served from cache: {ratio:.1%}")
+    for row in sorted(rows, key=lambda item: item.get("input_tokens") or 0, reverse=True):
+        print(f"{row['id']} {clean(row.get('label') or '')[:38]:38} {(row.get('engine') or ''):7} "
+              f"{(row.get('model') or '')[:28]:28} in {row.get('input_tokens') or 0:,} "
+              f"cached {row.get('cached_tokens') or 0:,} out {row.get('output_tokens') or 0:,}")
+    return 0
+
+
 def doctor(json_output=False, live=False):
     checks = doctor_checks(live)
     ok = all(item["ok"] for item in checks if item["required"])
@@ -3169,9 +3236,14 @@ def parser():
     conversation_show.add_argument("--json", action="store_true")
     for action in ("show", "logs", "cancel", "close", "usage"):
         command = commands.add_parser(action)
-        command.add_argument("id")
+        command.add_argument("id", nargs="?" if action == "usage" else None)
         if action in {"show", "usage"}:
             command.add_argument("--json", action="store_true")
+        if action == "usage":
+            command.add_argument("--all", action="store_true", dest="all_workers",
+                                 help="sum every worker with retained usage")
+            command.add_argument("--since", type=parse_hours, metavar="HOURS",
+                                 help="only workers active in the last HOURS, such as 12h or 24h")
         if action == "logs":
             command.add_argument("--stderr", action="store_true")
             command.add_argument("--lines", type=int, default=20)
@@ -3335,7 +3407,7 @@ def main(launcher=None):
     # Resolve once per command so a concurrent rebind cannot redirect later reads
     # or writes in the same operation. Persisted links and output keep canonical IDs.
     worker_actions = {"show", "logs", "cancel", "close", "usage", "followup", "effort", "answer", "verify", "accept", "scope", "steer", "send", "peek", "ask", "schedule", "fork", "handoff"}
-    if args.action in worker_actions and (args.id.startswith("@") or not re.fullmatch(r"[0-9a-f]{12}", args.id)):
+    if args.action in worker_actions and args.id and (args.id.startswith("@") or not re.fullmatch(r"[0-9a-f]{12}", args.id)):
         args.id = job_path(args.id).name
     elif args.action == "wait":
         args.id = [job_path(value).name if value.startswith("@") or not re.fullmatch(r"[0-9a-f]{12}", value)
@@ -3657,6 +3729,12 @@ def main(launcher=None):
         else:
             print(json.dumps(acceptance.decide(path, state, args.reject, args.reason, args.exception), indent=2))
     elif args.action == "usage":
+        if args.all_workers:
+            if args.id:
+                raise ValueError("pass a worker ID or --all, not both")
+            return usage_all_report(args.since, args.json)
+        if not args.id:
+            raise ValueError("pass a worker ID or --all")
         state = load(job_path(args.id))
         usage = get_engine(state.get("engine", DEFAULT_ENGINE)).session_usage(state)
         from claivelib.usage import recent_usage

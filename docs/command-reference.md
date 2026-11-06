@@ -887,15 +887,21 @@ Read recorded provider counters. Missing counters mean unknown.
 
 ```text
 claive usage [--json] id
+claive usage --all [--since HOURS] [--json]
 ```
 
 | Option | Meaning |
 |---|---|
 | `--json` | Print JSON |
+| `--all` | Sum every worker with retained usage |
+| `--since HOURS` | Only workers active in the last HOURS, such as `12h` or `24h` |
 
-Exit codes: 0 on success. Common errors apply.
+One worker prints its session totals, cache ratio and latest call. `--all` prints the
+host totals, the uncached input, the cache ratio, and one row per worker. Direct Pi
+sessions outside Claive are not included. Exit codes: 0 on success. `--all` with an
+ID, or neither, is refused.
 
-Example: `claive usage @backend --json`.
+Example: `claive usage @backend --json` or `claive usage --all --since 12h`.
 
 ## `peek`
 

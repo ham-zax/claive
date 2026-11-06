@@ -222,6 +222,12 @@ fi
 
 ## Reuse and prompt caching
 
+Batch related work into one brief. Each follow-up resends the whole conversation, so
+cost scales with calls × context. A worker with 400 small follow-ups and a 340k
+context costs far more than one worker with 20 larger turns. Keep tool output small,
+and stop at about 10 follow-ups to reassess. Check `claive usage ID --json` or
+`claive usage --all --since 12h` before and after a wave.
+
 Keep one worker and durable Codex session for a related task chain. Keep it idle when a specific related follow-up is expected in the active workflow. If no further use is planned, close it and collect the managed terminal output; retained history can be reopened later. Do not leave an idle worker running indefinitely for hypothetical future tasks. Read `show ID --json` for `session_id`; send a narrow `followup` instead of launching a new session. A per-turn effort override does not change the future default; `effort ID` does. Follow-ups can also override `--max-model-steps`. The worker appends JSONL/stderr logs and keeps each answer in `turn-000N.txt`. Queued follow-ups run sequentially and do not change an active request. For supported live input, a Pi, Codex or Claude worker must be launched with `--enable-steering`; `claive steer ID --message ... --wait 10 --json` records provider acknowledgement at the next model boundary, not proof of consumption. The current Muse transport rejects this operation. Cancellation/restart is a separate action; do not silently substitute it for steering. `close ID` finishes assigned turns before ending; `cancel ID` requests a stop. After closure, resuming with `--session-id UUID` restores retained history; preserve workspace and tool policy. A `--worktree` worktree is created by claive and lasts for all turns of the worker; it is removed when the worker ends unless it has changes, commits, pending acceptance, or Git refuses removal (then `retained_worktree` in `show --json` names it). To resume a closed session on the same files, pass that worktree with `--worktree-existing`. Do not retire solely after two or four tasks. Start fresh for unrelated work or an actual context/quality limit.
 
 Each underlying `muse exec` child exits after its turn; the supervisor stays alive and the same UUID reloads history next turn. This preserves conversation context across process exits. It is not a persistent model connection or proof of a cache hit.

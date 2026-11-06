@@ -1,4 +1,5 @@
 import hermetic  # noqa: F401  (must run before claivelib reads the environment)
+import argparse
 import json
 import os
 from pathlib import Path
@@ -320,6 +321,32 @@ class PiChecks(unittest.TestCase):
         self.assertIn("--no-session", state["command"])
         self.assertIsNone(state["session_id"])
         self.assertNotEqual(self.command("usage", state["id"]).returncode, 0)
+
+    def test_usage_all_sums_retained_sessions(self):
+        result, first = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result, second = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.command("usage", "--all", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual({row["id"] for row in payload["workers"]}, {first["id"], second["id"]})
+        self.assertEqual(payload["totals"]["input_tokens"], 2278)
+        self.assertEqual(payload["totals"]["cached_tokens"], 140)
+        self.assertAlmostEqual(payload["cache_hit_ratio"], 140 / 2278)
+        self.assertEqual(payload["uncached_input_tokens"], 2138)
+        self.assertEqual(self.command("usage", "--all", "--since", "12h").returncode, 0)
+        self.assertIn("pass a worker ID or --all", self.command("usage").stderr)
+        self.assertIn("not both", self.command("usage", "--all", first["id"]).stderr)
+
+    def test_since_accepts_hours(self):
+        self.assertEqual(cli.parse_hours("12h"), 12)
+        self.assertEqual(cli.parse_hours("24"), 24)
+        self.assertEqual(cli.parse_hours("1.5h"), 1.5)
+        with self.assertRaises(argparse.ArgumentTypeError):
+            cli.parse_hours("0")
+        with self.assertRaises(argparse.ArgumentTypeError):
+            cli.parse_hours("soon")
 
     def test_session_workspace_and_usage_unknowns(self):
         result, state = self.launch()

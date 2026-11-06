@@ -10,10 +10,24 @@ unknown model-call counts and cache ratios. Read-only requests use soft read.
 Use `--require-read-only` when native write prevention is required.
 See [AGY setup and limits](docs/agy-engine.md).
 
-Pi is available explicitly with `--engine pi`, using only `opencode2api`. Its initial model is
-`muse-spark-1.3-contributor-free`; new Pi workers inherit the last explicitly selected
-Pi model when `--model` is omitted. See [Pi setup, sessions, supported options and verification](docs/pi-engine.md).
+Pi is available explicitly with `--engine pi` and runs any provider Pi knows. Select one with
+`--provider NAME`, or name both at once with `--model provider/id`; a bare `--model` uses the
+default provider. Its initial model is `muse-spark-1.3-contributor-free`; new Pi workers inherit
+the last explicitly selected Pi model when `--model` is omitted. `claive pi provider
+list|add|remove|check` inspects and edits Pi's `models.json`, and `engines.pi.providers` in the
+claive config disables a provider with a reason. See
+[Pi setup, providers, sessions, supported options and verification](docs/pi-engine.md).
 The built-in default is Muse when no host configuration selects another engine. Run `claive engines` and `claive doctor` to inspect the current host.
+
+Every engine accepts the same config keys — `binary`, `provider`, `env`, `prompt_limit`,
+`default_model`, `default_model_efforts`, `models`, `extra_models`, `extra_args`, `providers` — so
+nothing an engine compiles in is unreachable from the file. The file is YAML or JSON, discovered as
+`$CLAIVE_CONFIG`, then `config.yaml`, `config.yml`, `config.json` in `~/.config/claive/`. Models come
+in three tiers: the default, the allowed set, and the extra set that needs an explicit opt-in.
+`claive models` prints them, `claive engine config [NAME] [--json]` prints the effective value and
+its source for every key, and `claive config check|show|init|migrate` validates, prints, scaffolds or
+converts the file. `--set '{engines: {pi: {prompt_limit: 200000}}}'` on a launch overrides any key
+for that worker without editing the file. See [engine configuration](docs/engine-configuration.md).
 
 Claude Code is available with `--engine claude` (headless `claude -p`, binary `~/.local/bin/claude` or
 `CLAUDE_WORKER_BINARY`). It defaults to `claude-haiku-5-5`. The claive config decides which models it may use:
@@ -30,7 +44,7 @@ explicit soft-read instruction. Claive reports that write prevention is not enfo
 permission rules out. MCP servers and skills load. WebSearch and WebFetch stay on.
 Claude workers load CLAUDE.md files through `--add-dir` and
 `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`. Claive adds the worker file
-`claude/CLAUDE.md` next to `config.json` (default `~/.config/claive/claude/CLAUDE.md`) when it
+`claude/CLAUDE.md` next to the config file (default `~/.config/claive/claude/CLAUDE.md`) when it
 exists. Then claive adds each directory from the git root down to the workspace. The walk stops
 below the home directory. The parent's `~/.claude/CLAUDE.md`, `CLAUDE.local.md` and `@import`
 lines do not load.
@@ -269,9 +283,9 @@ Web tools stay on. `--web` is accepted and has no effect on Muse. `--model` acce
 
 ## Model, reasoning, and caching
 
-Every live Muse worker uses **`muse-spark-1.3-contributor`**. Default reasoning is **`xhigh`**. Use **`max`** for very complicated tasks and **`high`/`medium`** only when suitable. Muse has no default step cap. Set `--max-model-steps` only when a task needs a cap. No alternate Muse model override or automatic helper fallback is permitted. Echo is an offline transport fixture.
+Every live Muse worker uses **`muse-spark-1.3-contributor`**. Claive passes no effort flag unless a flag, a role or `default_model_efforts` chooses one, so Muse uses its own value. Use **`max`** for very complicated tasks and **`high`/`medium`** only when suitable. Muse has no default step cap. Set `--max-model-steps` only when a task needs a cap. No alternate Muse model override or automatic helper fallback is permitted. Echo is an offline transport fixture.
 
-Default effort is `xhigh` for Muse (`max` for very complicated tasks; `high`/`medium` only rarely) and `max` for Pi, which clamps it to each model's highest level. The orchestrator can override effort and step cap on each `followup`, or change future defaults with `effort`. Per-turn overrides do not replace the future default. Changes do not alter an in-flight request. Follow-ups run sequentially with the same workspace/tool policy and Muse session UUID. A `--worktree` worktree is created by claive and lasts for all turns of the worker, so isolated follow-ups keep their files.
+Effort is per model. Claive passes no effort flag unless a flag, a role or `default_model_efforts` chooses one. Codex and AGY declare a per-model effort. The orchestrator can override effort and step cap on each `followup`, or change future defaults with `effort`. Per-turn overrides do not replace the future default. Changes do not alter an in-flight request. Follow-ups run sequentially with the same workspace/tool policy and Muse session UUID. A `--worktree` worktree is created by claive and lasts for all turns of the worker, so isolated follow-ups keep their files.
 
 The outer supervisor stays alive, while each underlying `muse exec` exits after a turn. Session logging lets the next exec restore history. Related follow-ups should reuse this worker, without arbitrary retirement after a fixed number of tasks. After closure, `claive-worker --session-id UUID` can restore retained history in the same workspace and tool policy; inspect `show JOB_ID --json` for that UUID. A resumed session in a new worker gets a new worktree; to keep the same files, pass the retained worktree with `--worktree-existing`. Keep unrelated lanes separate.
 
@@ -379,7 +393,7 @@ Job metadata, JSONL events, diagnostic output, and final answers are retained un
 
 ### Per-host engine config
 
-Hosts without Muse (for example a Pi-only server) set the default engine and role overrides in `${CLAIVE_CONFIG:-${XDG_CONFIG_HOME:-~/.config}/claive/config.json}` instead of editing code. Without the file, behaviour is the built-in default (Muse, with Pi for scout/reviewer/oracle). `CLAIVE_ENGINE` overrides `default_engine` for one shell; `--engine` and role engines still win over the default. `claive doctor` reports the config in use, and an invalid config refuses every launch.
+Hosts without Muse (for example a Pi-only server) set the default engine and role overrides in the config file instead of editing code. The file is YAML or JSON: `$CLAIVE_CONFIG`, else `config.yaml`, `config.yml` or `config.json` in `~/.config/claive/`. Without the file, behaviour is the built-in default (Muse, with Pi for scout/reviewer/oracle). `CLAIVE_ENGINE` overrides `default_engine` for one shell; `--engine` and role engines still win over the default. `claive doctor` reports the config in use, and an invalid config refuses every launch.
 
 ```json
 {"default_engine": "pi",
@@ -415,12 +429,12 @@ The same file holds the user's per-engine policy under `engines`. claive enforce
 ```json
 {"engines": {
   "claude": {"enabled": false, "reason": "subscription quota is for interactive use"},
-  "pi": {"default_model": "big-pickle", "default_reasoning_effort": "high",
-         "disabled_reasoning_efforts": ["max"],
+  "pi": {"default_model": "big-pickle", "default_model_efforts": {"big-pickle": "high"},
+         "disabled_model_efforts": {"big-pickle": ["max"]},
          "disabled_models": {"space-bunny-free": "too slow"}}}}
 ```
 
-`"enabled": false` refuses the engine and tells the caller it is `explicitly disabled by the user`, with the optional `reason`, and not to retry or work around it. `default_model` and `default_reasoning_effort` apply when neither a flag nor a role chooses; the engine still validates them, so they cannot unlock a model an engine is locked against. `disabled_models` and `disabled_reasoning_efforts` are a list of names or an object mapping each name to a reason. A misspelt engine name or key fails every launch instead of silently disabling nothing. `claive engines [--json]` prints the effective policy, defaults and steering support per engine, and `doctor` reports disabled engines.
+`"enabled": false` refuses the engine and tells the caller it is `explicitly disabled by the user`, with the optional `reason`, and not to retry or work around it. `default_model` and `default_model_efforts` apply when neither a flag nor a role chooses; the engine still validates them, so they cannot unlock a model an engine is locked against. A model with no configured effort passes no effort flag, so the engine uses its own value. `disabled_models` is a list of names or an object mapping each name to a reason. `disabled_model_efforts` maps a model to the efforts it may not use, so one model can refuse `max` while another keeps it. A misspelt engine name or key fails every launch instead of silently disabling nothing. `claive engines [--json]` prints the effective policy, defaults and steering support per engine, and `doctor` reports disabled engines.
 
 `models` is an allowlist of models, each with the reasoning efforts it may use. With the key present, a model that is not listed is refused, and so is an effort outside its `efforts` (`{}` allows every effort the engine supports). A turn must then name its model, through `--model`, a role or `default_model` (which must be listed). The allowlist can only narrow the limits in the engine code: a model or effort the engine does not support makes the config invalid, which refuses every launch. Orchestration picks skip models that are not listed. `claive engines` shows the effective models and efforts. For example, Luna only at `max`, Sol below `max`, and Claude at `high` or `xhigh`:
 

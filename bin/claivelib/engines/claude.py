@@ -69,7 +69,6 @@ class ClaudeEngine(WorkerEngine):
     name = "claude"
     supports_fork = True
     default_model = CLAUDE_MODEL
-    default_reasoning_effort = "xhigh"
     efforts = {"low", "medium", "high", "xhigh", "max"}
 
     def supported_models(self):
@@ -82,6 +81,10 @@ class ClaudeEngine(WorkerEngine):
     def child_env(self):
         # Without this, Claude Code loads no CLAUDE.md from the --add-dir directories.
         return {"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD": "1"}
+
+    def defaults(self):
+        return dict(super().defaults(), binary=default_binary(), provider=CLAUDE_PROVIDER,
+                    default_model=CLAUDE_MODEL, env=self.child_env())
 
     def steering_capability(self):
         return SteeringCapability(True, "claude-stream-json", notes=(
@@ -111,11 +114,11 @@ class ClaudeEngine(WorkerEngine):
 
     def resolve_launch(self, **options):
         return {
-            "binary": default_binary(),
+            "binary": config.engine_setting(self.name, "binary", default_binary()),
             "steering": bool(options.get("steering")) or isinstance(options.get("budget"), dict),
             "budget": options.get("budget"),
             "budget_off_reason": options.get("budget_off_reason"),
-            "provider": options.get("provider") or CLAUDE_PROVIDER,
+            "provider": options.get("provider") or config.engine_setting(self.name, "provider", CLAUDE_PROVIDER),
             "model": options.get("model") or CLAUDE_MODEL,
             "read_only": bool(options.get("read_only")),
             "web": bool(options.get("web")),
@@ -153,9 +156,10 @@ class ClaudeEngine(WorkerEngine):
 
     def validate_turn(self, request):
         self._check_model(request.model)
-        if request.provider != CLAUDE_PROVIDER:
-            raise ValueError(f"the claude engine supports only the {CLAUDE_PROVIDER} provider")
-        if request.reasoning_effort not in self.efforts:
+        expected = config.engine_setting(self.name, "provider", CLAUDE_PROVIDER)
+        if request.provider != expected:
+            raise ValueError(f"the claude engine supports only the {expected} provider")
+        if request.reasoning_effort is not None and request.reasoning_effort not in self.efforts:
             raise ValueError(f"unsupported Claude reasoning effort: {request.reasoning_effort}")
         if request.max_model_steps is not None:
             raise ValueError("Claude does not support --max-model-steps")
@@ -171,12 +175,14 @@ class ClaudeEngine(WorkerEngine):
         point = compaction_point(request.model, request.budget)
         command = [
             request.binary, "--print", "--output-format", "stream-json", "--verbose",
-            "--model", request.model, "--effort", request.reasoning_effort,
+            "--model", request.model,
             "--tools", "default", "--permission-mode", "bypassPermissions",
             "--autocompact", f"{(point + AUTOCOMPACT_OFFSET) // 1000}k",
             # Isolate user/project settings so the parent's hooks and permission rules do not run in workers.
             "--setting-sources", "",
         ]
+        if request.reasoning_effort is not None:
+            command += ["--effort", request.reasoning_effort]
         for directory in instruction_dirs(request.workspace):
             command += ["--add-dir", directory]
         if isinstance(request.budget, dict):

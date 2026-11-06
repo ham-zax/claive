@@ -3,6 +3,14 @@
 Status: approved 2026-10-15. All slices (S1 to S5, and the Codex/Muse web change) are merged
 into main, not committed. Still open: the live Claude `ExitPlanMode` check in `--print`.
 
+**Decision update, 2026-11-03:** The user supersedes principle 3 below. A
+read-only request uses verified native enforcement when available. Otherwise,
+Claive uses a clearly reported soft read instruction. The instruction is not
+an enforced restriction and must not be treated as one by workspace or
+concurrency policy. This applies to every adapter. The original principle and
+the earlier implementation notes remain below as historical context. See
+[harness adapter follow-ups](designs/harness-adapter-followups.md).
+
 ## Intent
 
 Each model works best with the tools and the work pattern that its own harness gives it. One

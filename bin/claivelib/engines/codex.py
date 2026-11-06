@@ -3,9 +3,12 @@ import json
 import os
 import shutil
 import sys
+import tomllib
+from urllib.parse import urlsplit
 from pathlib import Path
 import uuid
 
+from claivelib import config
 from claivelib.engine import SteeringCapability, WorkerEngine
 from claivelib.config import engine_policy
 from claivelib.state import launch_config, session_id
@@ -13,11 +16,25 @@ from claivelib.state import launch_config, session_id
 CODEX_MODEL = "gpt-6.1-terra"
 CODEX_PROVIDER = "openai"
 CODEX_EFFORT = "xhigh"
+# Explicit opt-in: no native Codex model routes through ChatGPT Web.
+CODEX_WEB_ALIAS = "chatgpt-web"
+CODEX_WEB_MODELS = {
+    CODEX_WEB_ALIAS: ("medium", "high", "xhigh"),
+    "chatgpt-web/gpt-6-sol": ("medium", "high", "xhigh"),
+    "chatgpt-web/gpt-6-sol-instant": ("low",),
+    "chatgpt-web/gpt-5.6-sol": ("medium", "high", "xhigh"),
+    "chatgpt-web/gpt-5.6-sol-instant": ("low",),
+    "chatgpt-web/gpt-6-pro": ("max",),
+    "chatgpt-web/gpt-5.6-pro": ("max",),
+}
 # Efforts each allowed model accepts.
 CODEX_EFFORTS = {"gpt-6-luna": ("medium", "max"), "gpt-6.1-sol": ("low", "medium", "high", "xhigh"),
-                 CODEX_MODEL: ("low", "medium", "high", "xhigh", "max", "ultra")}
+                 CODEX_MODEL: ("low", "medium", "high", "xhigh", "max", "ultra"),
+                 **CODEX_WEB_MODELS}
 # Effort for a turn that names a model but no effort; other models keep the engine default.
-CODEX_DEFAULT_EFFORTS = {"gpt-6-luna": "max", "gpt-6.1-sol": "medium"}
+CODEX_DEFAULT_EFFORTS = {"gpt-6-luna": "max", "gpt-6.1-sol": "medium",
+                        **{model: efforts[1] if "high" in efforts and len(efforts) > 1
+                           else efforts[0] for model, efforts in CODEX_WEB_MODELS.items()}}
 
 
 def default_binary():
@@ -28,12 +45,28 @@ def default_binary():
     return os.environ.get("CODEX_WORKER_BINARY", str(found or shutil.which("codex") or local))
 
 
-def _home():
-    return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+def _web_model(model):
+    return model in CODEX_WEB_MODELS
+
+
+def _canonical_model(model):
+    return "chatgpt-web/gpt-6-sol" if model == CODEX_WEB_ALIAS else model
+
+
+def _web_home():
+    return Path(os.environ.get("CLAIVE_CODEX_WEB_HOME",
+                               str(Path.home() / ".local/share/claive/codex-web-home"))).expanduser().resolve()
+
+
+def _home(model=None):
+    return (_web_home() if _web_model(model) else
+            Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser())
 
 
 def _yolo(request):
-    """Write turns skip Codex's sandbox and approvals unless CLAIVE_CODEX_YOLO=0; read-only turns never do."""
+    """Native Codex keeps its old policy; Web models are sandboxed by default."""
+    if _web_model(request.model):
+        return not request.read_only and os.environ.get("CLAIVE_CODEX_WEB_YOLO") == "1"
     return not request.read_only and os.environ.get("CLAIVE_CODEX_YOLO", "").lower() not in {"0", "false", "no", "off"}
 
 
@@ -60,6 +93,15 @@ class CodexEngine(WorkerEngine):
             "Requires --enable-steering; input is accepted for the active turn ID only.",
             "App Server acknowledgement does not establish model consumption.",))
 
+    def child_env_for_turn(self, request):
+        if not _web_model(request.model):
+            return super().child_env_for_turn(request)
+        return {**super().child_env_for_turn(request), "CODEX_HOME": str(_web_home())}
+
+    def defaults(self):
+        return dict(super().defaults(), binary=default_binary(), provider=CODEX_PROVIDER,
+                    default_model=CODEX_MODEL)
+
     def initial_input(self, request):
         if not request.steering:
             return None
@@ -77,9 +119,9 @@ class CodexEngine(WorkerEngine):
 
     def resolve_launch(self, **options):
         return {
-            "binary": default_binary(),
+            "binary": config.engine_setting(self.name, "binary", default_binary()),
             "steering": bool(options.get("steering")),
-            "provider": options.get("provider") or CODEX_PROVIDER,
+            "provider": options.get("provider") or config.engine_setting(self.name, "provider", CODEX_PROVIDER),
             "model": options.get("model") or CODEX_MODEL,
             "read_only": bool(options.get("read_only")),
             "web": bool(options.get("web")),
@@ -93,50 +135,81 @@ class CodexEngine(WorkerEngine):
         if not binary.is_absolute() or not binary.is_file() or not os.access(binary, os.X_OK):
             raise ValueError("Codex binary must be an absolute executable file")
         self._check_model(launch.get("model"))
+        if _web_model(launch.get("model")):
+            home = _web_home()
+            native = (Path.home() / ".codex").resolve()
+            if home == native:
+                raise ValueError("ChatGPT Web needs an isolated CODEX_HOME; native Codex must remain untouched")
+            path = home / "config.toml"
+            if not path.is_file():
+                raise ValueError(f"ChatGPT Web setup is incomplete: {path} is missing; open codex-web-gpt and finish Setup")
+            try:
+                route = tomllib.loads(path.read_text()).get("openai_base_url")
+            except (OSError, ValueError) as error:
+                raise ValueError(f"ChatGPT Web Codex config cannot be read: {path}") from error
+            try:
+                parsed = urlsplit(route) if isinstance(route, str) else None
+                safe = (parsed is not None and parsed.scheme == "http"
+                        and parsed.hostname == "127.0.0.1" and parsed.port is not None
+                        and parsed.path == "/v1" and not parsed.username and not parsed.password
+                        and not parsed.query and not parsed.fragment)
+            except ValueError:
+                safe = False
+            if not safe:
+                raise ValueError("ChatGPT Web Codex profile has no loopback Responses proxy; finish bridge setup")
         if launch.get("output_schema"):
             raise ValueError("Codex does not support --output-schema in this adapter")
         self.validate_isolation(launch)
 
-    @staticmethod
-    def _check_model(model):
-        if model not in CODEX_EFFORTS:
-            raise ValueError(f"the codex engine is locked to {' or '.join(CODEX_EFFORTS)}, not {model}")
+    def _catalog(self):
+        """The codex catalog: the built-in efforts extended by engines.codex.extra_models."""
+        return config.supported_models(self.name, self) or {}
+
+    def _check_model(self, model):
+        catalog = self._catalog()
+        if model not in catalog:
+            raise ValueError(f"the codex engine is locked to {' or '.join(catalog)}, not {model}")
 
     def validate_turn(self, request):
         self._check_model(request.model)
-        if request.provider != CODEX_PROVIDER:
-            raise ValueError(f"the codex engine supports only the {CODEX_PROVIDER} provider")
-        efforts = CODEX_EFFORTS[request.model]
-        if request.reasoning_effort not in efforts:
+        expected = config.engine_setting(self.name, "provider", CODEX_PROVIDER)
+        if request.provider != expected:
+            raise ValueError(f"the codex engine supports only the {expected} provider")
+        efforts = self._catalog()[request.model]
+        if request.reasoning_effort is not None and request.reasoning_effort not in efforts:
             raise ValueError(f"the codex engine is locked to reasoning effort {' or '.join(efforts)} for {request.model}")
         if request.max_model_steps is not None:
             raise ValueError("Codex does not support --max-model-steps")
 
     @staticmethod
-    def _session_file(identifier):
+    def _session_file(identifier, model=None):
         """The retained rollout for a Codex thread, or None before its first turn has run."""
-        matches = sorted((_home() / "sessions").glob(f"**/rollout-*-{identifier}.jsonl"))
+        matches = sorted((_home(model) / "sessions").glob(f"**/rollout-*-{identifier}.jsonl"))
         return matches[0] if matches else None
 
     def build_command(self, request):
         self.validate_turn(request)
+        model = _canonical_model(request.model)
+        use_user_config = _web_model(request.model) or _use_user_config()
         sandbox = "read-only" if request.read_only else "workspace-write"
         if request.steering or request.fork_session_id:
             if _yolo(request):
                 sandbox = "danger-full-access"
             wrapper = Path(__file__).with_name("codex_appserver.py")
             command = [sys.executable, str(wrapper), "--binary", request.binary,
-                       "--cwd", request.workspace, "--model", request.model,
-                       "--effort", request.reasoning_effort, "--sandbox", sandbox]
+                       "--cwd", request.workspace, "--model", model,
+                       "--sandbox", sandbox]
+            if request.reasoning_effort is not None:
+                command += ["--effort", request.reasoning_effort]
             if request.fork_session_id:
                 command.extend(["--fork", request.fork_session_id])
                 if not request.steering:
                     command.extend(["--initial-prompt-file", request.prompt_file])
-            elif request.session_id and self._session_file(request.session_id):
+            elif request.session_id and self._session_file(request.session_id, request.model):
                 command.extend(["--resume", request.session_id])
             if not request.session_logging:
                 command.append("--ephemeral")
-            if _use_user_config():
+            if use_user_config:
                 command.append("--user-config")
             return command
         if _yolo(request):
@@ -144,12 +217,13 @@ class CodexEngine(WorkerEngine):
         else:
             guard = ["-c", f'sandbox_mode="{sandbox}"', "-c", 'approval_policy="never"']
         # Skills load independently; config.toml (including MCP servers) is opt-in.
-        ignore_user_config = not _use_user_config()
+        ignore_user_config = not use_user_config
         shared = [
             "--json", "--skip-git-repo-check",
             *(["--ignore-user-config"] if ignore_user_config else []), "--ignore-rules",
-            "-m", request.model,
-            "-c", f'model_reasoning_effort="{request.reasoning_effort}"',
+            "-m", model,
+            *(["-c", f'model_reasoning_effort="{request.reasoning_effort}"']
+              if request.reasoning_effort is not None else []),
             *guard,
             "-c", 'web_search="live"',
         ]
@@ -158,7 +232,7 @@ class CodexEngine(WorkerEngine):
         prompt = Path(request.prompt_file).read_text(encoding="utf-8")
         # Codex picks its own thread ID. The supervisor swaps it into the job's session_id on
         # thread.started, so a follow-up carries a real thread whose rollout exists to resume.
-        if request.session_id and self._session_file(request.session_id):
+        if request.session_id and self._session_file(request.session_id, request.model):
             return [request.binary, "exec", "resume", *shared, request.session_id, "--", prompt]
         return [request.binary, "exec", *shared, "--cd", request.workspace, "--", prompt]
 
@@ -256,7 +330,7 @@ class CodexEngine(WorkerEngine):
         identifier = session_id(state)
         if not identifier or not launch_config(state).get("session_logging", True):
             raise ValueError("Codex usage needs a retained session")
-        path = self._session_file(identifier)
+        path = self._session_file(identifier, launch_config(state).get("model"))
         if path is None:
             raise ValueError("retained Codex session file is unavailable")
         calls, total = [], None

@@ -6,7 +6,7 @@ import re
 import tempfile
 import time
 
-from claivelib import provider
+from claivelib import config, provider
 from claivelib.engine import SteeringCapability, WorkerEngine
 from claivelib.state import launch_config, session_id
 
@@ -27,8 +27,12 @@ class PiEngine(WorkerEngine):
     handles_read_only_prompt = True
     name = "pi"
     supports_fork = True
-    default_reasoning_effort = "max"  # free models; Pi clamps to each model's highest level
     efforts = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+    def defaults(self):
+        return dict(super().defaults(), binary=default_binary(),
+                    provider=config.pi_default_provider(),
+                    default_model=provider.FALLBACK_MODEL)
 
     def steering_capability(self):
         return SteeringCapability(True, "pi-rpc", notes=(
@@ -45,7 +49,7 @@ class PiEngine(WorkerEngine):
 
     def __init__(self):
         self._last_assistant = None
-        self._selected_model = None
+        self._selected = None
 
     @staticmethod
     def _settings_path():
@@ -53,7 +57,7 @@ class PiEngine(WorkerEngine):
         return Path(directory).expanduser().resolve() / "settings.json"
 
     @classmethod
-    def _settings(cls, model=None):
+    def _settings(cls, model=None, provider_name=None):
         """Share Pi's global preference, using its settings.json.lock directory."""
         path = cls._settings_path()
         if model is None and not path.exists():
@@ -81,7 +85,7 @@ class PiEngine(WorkerEngine):
             if not isinstance(settings, dict):
                 raise ValueError(f"Pi settings must be an object: {path}")
             if model is not None:
-                settings.update(defaultProvider="opencode2api", defaultModel=model)
+                settings.update(defaultProvider=provider_name or provider.PROVIDER, defaultModel=model)
                 with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
                                                  prefix=".settings-", delete=False) as stream:
                     temporary = Path(stream.name)
@@ -103,15 +107,16 @@ class PiEngine(WorkerEngine):
     def resolve_launch(self, **options):
         identifier = options.get("session_id")
         settings = self._settings()
-        remembered = settings.get("defaultModel") if settings.get("defaultProvider") == "opencode2api" else None
+        chosen = options.get("provider") or config.pi_default_provider()
+        remembered = settings.get("defaultModel") if settings.get("defaultProvider") == chosen else None
         # Only a model the user chose (--model) becomes Pi's shared default; role models,
         # batch stage models and timeout fallbacks are per-worker choices.
-        self._selected_model = options.get("model") if options.get("remember_model") else None
+        self._selected = (chosen, options.get("model")) if options.get("remember_model") and options.get("model") else None
         launch = {
-            "binary": default_binary(),
+            "binary": config.engine_setting(self.name, "binary", default_binary()),
             "steering": bool(options.get("steering")),
-            "provider": options.get("provider") or "opencode2api",
-            "model": options.get("model") or remembered or "muse-spark-1.3-contributor-free",
+            "provider": chosen,
+            "model": options.get("model") or remembered or provider.FALLBACK_MODEL,
             "read_only": bool(options.get("read_only")),
             "web": bool(options.get("web")),
             "output_schema": options.get("output_schema"),
@@ -119,7 +124,7 @@ class PiEngine(WorkerEngine):
             "session_dir": str(Path(options["session_root"]) / "pi" / identifier) if identifier else None,
             "isolation": dict(options.get("isolation") or {}),
         }
-        override = provider.override_url()
+        override = provider.override_url(chosen)
         if override:
             launch["provider_base_url"] = override  # visible in the job record; applied per turn
         return launch
@@ -135,9 +140,9 @@ class PiEngine(WorkerEngine):
         self.validate_isolation(launch)
 
     def validate_turn(self, request):
-        if request.provider != "opencode2api":
-            raise ValueError("Pi currently supports only the opencode2api provider")
-        if request.reasoning_effort not in self.efforts:
+        if not isinstance(request.provider, str) or not request.provider.strip():
+            raise ValueError("Pi needs a provider name")
+        if request.reasoning_effort is not None and request.reasoning_effort not in self.efforts:
             raise ValueError(f"unsupported Pi reasoning effort: {request.reasoning_effort}")
         if request.max_model_steps is not None:
             raise ValueError("Pi does not support --max-model-steps")
@@ -168,9 +173,11 @@ class PiEngine(WorkerEngine):
         command = [
             request.binary, "--mode", "rpc" if request.steering else "json", *([] if request.steering else ["--print"]), "--offline",
             "--no-extensions", "--no-prompt-templates", "--no-themes", "--no-approve", "--provider", request.provider,
-            "--model", request.model, "--thinking", request.reasoning_effort,
+            "--model", request.model,
             "--tools", "*",
         ]
+        if request.reasoning_effort is not None:
+            command += ["--thinking", request.reasoning_effort]
         if request.read_only:
             command += ["--append-system-prompt", READ_ONLY_NOTE]
         if request.session_logging:
@@ -194,9 +201,9 @@ class PiEngine(WorkerEngine):
             command += ["--", "@" + request.prompt_file, *([READ_ONLY_NOTE] if request.read_only else [])]
         # Remember only an explicit selection after all command checks pass.
         # Follow-ups keep their original launch model without resetting the default.
-        if self._selected_model is not None:
-            self._settings(self._selected_model)
-            self._selected_model = None
+        if self._selected is not None:
+            self._settings(self._selected[1], self._selected[0])
+            self._selected = None
         return command
 
     def describe_event(self, event) -> list[dict]:

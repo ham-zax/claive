@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import uuid
 
+from claivelib import config
 from claivelib.engine import SteeringCapability, WorkerEngine
 from claivelib.state import launch_config, session_id
 
@@ -22,12 +23,19 @@ class MuseEngine(WorkerEngine):
     read_only_enforced = True
     name = "muse"
     default_model = MUSE_MODEL
-    default_reasoning_effort = "xhigh"
     default_max_model_steps = None  # no cap unless the user, a role or config.json sets one
     supports_max_model_steps = True
 
     def __init__(self):
         self._tool_tasks = {}
+
+    def defaults(self):
+        return dict(super().defaults(), binary=default_binary(), provider="meta",
+                    default_model=MUSE_MODEL)
+
+    def supported_models(self):
+        """Muse serves one model; engines.muse.extra_models can declare another."""
+        return {MUSE_MODEL: ("medium", "high", "xhigh", "max")}
 
     def resolve_session_id(self, value, session_logging=True):
         if not session_logging:
@@ -35,7 +43,7 @@ class MuseEngine(WorkerEngine):
         return str(uuid.UUID(value)) if value else str(uuid.uuid4())
 
     def validate_turn(self, request):
-        if request.reasoning_effort not in {"medium", "high", "xhigh", "max"}:
+        if request.reasoning_effort is not None and request.reasoning_effort not in {"medium", "high", "xhigh", "max"}:
             raise ValueError(f"unsupported Muse reasoning effort: {request.reasoning_effort}")
         if request.max_model_steps is not None and request.max_model_steps < 1:
             raise ValueError("--max-model-steps must be positive")
@@ -52,9 +60,9 @@ class MuseEngine(WorkerEngine):
         )
 
     def resolve_launch(self, **options):
-        provider = options.get("provider") or "meta"
+        provider = options.get("provider") or config.engine_setting(self.name, "provider", "meta")
         return {
-            "binary": default_binary(),
+            "binary": config.engine_setting(self.name, "binary", default_binary()),
             "provider": provider,
             "model": None if provider == "echo" else options.get("model") or MUSE_MODEL,
             "read_only": bool(options.get("read_only")),
@@ -71,7 +79,7 @@ class MuseEngine(WorkerEngine):
         provider = launch.get("provider") or "meta"
         if provider not in {"meta", "echo"}:
             raise ValueError(f"unsupported Muse provider: {provider}")
-        if provider != "echo" and launch.get("model") != MUSE_MODEL:
+        if provider != "echo" and launch.get("model") not in (config.supported_models(self.name, self) or {}):
             raise ValueError(f"unsupported Muse model: {launch.get('model')}")
         isolation = launch.get("isolation") or {}
         mode = isolation.get("mode", "none")
@@ -229,8 +237,9 @@ class MuseEngine(WorkerEngine):
         if request.session_id:
             command += ["--session-id", request.session_id]
         if request.provider != "echo":
-            command += ["--model", request.model or MUSE_MODEL,
-                        "--reasoning-effort", request.reasoning_effort]
+            command += ["--model", request.model or MUSE_MODEL]
+            if request.reasoning_effort is not None:
+                command += ["--reasoning-effort", request.reasoning_effort]
         if request.read_only:
             # Muse's own read-only profile: the filesystem refuses writes and the shell stays.
             command += ["--permission-profile", ":read-only", "--disable-write"]

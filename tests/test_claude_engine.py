@@ -86,7 +86,7 @@ class ClaudeChecks(unittest.TestCase):
         self.assertNotIn("--strict-mcp-config", command)
         self.assertNotIn("--disable-slash-commands", command)
         self.assertEqual(command[command.index("--autocompact") + 1], "138k")
-        self.assertEqual(self.engine.default_reasoning_effort, "xhigh")
+        self.assertIsNone(self.engine.default_reasoning_effort)
         self.assertIn("--session-id", command)
         self.assertEqual(command[-2:], ["--", "--do the thing\n"])
         read_only = self.engine.build_command(self.request(read_only=True))

@@ -204,7 +204,7 @@ class PiChecks(unittest.TestCase):
         settings = json.loads(self.settings.read_text())
         self.assertEqual(settings["defaultModel"], "big-pickle")
         self.assertEqual(settings["theme"], "custom")
-        self.assertEqual(selected["reasoning_effort"], "max")
+        self.assertIsNone(selected["reasoning_effort"])
         self.assertEqual(settings["defaultThinkingLevel"], "max")
         self.assertEqual(self.command("followup", original["id"], "--prompt-file", str(self.prompt)).returncode, 0)
         resumed = self.idle(original["id"], turn=2)
@@ -233,9 +233,11 @@ class PiChecks(unittest.TestCase):
         engine = PiEngine()
         options = dict(session_id=None, session_root=str(self.root / "sessions"))
         engine.resolve_launch(model="role-or-fallback-model", **options)  # role, batch or fallback
-        self.assertIsNone(engine._selected_model)
+        self.assertIsNone(engine._selected)
         engine.resolve_launch(model="big-pickle", remember_model=True, **options)
-        self.assertEqual(engine._selected_model, "big-pickle")
+        self.assertEqual(engine._selected, ("opencode2api", "big-pickle"))
+        engine.resolve_launch(model="mistral-large-4", provider="mistral", remember_model=True, **options)
+        self.assertEqual(engine._selected, ("mistral", "mistral-large-4"))
 
     def test_a_stale_settings_lock_is_taken_over(self):
         lock = self.settings.with_name("settings.json.lock")
@@ -305,7 +307,6 @@ class PiChecks(unittest.TestCase):
 
     def test_unsupported_initial_options_do_not_launch(self):
         for options in (("--max-model-steps", "100"), ("--output-schema", str(self.prompt)),
-                        ("--provider", "openai"), ("--provider", "meta"),
                         ("--web",),
                         ("--reasoning-effort", "invalid"), ("--session-id", "../escape")):
             with self.subTest(options=options):

@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import shutil
 
+from claivelib import config
 from claivelib.engine import SOFT_READ_NOTE as READ_ONLY_NOTE, WorkerEngine
 from claivelib.usage import aggregate_usage
 
@@ -26,12 +27,17 @@ class AgyEngine(WorkerEngine):
     def supported_models(self):
         return dict(AGY_MODELS)
 
+    def defaults(self):
+        return dict(super().defaults(), binary=default_binary(), provider="antigravity",
+                    default_model=AGY_MODEL, prompt_limit=PROMPT_LIMIT)
+
     def default_effort_for(self, model):
         if model is None:
             model = AGY_MODEL
-        if model not in AGY_MODELS:
-            raise ValueError(f"unsupported AGY model: {model}; choose {', '.join(AGY_MODELS)}")
-        return AGY_MODELS[model][0]
+        catalog = config.supported_models(self.name, self) or {}
+        if model not in catalog:
+            raise ValueError(f"unsupported AGY model: {model}; choose {', '.join(catalog)}")
+        return catalog[model][0]
 
     def fallback_effort_for(self, model, current):
         return self.default_effort_for(model)
@@ -45,7 +51,8 @@ class AgyEngine(WorkerEngine):
 
     def resolve_launch(self, **options):
         self.resolve_session_id(options.get("session_id"), options.get("session_logging", True))
-        return dict(binary=default_binary(), provider=options.get("provider") or "antigravity",
+        return dict(binary=config.engine_setting(self.name, "binary", default_binary()),
+                    provider=options.get("provider") or config.engine_setting(self.name, "provider", "antigravity"),
                     model=options.get("model") or AGY_MODEL,
                     read_only=bool(options.get("read_only")), web=bool(options.get("web")),
                     output_schema=options.get("output_schema"),
@@ -75,7 +82,7 @@ class AgyEngine(WorkerEngine):
 
     def validate_turn(self, request):
         effort = self.default_effort_for(request.model)
-        if request.reasoning_effort != effort:
+        if request.reasoning_effort is not None and request.reasoning_effort != effort:
             raise ValueError(f"AGY model {request.model} requires effort {effort}, not {request.reasoning_effort}")
         self._unsupported(vars(request))
 
@@ -96,8 +103,9 @@ class AgyEngine(WorkerEngine):
         if read_only:
             text = READ_ONLY_NOTE + "\n\n" + text + "\n\n" + READ_ONLY_NOTE
         size = len(text.encode("utf-8"))
-        if size > PROMPT_LIMIT:
-            raise ValueError(f"AGY prompt is {size} UTF-8 bytes; limit is {PROMPT_LIMIT} bytes")
+        limit = config.engine_setting(self.name, "prompt_limit", PROMPT_LIMIT)
+        if size > limit:
+            raise ValueError(f"AGY prompt is {size} UTF-8 bytes; limit is {limit} bytes")
 
     def normalize_event(self, event):
         kind = event.get("event")

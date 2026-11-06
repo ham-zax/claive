@@ -19,8 +19,9 @@ A launch, queued request or completed process does not establish parent acceptan
 ## Launch options
 
 `run`, `start` and `open` share these options. Role values override engine
-config defaults. Explicit flags override role values. A read-only role stays
-read-only. Only Muse supports a model-step cap.
+config defaults. `--set` overrides the config file. Explicit flags override role
+values and `--set`. A read-only role stays read-only. Only Muse supports a
+model-step cap.
 
 | Option | Meaning |
 |---|---|
@@ -49,14 +50,27 @@ read-only. Only Muse supports a model-step cap.
 | `--worktree-base` | base commit. Default HEAD |
 | `--worktree-setup` | run a shell command once in the new worktree under the heavy lock |
 | `--web` | compatibility flag. web is always on for Claude, Codex and Muse. Pi refuses it |
-| `--model` | Engine model. Pins and config policy apply |
+| `--model` | Engine model. Pins and config policy apply. Pi also accepts `provider/id` |
+| `--allow-model` | run a model outside the allowed tier for this worker (repeatable). The permission is recorded on the launch and kept for follow-ups |
+| `--set` | temporarily override any config key for this worker (repeatable). Value is a YAML or JSON object |
 | `--session-id` | reuse this engine's session ID with the same workspace and policy |
 | `--output-schema` | Absolute JSON schema file. Muse and Claude only |
 | `--no-session-log` | Disable retained history. Single-turn run/start only |
-| `--provider` | Engine provider. Pi accepts only opencode2api |
+| `--provider` | Engine provider. Pi accepts any provider it knows; see `claive pi provider list` |
 | `--mission` | link the new worker to a mission |
 | `--turn-timeout` | fail a turn that runs longer than SECONDS (positive number) |
 | `--fallback-models` | comma-separated fallback models for run/start. AGY also supports reusable open workers |
+
+`--set` is the general override for a key that has no dedicated flag:
+
+```sh
+claive run --set '{engines: {pi: {prompt_limit: 200000}}}' ...
+claive run --set '{"engines": {"codex": {"disabled_model_efforts": {"gpt-6.1-sol": ["max"]}}}}' ...
+```
+
+The object deep-merges over the config file, and a dedicated flag still wins. The
+override lives in the worker record, so follow-up turns keep it. It never writes the
+file. The launch prints the merged override to stderr.
 
 First-prompt order: role, team header, collaboration, project, context files,
 task, report contract. Context layers repeat up to ten times.
@@ -137,6 +151,95 @@ ignored dependency directories, stay unless `--discard-changed` is set.
 Worktrees awaiting parent acceptance stay even with that flag. Generated tool
 caches such as `__pycache__` do not keep a worktree. `--dry-run` removes nothing.
 Exit code: 0 on success.
+
+## `pi provider`
+
+Inspect and edit Pi's provider configuration. Pi owns provider definitions, its
+built-in catalog and credentials; Claive owns policy and reporting.
+
+```text
+claive pi provider list [--json]
+claive pi provider add NAME --base-url URL --api API --model ID [--model ID ...]
+                              [--api-key-env VAR] [--display-name NAME] [--replace]
+claive pi provider remove NAME
+claive pi provider check NAME [--json]
+```
+
+`list` merges `models.json` with Pi's built-in catalog and reports each provider's
+source, model count and auth readiness. `add` writes `models.json` atomically at
+mode `0600` after one timestamped backup; it refuses an existing provider without
+`--replace`, an unsupported `--api`, a non-http(s) URL, and an empty model list.
+`--api-key-env` stores `"$VAR"`, so Claive never stores a literal key and never
+reads `auth.json`. `remove` deletes the entry and says so when Pi still serves
+that provider from its built-in catalog. `check` reports readiness from
+`pi auth check --provider NAME --json` and times `GET /models` when the provider
+has a `baseUrl`; it never prints the key.
+
+Exit code: 0 on success, 1 when `check` finds the provider not ready, 2 on a
+refused edit.
+
+## `config`
+
+Inspect, validate or create the config file. The file is YAML or JSON; YAML is
+preferred. Discovery is `$CLAIVE_CONFIG`, then `config.yaml`, `config.yml`,
+`config.json` in `${XDG_CONFIG_HOME:-~/.config}/claive/`.
+
+```text
+claive config path
+claive config check [--json]
+claive config show [--json]
+claive config init [--force]
+claive config migrate [--force]
+```
+
+- `path` prints the active file, one line.
+- `check` parses and validates it, then runs the model-allowlist cross-checks a
+  launch runs. It also names a shadowed file. Exit 1 with the exact error.
+- `show` prints the file as text, or as JSON with `--json`.
+- `init` writes a commented YAML template with every key. It refuses to overwrite
+  an existing file, and refuses to shadow a different config file, unless
+  `--force` is given.
+- `migrate` writes `config.yaml` from the active JSON file, validates the result,
+  and renames the old file to `config.json.bak-<timestamp>`.
+
+See `docs/engine-configuration.md`.
+
+## `models`
+
+Print the three model tiers per engine: the default, the allowed set, and the
+extra set that needs an explicit opt-in. Read-only and non-interactive.
+
+```text
+claive models [NAME] [--json]
+```
+
+`allowed` is `engines.<name>.models` when the config has an allowlist, else the
+engine's declared catalog. `extra` is what the catalog knows but the policy does
+not allow; running one needs `--allow-model MODEL` or an entry in
+`engines.<name>.models`. A model the catalog has never heard of is refused the
+same way, naming `engines.<name>.extra_models`. See
+`docs/engine-configuration.md`.
+
+Exit code: 0 on success, 1 for an unknown engine name.
+
+## `engine config`
+
+Print one engine's effective configuration, or every engine's, with the source of
+each value. Read-only and non-interactive: it never launches a worker, never
+writes, and never prompts, so a headless host can audit its engine setup.
+
+```text
+claive engine config [NAME] [--json]
+```
+
+Every engine accepts the same keys in the config file: `binary`, `provider`, `env`,
+`prompt_limit`, `default_model`, `default_model_efforts`, `models`,
+`disabled_models`, `disabled_model_efforts`, `extra_args`, `providers`,
+`enabled` and `reason`. Each value reports `config` when the file sets it and `default` when the
+engine's declared default applies. `binary` also reports whether the path is
+executable. See `docs/engine-configuration.md`.
+
+Exit code: 0 on success, 1 for an unknown engine name.
 
 ## `open`
 

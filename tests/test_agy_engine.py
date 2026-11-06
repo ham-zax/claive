@@ -415,6 +415,7 @@ class AgyChecks(unittest.TestCase):
     def test_all_soft_adapters_refuse_enforcement_and_write_prohibition(self):
         config = self.base / "read-policy.json"
         config.write_text(json.dumps({"workspaces": [{"path": str(self.base), "write": False}]}))
+        original = self.env.get("CLAIVE_CONFIG")
         for engine in ("agy", "pi", "claude"):
             with self.subTest(engine=engine):
                 base = ("run", "--engine", engine, "--workspace", str(self.base),
@@ -424,7 +425,12 @@ class AgyChecks(unittest.TestCase):
                 self.env["CLAIVE_CONFIG"] = str(config)
                 soft = self.command(*base, "--read-only")
                 self.assertIn("select enforced read-only", soft.stderr)
-                self.env.pop("CLAIVE_CONFIG", None)
+                # Restore, never delete: an absent CLAIVE_CONFIG falls back to the host's real
+                # config.json, so a host that disables an engine would change this test's result.
+                if original is None:
+                    self.env.pop("CLAIVE_CONFIG", None)
+                else:
+                    self.env["CLAIVE_CONFIG"] = original
         self.assertEqual(list(self.registry.glob("*/state.json")), [])
 
 

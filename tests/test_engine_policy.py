@@ -61,17 +61,79 @@ class EnginePolicyChecks(unittest.TestCase):
         self.assertIn("default_engine fixture is disabled", self.launch().stderr)
 
     def test_disabled_models_and_efforts_are_refused(self):
-        self.policy(fixture={"disabled_models": {"Big-Model": "too costly"}, "disabled_reasoning_efforts": ["max"]})
+        self.policy(fixture={"disabled_models": {"Big-Model": "too costly"},
+                             "disabled_model_efforts": {"small": {"max": "too slow"}}})
         result = self.launch("--model", "big-model")
         self.assertIn("model big-model on worker engine fixture is explicitly disabled", result.stderr)
         self.assertIn("too costly", result.stderr)
-        result = self.launch("--reasoning-effort", "max")
-        self.assertIn("reasoning effort max on worker engine fixture is explicitly disabled", result.stderr)
+        result = self.launch("--model", "small", "--reasoning-effort", "max")
+        self.assertIn("reasoning effort max for model small on worker engine fixture is explicitly disabled",
+                      result.stderr)
+        self.assertIn("too slow", result.stderr)
         self.assertFalse(self.jobs())
         self.assertEqual(self.launch("--model", "small", "--reasoning-effort", "high").returncode, 0)
+        self.assertEqual(self.launch("--model", "other", "--reasoning-effort", "max").returncode, 0)
+
+    def test_disabled_provider_is_refused_with_the_reason(self):
+        self.policy(fixture={"providers": {"fixture": {"enabled": False, "reason": "endpoint retired"}}})
+        result = self.launch()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("provider fixture on worker engine fixture is explicitly disabled", result.stderr)
+        self.assertIn("endpoint retired", result.stderr)
+        self.assertFalse(self.jobs())
+        self.policy(fixture={"providers": {"fixture": {"enabled": True}}})
+        self.assertEqual(self.launch().returncode, 0)
+
+    def test_a_disabled_provider_cannot_be_the_configured_provider(self):
+        self.policy(fixture={"provider": "fixture", "providers": {"fixture": {"enabled": False}}})
+        result = self.launch()
+        self.assertIn("provider fixture is disabled", result.stderr)
+
+    def test_set_overrides_the_file_for_one_launch(self):
+        self.policy(fixture={"enabled": True})
+        result = self.launch("--set", "{engines: {fixture: {disabled_models: [small]}}}", "--model", "small")
+        self.assertIn("model small on worker engine fixture is explicitly disabled", result.stderr)
+        self.assertEqual(self.launch("--model", "small").returncode, 0)
+
+    def test_a_dedicated_flag_wins_over_set(self):
+        self.policy(fixture={"enabled": True})
+        result = self.launch("--set", "{engines: {fixture: {default_model: other}}}", "--model", "small")
+        self.assertEqual(result.returncode, 0)
+        state = json.loads(self.jobs()[0].read_text())
+        self.assertEqual(state["launch"]["model"], "small")
+        self.assertEqual(state["config_overrides"]["engines"]["fixture"]["default_model"], "other")
+
+    def test_set_does_not_change_the_file(self):
+        self.policy(fixture={"enabled": True})
+        before = self.config.read_text()
+        self.assertEqual(self.launch("--set", "{engines: {fixture: {enabled: true}}}").returncode, 0)
+        self.assertEqual(self.config.read_text(), before)
+
+    def test_an_invalid_set_is_refused(self):
+        result = self.launch("--set", "[1, 2]")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--set: an override must be a YAML or JSON object", result.stderr)
+
+    def test_a_follow_up_keeps_the_launch_override(self):
+        process = subprocess.Popen([FIXTURE_CLI, "open", "--engine", "fixture", "--workspace", str(self.path),
+                                    "--prompt-file", str(self.prompt), "--model", "test-model",
+                                    "--set", "{engines: {fixture: {disabled_model_efforts: "
+                                             "{test-model: [low]}}}}"],
+                                   env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.addCleanup(process.kill)
+        deadline = time.time() + 10
+        while time.time() < deadline and not any(
+                json.loads(p.read_text()).get("status") == "idle" for p in self.jobs()):
+            time.sleep(0.05)
+        job = self.jobs()[0].parent.name
+        refused = self.cli("followup", job, "--prompt-file", str(self.prompt), "--reasoning-effort", "low")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("reasoning effort low for model test-model", refused.stderr)
+        self.assertEqual(self.cli("close", job).returncode, 0)
+        process.communicate(timeout=10)
 
     def test_configured_defaults_apply_below_flags(self):
-        self.policy(fixture={"default_model": "chosen", "default_reasoning_effort": "low"})
+        self.policy(fixture={"default_model": "chosen", "default_model_efforts": {"chosen": "low"}})
         self.assertEqual(self.launch().returncode, 0)
         state = json.loads(self.jobs()[0].read_text())
         self.assertEqual((state["launch"]["model"], state["reasoning_effort"]), ("chosen", "low"))
@@ -81,15 +143,15 @@ class EnginePolicyChecks(unittest.TestCase):
 
     def test_policy_applies_to_a_worker_that_is_already_open(self):
         process = subprocess.Popen([FIXTURE_CLI, "open", "--engine", "fixture", "--workspace", str(self.path),
-                                    "--prompt-file", str(self.prompt)], env=self.env, text=True,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                    "--prompt-file", str(self.prompt), "--model", "test-model"], env=self.env,
+                                   text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.addCleanup(process.kill)
         deadline = time.time() + 10
         while time.time() < deadline and not any(
                 json.loads(p.read_text()).get("status") == "idle" for p in self.jobs()):
             time.sleep(0.05)
         job = self.jobs()[0].parent.name
-        self.policy(fixture={"disabled_reasoning_efforts": ["max"]})
+        self.policy(fixture={"disabled_model_efforts": {"test-model": ["max"]}})
         self.assertIn("explicitly disabled", self.cli("effort", job, "--reasoning-effort", "max").stderr)
         self.policy(fixture={"enabled": False, "reason": "paused"})
         refused = self.cli("followup", job, "--prompt-file", str(self.prompt))
@@ -104,7 +166,7 @@ class EnginePolicyChecks(unittest.TestCase):
                 ({"fixture": {"enable": False}}, "unknown key enable"),
                 ({"fixture": {"enabled": "no"}}, "wrong type"),
                 ({"fixture": {"default_model": "m", "disabled_models": ["M"]}}, "does not disable"),
-                ({"fixture": {"disabled_reasoning_efforts": [3]}}, "nonempty names")):
+                ({"fixture": {"disabled_model_efforts": {"m": [3]}}}, "list of effort names")):
             self.policy(**engines)
             result = self.launch()
             self.assertNotEqual(result.returncode, 0, engines)
@@ -124,7 +186,7 @@ class EnginePolicyChecks(unittest.TestCase):
         self.assertEqual(self.launch("--model", "small", "--reasoning-effort", "high").returncode, 0)
         self.assertEqual(self.launch("--model", "open", "--reasoning-effort", "max").returncode, 0)
         self.policy(fixture={"models": {"small": {"efforts": ["low"]}}, "default_model": "small",
-                             "default_reasoning_effort": "low"})
+                             "default_model_efforts": {"small": "low"}})
         self.assertEqual(self.launch().returncode, 0)
 
     def test_models_allowlist_applies_to_an_open_worker(self):
@@ -154,7 +216,7 @@ class EnginePolicyChecks(unittest.TestCase):
                 ({"fixture": {"models": {"a": {"efforts": [""]}}}}, "must be {\"efforts\""),
                 ({"fixture": {"models": {"a": {}}, "default_model": "b"}}, "default_model must be one of"),
                 ({"fixture": {"models": {"a": {"efforts": ["low"]}}, "default_model": "a",
-                              "default_reasoning_effort": "max"}}, "efforts of default_model")):
+                              "default_model_efforts": {"a": "max"}}}, "not in the models allowlist efforts")):
             self.policy(**engines)
             result = self.launch("--model", "a")
             self.assertNotEqual(result.returncode, 0, engines)
@@ -173,7 +235,9 @@ class EnginePolicyChecks(unittest.TestCase):
 
     def test_engines_command_reports_the_policy(self):
         self.policy(claude={"enabled": False, "reason": "paused"},
-                    pi={"default_reasoning_effort": "high", "disabled_reasoning_efforts": ["max"]})
+                    pi={"default_model": "deepseek-v4-1-flash-1017",
+                        "default_model_efforts": {"deepseek-v4-1-flash-1017": "high"},
+                        "disabled_model_efforts": {"deepseek-v4-1-flash-1017": ["max"]}})
         rows = {row["engine"]: row for row in json.loads(self.cli("engines", "--json").stdout)["engines"]}
         self.assertEqual((rows["claude"]["enabled"], rows["claude"]["reason"]), (False, "paused"))
         self.assertEqual((rows["pi"]["default_reasoning_effort"], rows["pi"]["steering"]), ("high", "pi-rpc"))

@@ -234,8 +234,8 @@ Pi passes `--offline --no-extensions --no-prompt-templates --no-themes --no-appr
 Skills, MCP and context files load. See [Pi engine](pi-engine.md).
 
 Claive reloads config when commands need policy. `engines.<name>` accepts
-`enabled`, `reason`, `default_model`, `default_reasoning_effort`,
-`disabled_models`, `disabled_reasoning_efforts`, `models`, and `extra_args`.
+`enabled`, `reason`, `default_model`, `default_model_efforts`,
+`disabled_models`, `disabled_model_efforts`, `models`, and `extra_args`.
 `user_config` applies only to Codex. `budget` applies only to Claude.
 `enabled: false` refuses the whole engine.
 Defaults and allowlists cannot expand the engine's supported models or efforts.

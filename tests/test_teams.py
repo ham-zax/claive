@@ -203,7 +203,7 @@ class TeamChecks(unittest.TestCase):
         self.write_config({"roles": {"builder": {"engine": "fixture", "read_only": True,
                                                    "prompt_file": str(role_prompt)}},
                            "engines": {"fixture": {"default_model": "policy-model",
-                                                     "default_reasoning_effort": "low"}}})
+                                                     "default_model_efforts": {"policy-model": "low"}}}})
         result, first = self.launch("--role", "builder")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(first["engine"], "fixture")

@@ -11,9 +11,13 @@ claive-worker --engine pi \
   --provider opencode2api --model mimo-v2.6-flash-free --reasoning-effort max
 ```
 
-Pi uses `opencode2api`. Default thinking is `max`, subject to role or config overrides. The initial model is
+Pi is multi-provider. Any provider Pi knows can run a worker: `--provider NAME`
+selects one, and `--model provider/id` names both at once. A bare `--model`
+resolves against the effective default provider. Claive passes no `--thinking`
+unless a flag, a role or `engines.pi.default_model_efforts.<model>` chooses one, so
+Pi uses its own value for that model. The initial model is
 `muse-spark-1.3-contributor-free`. When `--model` is omitted, new workers read
-Pi's global `defaultModel` for this provider. An explicit `--model ID` is saved
+Pi's global `defaultModel` for the selected provider. An explicit `--model ID` is saved
 after launch-option validation, so later agents inherit that selection, including
 across worker registries and workspaces. Role models, batch stage models and timeout fallback
 models are not saved. A failed model request does not undo the
@@ -21,9 +25,8 @@ selection. Already-open workers keep their launch model; their follow-ups do not
 reset the shared default. Settings are in `~/.pi/agent/settings.json`, or the directory
 selected by `PI_CODING_AGENT_DIR`; unrelated settings are preserved. `PI_WORKER_BINARY`
 selects an absolute executable; otherwise the adapter uses `~/.local/bin/pi`.
-For now, `opencode2api` is the only accepted Pi provider; other providers are
-rejected before launch or follow-up acceptance. Provider endpoints and credentials
-remain in Pi's own configuration. Pi must already know the chosen model.
+Provider endpoints and credentials remain in Pi's own configuration. Pi must
+already know the chosen model.
 Thinking supports `off`, `minimal`,
 `low`, `medium`, `high`, `xhigh`, and `max`; Pi may clamp it to model capabilities.
 
@@ -56,22 +59,66 @@ that turn and keep the supervisor available.
 - `--no-session-log` maps to Pi's `--no-session` for a single turn. Reusable workers
   still require retained sessions.
 
+## Providers
+
+Pi owns provider definitions, its built-in catalog and credentials. Claive owns
+policy and reporting, and provides one narrow writer for `models.json`.
+
+```sh
+claive pi provider list
+claive pi provider add mistral --base-url https://api.mistral.ai/v1 \
+  --api mistral-conversations --api-key-env MISTRAL_API_KEY \
+  --model mistral-large-4 --model devstral-latest
+claive pi provider check mistral
+claive pi provider remove mistral
+```
+
+`list` merges `models.json` with Pi's built-in catalog and reports each
+provider's source, model count and auth readiness. `check` reports readiness from
+`pi auth check --provider NAME --json` and, when the provider has a `baseUrl`,
+times `GET /models`; it never prints the key.
+
+`add` writes `models.json` atomically at mode `0600` after keeping one
+timestamped backup. It is additive: an existing provider needs `--replace`.
+`--api-key-env` stores `"$VAR"`, Pi's own environment-reference form, so Claive
+never stores a literal key and never reads `auth.json`. `remove` deletes the
+entry and says so when Pi still serves that provider from its built-in catalog.
+
+Policy lives in the claive config:
+
+```json
+{"engines": {"pi": {"default_provider": "mistral",
+                    "providers": {"opencode2api": {"enabled": false, "reason": "gateway retired"},
+                                  "mistral": {"enabled": true}}}}}
+```
+
+`enabled: false` refuses a launch or follow-up with the configured reason.
+`default_provider` is what a bare `--model` resolves to; without it Claive reads
+Pi's `settings.json` `defaultProvider`, then falls back to `opencode2api`. A
+provider named in policy that Pi does not know is accepted, because it may be
+added later; `doctor` reports it.
+
+`pi --list-models` has no JSON form, so Claive parses its table. An unrecognized
+shape degrades reporting to `models.json` alone and never blocks a turn.
+
 ## Health checks and loopback override
 
 `claive doctor` runs `pi --version`, checks that every model claive may request
-is listed under `opencode2api` in `models.json` (`pi_provider`), and times
-`GET /models` on the provider; it never prints the key. Both checks are required
-when Pi is the default engine. `claive doctor --live` also sends one tiny
+is listed under the default provider in `models.json` (`pi_provider`), and times
+`GET /models` on that provider; it never prints the key. Both checks are required
+when Pi is the default engine. Per-provider auth readiness is reported as an
+advisory `pi:<name>` check. `claive doctor --live` also sends one tiny
 sessionless read-only turn on that shared default model (the initial model when
 none is saved), so it follows the last explicit `--model`.
 
-A host whose `opencode2api` runs locally can set
-`{"providers": {"opencode2api": {"base_url": "http://127.0.0.1:PORT/v1"}}}` in
-the claive config. Only `localhost` and loopback addresses are accepted. Pi turns
-then use an overlay agent directory, `$CLAIVE_DIR/pi-agent-overlay`, that links
-every entry of the real one and holds a private (0600) `models.json` differing
-only in `baseUrl`. The real `models.json` is never edited. Doctor and the launch
-output report the override.
+A host whose provider runs locally can set
+`{"providers": {"<name>": {"base_url": "http://127.0.0.1:PORT/v1"}}}` in
+the claive config. Only `localhost` and loopback addresses are accepted, and the
+provider must already exist in Pi's configuration: this redirects a provider, it
+never defines one. Pi turns then use an overlay agent directory,
+`$CLAIVE_DIR/pi-agent-overlay`, that links every entry of the real one and holds
+a private (0600) `models.json` differing only in those `baseUrl` values. The real
+`models.json` is never edited. Doctor and the launch output report the override.
 
 ## Sessions and results
 

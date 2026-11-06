@@ -528,11 +528,20 @@ def pick_critic(stats_critics, lane_family, seed, roster=CRITIC_ROSTER, reserve=
             "fallbacks": [m for m in ranked if m != chosen], "scores": scores}
 
 
+def pi_provider():
+    """The Pi provider the arbiter launches: the configured default, else opencode2api."""
+    try:
+        from claivelib import config
+        return config.pi_default_provider()
+    except (ImportError, ValueError):
+        return "opencode2api"
+
+
 def implementer_choice(muse_available, pi_available, muse_quota_reset=None, configured_engine=None):
     """Pick the implementer engine: Muse when possible, else Pi muse free."""
     if configured_engine == "pi" and pi_available:
         return {"engine": "pi", "model": "muse-spark-1.3-contributor-free", "reasoning_effort": "max",
-                "provider": "opencode2api", "fallback": False, "reason": "configured engine is pi"}
+                "provider": pi_provider(), "fallback": False, "reason": "configured engine is pi"}
     if muse_available and not muse_quota_reset:
         return {"engine": "muse", "model": "muse-spark-1.3-contributor", "reasoning_effort": "xhigh",
                 "provider": None, "fallback": False, "reason": "muse available"}
@@ -542,22 +551,19 @@ def implementer_choice(muse_available, pi_available, muse_quota_reset=None, conf
         else:
             reason = "muse unavailable or disabled"
         return {"engine": "pi", "model": "muse-spark-1.3-contributor-free", "reasoning_effort": "max",
-                "provider": "opencode2api", "fallback": True, "reason": reason}
+                "provider": pi_provider(), "fallback": True, "reason": reason}
     raise ValueError("no implementer available: neither muse nor pi is available")
 
 
 def _engine_available(engine):
-    """True when the engine is enabled and its binary is executable."""
+    """True when the engine is enabled and its configured binary is executable."""
     try:
         from claivelib import config
+        from claivelib.engines import engine_binary
         config.check_engine(engine)
-        if engine == "muse":
-            from claivelib.engines import muse as module
-        elif engine == "pi":
-            from claivelib.engines import pi as module
-        else:
+        if engine not in {"muse", "pi"}:
             return False
-        return os.access(module.default_binary(), os.X_OK)
+        return os.access(engine_binary(engine), os.X_OK)
     except Exception:
         return False
 
@@ -647,7 +653,7 @@ def breadth_choice(stats_implementers, lane_a_family, critic_families, roster=CR
         return (row.get("passed", 0) + 1) / (row.get("lanes", 0) + 2)
     positions = {model: index for index, model in enumerate(order)}
     ranked = sorted(candidates, key=lambda m: (-rate(m), positions.get(m, 0)))
-    return {"engine": "pi", "model": ranked[0], "provider": "opencode2api",
+    return {"engine": "pi", "model": ranked[0], "provider": pi_provider(),
             "reasoning_effort": "max", "fallbacks": ranked[1:]}
 
 
@@ -1883,7 +1889,7 @@ def command_pick(args):
         else:
             fallbacks = ",".join(choice["fallbacks"])
             print(f"Critic: {choice['model']} ({choice['mode']})")
-            command = (f"claive start --engine pi --provider opencode2api --model {choice['model']} "
+            command = (f"claive start --engine pi --provider {pi_provider()} --model {choice['model']} "
                        "--reasoning-effort max --read-only --turn-timeout 900")
             if fallbacks:
                 command += f" --fallback-models {fallbacks}"

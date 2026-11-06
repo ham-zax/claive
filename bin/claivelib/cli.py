@@ -5,7 +5,6 @@ import argparse
 import contextlib
 import dataclasses
 import datetime
-import importlib
 import json
 import os
 from pathlib import Path
@@ -23,7 +22,7 @@ import uuid
 from claivelib import config, provider, acceptance, steering, procname
 from claivelib.ansi import strip_controls
 from claivelib.engine import SOFT_READ_NOTE, TurnRequest
-from claivelib.engines import DEFAULT_ENGINE, ENGINE_NAMES, default_engine, get_engine
+from claivelib.engines import DEFAULT_ENGINE, ENGINE_NAMES, default_engine, engine_binary, get_engine
 from claivelib.roles import ROLES, resolved_roles
 from claivelib.state import SCHEMA_VERSION, launch_config, session_id as worker_session_id
 
@@ -54,22 +53,73 @@ def check_model_policy(model):
         raise ValueError(f"model {model} is disallowed by claive policy")
 
 
-def check_engine_policy(engine_name, model=None, reasoning_effort=None):
+def split_pi_model(model, provider):
+    """Resolve Pi's provider/model identity into (provider, model).
+
+    A bare model keeps the given provider. A provider/model names both, and a
+    --provider that disagrees is refused rather than silently overridden.
+    """
+    if not model or "/" not in model:
+        return provider, model
+    prefix, _, rest = model.partition("/")
+    if not prefix or not rest:
+        raise ValueError(f"invalid Pi model {model!r}; use provider/model")
+    if provider and provider != prefix:
+        raise ValueError(f"--provider {provider} disagrees with model {model}; name one provider")
+    return prefix, rest
+
+
+def check_engine_policy(engine_name, model=None, reasoning_effort=None, allow=()):
     """Enforce the user's engines policy; a misspelt engine name must not silently disable nothing."""
     for name, policy in config.load().get("engines", {}).items():
         try:
-            supported = get_engine(name).supported_models()
+            supported = config.supported_models(name, get_engine(name))
         except ValueError as error:
             raise ValueError(f"invalid claive config {config.config_path()}: engines.{name}: {error}") from error
         # The allowlist may only narrow the engine's own limits, never widen them.
-        for model, entry in (policy.get("models") or {}).items() if supported is not None else ():
-            extra = [model] if model not in supported else [
-                effort for effort in entry.get("efforts", []) if effort not in supported[model]]
+        for listed, entry in (policy.get("models") or {}).items() if supported is not None else ():
+            extra = [listed] if listed not in supported else [
+                effort for effort in entry.get("efforts", []) if effort not in supported[listed]]
             if extra:
                 raise ValueError(f"invalid claive config {config.config_path()}: engines.{name}.models: "
                                  f"{', '.join(extra)} not supported by the engine for "
-                                 f"{model if model in supported else 'any model'}")
-    config.check_engine(engine_name, model, reasoning_effort)
+                                 f"{listed if listed in supported else 'any model'}")
+        # A configured default effort must exist for that model and stay inside the allowlist.
+        allowlist = policy.get("models")
+        for listed, effort in (policy.get("default_model_efforts") or {}).items():
+            if supported is not None and listed in supported and effort not in supported[listed]:
+                raise ValueError(f"invalid claive config {config.config_path()}: "
+                                 f"engines.{name}.default_model_efforts.{listed}: "
+                                 f"{effort} not supported by the engine")
+            allowed = (allowlist.get(listed) or {}).get("efforts") if allowlist is not None else None
+            if allowed and effort not in allowed:
+                raise ValueError(f"invalid claive config {config.config_path()}: "
+                                 f"engines.{name}.default_model_efforts.{listed}: {effort} is not in the "
+                                 "models allowlist efforts")
+        # A disabled effort must exist for that model, and must leave it one usable effort.
+        for listed, entry in (policy.get("disabled_model_efforts") or {}).items():
+            names = entry if isinstance(entry, list) else list(entry)
+            if supported is not None and listed in supported:
+                unknown = [effort for effort in names if effort not in supported[listed]]
+                if unknown:
+                    raise ValueError(f"invalid claive config {config.config_path()}: "
+                                     f"engines.{name}.disabled_model_efforts.{listed}: "
+                                     f"{', '.join(unknown)} not supported by the engine")
+            if allowlist is not None:
+                remaining = [effort for effort in (allowlist.get(listed) or {}).get("efforts", [])
+                             if config.effort_disabled(name, listed, effort) is None]
+                if (allowlist.get(listed) or {}).get("efforts") and not remaining:
+                    raise ValueError(f"invalid claive config {config.config_path()}: "
+                                     f"engines.{name}.disabled_model_efforts.{listed} disables every allowed "
+                                     "effort; use disabled_models")
+            elif supported is not None and listed in supported and supported[listed]:
+                remaining = [effort for effort in supported[listed]
+                             if config.effort_disabled(name, listed, effort) is None]
+                if not remaining:
+                    raise ValueError(f"invalid claive config {config.config_path()}: "
+                                     f"engines.{name}.disabled_model_efforts.{listed} disables every effort "
+                                     "the engine supports; use disabled_models")
+    config.check_engine(engine_name, model, reasoning_effort, allow)
 
 
 def build_command(engine, request):
@@ -141,10 +191,11 @@ def save_policy(path, state, policy):
 
 def validate_turn(engine_name, request):
     """Apply the user's engines policy, then the engine's own turn rules."""
-    check_engine_policy(engine_name, request.model, request.reasoning_effort)
+    check_engine_policy(engine_name, request.model, request.reasoning_effort, request.allowed_models)
     config.check_model_named(engine_name, request.model)
     engine = get_engine(engine_name)
     engine.validate_turn(request)
+    config.check_provider(engine_name, request.provider)
     directories = [request.workspace]
     if request.isolation.get("existing_path"):
         directories.append(request.isolation["existing_path"])
@@ -307,6 +358,7 @@ def turn_request(state, prompt_file=None, reasoning_effort=None, max_model_steps
         isolation=isolation if isolation is not None else dict(launch.get("isolation") or {}),
         session_dir=launch.get("session_dir"), steering=bool(launch.get("steering")),
         budget=launch.get("budget"),
+        allowed_models=tuple(launch.get("allowed_models") or ()),
     )
 
 
@@ -770,7 +822,7 @@ def rebuild_for_fallback(state, engine, new_model):
         session_logging=fresh_launch["session_logging"], isolation=fresh_launch["isolation"],
         session_dir=fresh_launch.get("session_dir"), steering=bool(fresh_launch.get("steering")),
     )
-    check_engine_policy(engine.name, request.model, request.reasoning_effort)
+    check_engine_policy(engine.name, request.model, request.reasoning_effort, request.allowed_models)
     validate_turn(engine.name, request)
     fresh_launch["reasoning_effort"] = effort
     command = build_command(engine, request)
@@ -988,7 +1040,7 @@ def supervise(job_id, control=None):
             child = None
             timed_out = False
             kill_at = None
-            child_env = dict(os.environ, CLAIVE_WORKER_ID=job_id, CLAIVE_BIN=launcher_path(), **engine.child_env())
+            child_env = dict(os.environ, CLAIVE_WORKER_ID=job_id, CLAIVE_BIN=launcher_path(), **engine.child_env_for_turn(turn_request(state)))
             if state.get("engine") == "pi":
                 # Rebuilt every turn so models.json edits and config changes take effect.
                 overlay = provider.overlay_agent_dir(root())
@@ -1486,6 +1538,12 @@ def _release_worktree(state):
 def run_supervisor(job_id, reusable):
     procname.set_supervisor_process_name(job_id)
     try:
+        record = json.loads((job_path(job_id) / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        record = {}
+    if isinstance(record, dict) and record.get("config_overrides"):
+        config.set_overrides(record["config_overrides"])
+    try:
         return reusable_worker(job_id) if reusable else supervise(job_id)
     finally:
         # Normal exits released the worktree already; this covers a supervisor that raised.
@@ -1741,6 +1799,7 @@ def create_fork(args):
         context_file=getattr(args, "context_file", []),
         inherit_budget=engine_name == "claude" and "budget" in launch,
         budget=launch.get("budget"), budget_off_reason=launch.get("budget_off_reason"),
+        allow_model=list(launch.get("allowed_models") or []),
     )
     path, state = create_job(inherited)
 
@@ -1848,10 +1907,13 @@ def _create_job(args):
     check_engine_policy(engine_name)
     policy = config.engine_policy(engine_name)
     session_id = engine.resolve_session_id(args.session_id, not args.no_session_log)
-    effective_model = (args.model or (role_def.get("model") if role_def else None)
+    requested_provider, requested_model = (split_pi_model(args.model, args.provider)
+                                           if engine_name == "pi" else (args.provider, args.model))
+    effective_model = (requested_model or (role_def.get("model") if role_def else None)
                        or policy.get("default_model") or getattr(engine, "default_model", None))
     effort = (args.reasoning_effort or (role_def.get("reasoning_effort") if role_def else None)
-              or policy.get("default_reasoning_effort") or engine.default_effort_for(effective_model))
+              or (policy.get("default_model_efforts") or {}).get(effective_model)
+              or engine.default_effort_for(effective_model))
     if args.max_model_steps is not None:
         steps = args.max_model_steps
     elif role_def and role not in ROLES:
@@ -1885,14 +1947,16 @@ def _create_job(args):
                     budget, off_reason = None, "fallback models"
         budget_options = dict(budget=budget, budget_off_reason=off_reason)
     launch = engine.resolve_launch(
-        provider=args.provider, model=effective_model, read_only=read_only, web=args.web,
+        provider=requested_provider, model=effective_model, read_only=read_only, web=args.web,
         output_schema=args.output_schema, session_logging=not args.no_session_log,
         isolation=isolation, session_id=session_id, session_root=str(root() / "sessions"),
         steering=bool(getattr(args, "enable_steering", False)),
-        workspace=str(workspace), remember_model=bool(args.model and getattr(args, "remember_model", True)),
+        workspace=str(workspace), remember_model=bool(requested_model and getattr(args, "remember_model", True)),
         **budget_options,
     )
     launch["read_mode"] = "enforced" if read_only and engine.read_only_enforced else "soft" if read_only else "write"
+    # Recorded on the launch so every follow-up keeps the same explicit permission.
+    launch["allowed_models"] = list(getattr(args, "allow_model", None) or [])
     if worktree_setup is not None:
         launch["worktree_setup"] = worktree_setup
     check_model_policy(launch.get("model"))
@@ -1909,6 +1973,7 @@ def _create_job(args):
         budget=launch.get("budget"),
         fork_session_id=getattr(args, "fork_session_id", None),
         fork_session_dir=getattr(args, "fork_session_dir", None),
+        allowed_models=tuple(launch["allowed_models"]),
     )
     validate_turn(engine_name, initial_turn)
     for fallback_model in fallback_models:
@@ -1986,6 +2051,7 @@ def _create_job(args):
                 budget=launch.get("budget"),
                 fork_session_id=getattr(args, "fork_session_id", None),
                 fork_session_dir=getattr(args, "fork_session_dir", None),
+                allowed_models=tuple(launch["allowed_models"]),
             )
         command = build_command(engine, initial_turn)
         state = dict(schema_version=SCHEMA_VERSION, engine=engine_name, session_id=session_id,
@@ -1996,6 +2062,8 @@ def _create_job(args):
                      reusable=args.action == "open", turn=1,
                      fallback_models=fallback_models, fallbacks=[])
         state["turn_policy"] = dict(reasoning_effort=effort, max_model_steps=steps)
+        if config.overrides():
+            state["config_overrides"] = config.overrides()
         state["read_mode"] = launch["read_mode"]
         state["acceptance_contract"] = {"checks": check_manifest}
         if getattr(args, "fit_checked", False):
@@ -2135,7 +2203,8 @@ def report(state):
     if state.get("retained_worktree"):
         print(f"Changed worktree kept: {clean(state['retained_worktree'])}")
     if state.get("provider_base_url"):
-        print(f"Provider override: {clean(state['provider_base_url'])} (claive config providers.opencode2api)")
+        print(f"Provider override: {clean(state['provider_base_url'])} "
+              f"(claive config providers.{clean(state.get('provider') or provider.PROVIDER)})")
     if state.get("error"):
         print(clean(state["error"]))
     evidence = state.get("evidence") or acceptance.view(path, state)
@@ -2180,8 +2249,13 @@ def report(state):
             print(f"  - {clean(detail)}")
     if state.get("quota_exhausted"):
         print(f"Worker engine quota exhausted ({state.get('engine', DEFAULT_ENGINE)}). Reset: {state.get('quota_reset_at', 'not reported')}.")
-        print("Pre-approved fallback: Pi muse-spark-1.3-contributor-free (opencode2api) for the affected lane; "
-              "tell the user. Any other fallback needs their approval; this manager never switches automatically.")
+        try:
+            fallback_provider = config.pi_default_provider()
+        except ValueError:
+            fallback_provider = provider.PROVIDER
+        print(f"Pre-approved fallback: Pi muse-spark-1.3-contributor-free ({fallback_provider}) "
+              "for the affected lane; tell the user. Any other fallback needs their approval; "
+              "this manager never switches automatically.")
     if state.get("failure_kind"):
         print(f"Failure kind: {state['failure_kind']}")
     for entry in state.get("fallbacks") or []:
@@ -2223,7 +2297,8 @@ def pi_models_needed():
     """Models claive may ask Pi for: Pi-engine roles and Pi's remembered or built-in default."""
     from claivelib.engines.pi import PiEngine
     settings = PiEngine._settings()
-    remembered = settings.get("defaultModel") if settings.get("defaultProvider") == provider.PROVIDER else None
+    chosen = config.pi_default_provider()
+    remembered = settings.get("defaultModel") if settings.get("defaultProvider") == chosen else None
     needed = [remembered or provider.FALLBACK_MODEL]
     for role in resolved_roles().values():
         if role.get("engine") == "pi" and role.get("model") and role["model"] not in needed:
@@ -2236,7 +2311,8 @@ def live_ping(timeout=120):
     from claivelib.engines.pi import PiEngine, default_binary
     engine = PiEngine()
     settings = engine._settings()
-    remembered = settings.get("defaultModel") if settings.get("defaultProvider") == provider.PROVIDER else None
+    chosen = config.pi_default_provider()
+    remembered = settings.get("defaultModel") if settings.get("defaultProvider") == chosen else None
     model = remembered or provider.FALLBACK_MODEL
     env = dict(os.environ)
     overlay = provider.overlay_agent_dir(root())
@@ -2246,7 +2322,7 @@ def live_ping(timeout=120):
         prompt = Path(directory) / "ping.md"
         prompt.write_text("Reply with the single word OK. Do not use tools.\n")
         request = TurnRequest(binary=default_binary(), workspace=directory, prompt_file=str(prompt),
-                              session_id=None, provider=provider.PROVIDER, model=model,
+                              session_id=None, provider=chosen, model=model,
                               reasoning_effort="minimal", max_model_steps=None, read_only=True, web=False,
                               output_schema=None, session_logging=False, isolation={})
         started = time.monotonic()
@@ -2299,7 +2375,9 @@ def doctor_checks(live=False):
     try:
         resolved_roles()
         engine = default_engine()
-        source = str(config.config_path()) if config.config_path().is_file() else "built-in defaults"
+        path = config.config_path()
+        source = (f"{path} ({config.config_format(path) or 'by content'})" if path.is_file()
+                  else "built-in defaults")
         allowed = config.load().get("workspaces")
         scope = ("any workspace" if allowed is None else
                  f"workspaces allowlist: {len(allowed)} entries, {sum(1 for e in allowed if e.get('write'))} writable")
@@ -2323,10 +2401,15 @@ def doctor_checks(live=False):
                 "disabled by user" + (f": {reason}" if reason else ""))
             continue
         try:
-            binary = importlib.import_module(f"claivelib.engines.{name}").default_binary()
-        except ImportError:
+            binary = engine_binary(name)
+        except (ImportError, KeyError):
             results[name] = False
             add(name, False, name == default, "engine module not installed")
+            continue
+        except ValueError:
+            # The config check above carries the root cause; do not repeat it per engine.
+            results[name] = False
+            add(name, False, name == default, "configuration error; see the config check")
             continue
         ok = Path(binary).is_file() and os.access(binary, os.X_OK)
         detail = binary if ok else f"missing or not executable: {binary}"
@@ -2345,22 +2428,39 @@ def doctor_checks(live=False):
     available = [name for name, ok in results.items() if ok]
     add("engines", bool(available), True, ", ".join(available) + (" ok" if len(available) == 1 else " available")
         if available else "no engine binary found")
+    try:
+        chosen = config.pi_default_provider()
+    except ValueError:
+        chosen = provider.PROVIDER
+    # Everything Pi can serve: models.json plus its built-in catalog. A built-in provider has
+    # no models.json entry, so checking one file would wrongly call it missing.
+    rows = pi_provider_rows()
+    known = {model for row in rows for model in row["models"]}
+    try:
+        needed = pi_models_needed()
+    except ValueError:
+        needed = []  # the config check already reports why the file is unusable
+    missing = [model for model in needed if model not in known]
+    detail = f"{provider.models_file()}: {len(rows)} providers, {len(known)} models"
+    if missing:
+        detail += f"; not listed: {', '.join(missing)}"
+    add("pi_provider", not missing, default == "pi", detail)
     entry = None
     try:
-        _data, entry = provider.read_models()
-        listed = provider.listed_models(entry)
-        missing = [model for model in pi_models_needed() if model not in listed]
-        detail = f"{provider.models_file()}: {len(listed)} models"
-        if missing:
-            detail += f"; not listed: {', '.join(missing)}"
-        add("pi_provider", not missing, default == "pi", detail)
-    except ValueError as error:
-        add("pi_provider", False, default == "pi", str(error)[:200])
+        _data, entry = provider.read_models(name=chosen)
+    except ValueError:
+        entry = None
     if entry is None:
-        add("opencode2api", False, False, "provider not configured")
+        source = next((row["source"] for row in rows if row["provider"] == chosen), None)
+        if source == "built-in":
+            # A built-in provider has no models.json entry, so there is nothing to probe.
+            add(chosen, True, False, f"built-in {chosen}; no models.json entry to probe")
+        else:
+            add(chosen, False, default == "pi",
+                f"{chosen} is not configured in {provider.models_file()}")
     else:
         try:
-            override = provider.override_url()
+            override = provider.override_url(chosen)
             parts, used = [], None
             for label, url in (("models.json", entry["baseUrl"]), ("override", override)):
                 if not url:
@@ -2369,14 +2469,24 @@ def doctor_checks(live=False):
                 used = result
                 parts.append(f"{label} {url}: " + (f"{result['ms']} ms, {len(result['ids'])} models"
                                                    if result["ok"] else result["error"]))
-            missing = [name for name in pi_models_needed() if name not in used["ids"]] if used["ok"] else []
-            if missing:
-                parts.append(f"missing: {', '.join(missing)}")
             if override:
                 parts.append("Pi turns use the override")
-            add("opencode2api", used["ok"] and not missing, default == "pi", "; ".join(parts))
+            unserved = [name for name in needed if name not in used["ids"]] if used["ok"] else []
+            if unserved:
+                parts.append(f"not served: {', '.join(unserved)}")
+            add(chosen, used["ok"] and not unserved, default == "pi", "; ".join(parts))
         except Exception as error:
-            add("opencode2api", False, False, str(error)[:200])
+            add(chosen, False, False, str(error)[:200])
+    # Per-provider readiness is advisory: an older Pi without `auth check` must not fail doctor.
+    for row in rows:
+        label = f"pi:{row['provider']}"
+        if not row["enabled"]:
+            add(label, True, False, "disabled by policy" + (f": {row['reason']}" if row["reason"] else ""))
+        elif row["ready"] is None:
+            add(label, False, False, "auth readiness unknown")
+        else:
+            add(label, row["ready"], False,
+                f"{'ready' if row['ready'] else 'not authenticated'} ({row['auth_type'] or 'unknown'})")
     if live:
         ok, detail = live_ping()
         add("live", ok, True, detail)
@@ -2458,6 +2568,99 @@ def doctor_checks(live=False):
     return checks
 
 
+def pi_provider_rows():
+    """Pi providers with policy state and readiness, for `engines` and `doctor`.
+
+    Discovery is best-effort: an unreadable models.json or an unavailable Pi binary
+    degrades the report and never blocks a launch.
+    """
+    try:
+        discovered = provider.list_providers()
+    except Exception:
+        discovered = []
+    known = {row["provider"]: row for row in discovered}
+    try:
+        policy = config.engine_policy("pi").get("providers") or {}
+    except ValueError:
+        policy = {}
+    rows = []
+    for name in sorted(set(known) | set(policy)):
+        row = dict(known.get(name) or dict(provider=name, source="policy", base_url=None, api=None,
+                                             models=[], ready=None, auth_type=None))
+        entry = policy.get(name) or {}
+        row["enabled"] = entry.get("enabled", True)
+        row["reason"] = entry.get("reason", "")
+        rows.append(row)
+    return rows
+
+
+def pi_provider_list(json_output=False):
+    """Every provider Pi knows, with its source, model count and readiness."""
+    rows = pi_provider_rows()
+    try:
+        default = config.pi_default_provider()
+    except ValueError:
+        default = provider.PROVIDER
+    if json_output:
+        print(json.dumps({"default": default, "providers": rows}, indent=2))
+        return 0
+    if not rows:
+        print("No Pi providers found.")
+        return 0
+    for row in rows:
+        state = ("disabled" if not row["enabled"] else
+                 "ready" if row["ready"] else "not ready" if row["ready"] is False else "unknown")
+        detail = f"{row['source']}, {len(row['models'])} models, {state}"
+        if row["reason"]:
+            detail += f": {row['reason']}"
+        print(f"{row['provider']}{' (default)' if row['provider'] == default else ''} | {detail}")
+    return 0
+
+
+def pi_provider_add(args):
+    entry = provider.add_provider(args.name, args.base_url, args.api, args.models,
+                                  api_key_env=args.api_key_env, display_name=args.display_name,
+                                  replace=args.replace)
+    print(f"Provider {args.name} written to {provider.models_file()}: "
+          f"{len(entry['models'])} models, api {entry['api']}")
+    if entry.get("apiKey"):
+        print(f"Credential: {entry['apiKey']} (Pi reads it from the environment; claive stores no key)")
+    return 0
+
+
+def pi_provider_remove(args):
+    builtin = provider.remove_provider(args.name)
+    print(f"Provider {args.name} removed from {provider.models_file()}")
+    if builtin:
+        print(f"Note: Pi still serves {args.name} from its built-in catalog.")
+    return 0
+
+
+def pi_provider_check(name, json_output=False):
+    rows = {row["provider"]: row for row in provider.list_providers()}
+    row = rows.get(name)
+    if row is None:
+        raise ValueError(f"unknown Pi provider: {name}; run claive pi provider list")
+    result = dict(provider=name, ready=row["ready"], auth_type=row["auth_type"],
+                  source=row["source"], base_url=row["base_url"], models=len(row["models"]))
+    if row["base_url"]:
+        try:
+            _data, entry = provider.read_models(name=name)
+            result["endpoint"] = provider.probe(row["base_url"], entry)
+        except ValueError as error:
+            result["endpoint"] = dict(ok=False, ms=None, ids=[], error=str(error)[:200])
+    if json_output:
+        print(json.dumps(result, indent=2))
+        return 0 if result["ready"] else 1
+    print(f"{name}: {'ready' if result['ready'] else 'not ready' if result['ready'] is False else 'unknown'}"
+          f" ({result['auth_type'] or 'unknown'}), {result['source']}, {result['models']} models")
+    endpoint = result.get("endpoint")
+    if endpoint:
+        print("Endpoint: " + (f"{endpoint['ms']} ms, {len(endpoint['ids'])} models"
+                              if endpoint["ok"] else endpoint["error"]))
+    return 0 if result["ready"] else 1
+
+
 def engines_report(json_output=False):
     """What a parent may launch: the user's policy and the effective defaults for every engine."""
     check_engine_policy(None)
@@ -2467,19 +2670,26 @@ def engines_report(json_output=False):
         row = dict(engine=name, enabled=policy.get("enabled", True), reason=policy.get("reason", ""),
                    default=name == default,
                    disabled_models=policy.get("disabled_models", []),
-                   disabled_reasoning_efforts=policy.get("disabled_reasoning_efforts", []))
+                   disabled_model_efforts=policy.get("disabled_model_efforts", {}))
         try:
             engine = get_engine(name)
             capability = engine.steering_capability()
-            row.update(models=config.allowed_models(name, engine.supported_models()),
+            row.update(models=config.allowed_models(name, config.supported_models(name, engine)),
+                       tiers=config.model_tiers(name, engine),
                        default_model=policy.get("default_model") or getattr(engine, "default_model", None),
-                       default_reasoning_effort=(policy.get("default_reasoning_effort")
-                                                 or engine.default_effort_for(policy.get("default_model")
-                                                     or getattr(engine, "default_model", None))),
+                       default_reasoning_effort=(
+                           (policy.get("default_model_efforts") or {}).get(
+                               policy.get("default_model") or getattr(engine, "default_model", None))
+                           or engine.default_effort_for(policy.get("default_model")
+                                                        or getattr(engine, "default_model", None))),
                        steering=capability.mechanism if capability.supported else None,
-                       read_only_enforced=engine.read_only_enforced, soft_read=not engine.read_only_enforced)
+                       read_only_enforced=engine.read_only_enforced, soft_read=not engine.read_only_enforced,
+                       config=config.engine_effective(name, engine))
         except ValueError as error:
             row.update(enabled=False, reason=row["reason"] or str(error))
+        if name == "pi":
+            row["providers"] = pi_provider_rows()
+            row["default_provider"] = config.pi_default_provider()
         rows.append(row)
     if json_output:
         print(json.dumps({"engines": rows}, indent=2))
@@ -2488,15 +2698,184 @@ def engines_report(json_output=False):
         if not row["enabled"]:
             print(f"{row['engine']} DISABLED" + (f" ({clean(row['reason'])})" if row["reason"] else ""))
             continue
-        blocked = [f"no {label} {', '.join(row[key])}" for label, key in
-                   (("model", "disabled_models"), ("effort", "disabled_reasoning_efforts")) if row[key]]
+        blocked = [f"no model {', '.join(row['disabled_models'])}"] if row["disabled_models"] else []
+        for model, efforts in row["disabled_model_efforts"].items():
+            names = efforts if isinstance(efforts, list) else list(efforts)
+            blocked.append(f"no effort {', '.join(names)} for {model}")
         models = row.get("models")
         allowed = "" if models is None else "; models " + (", ".join(
             f"{model}[{','.join(efforts) or 'any'}]" for model, efforts in models.items()) or "none")
         print(f"{row['engine']}{' (default)' if row['default'] else ''} model {row['default_model'] or 'engine default'}"
-              f" effort {row['default_reasoning_effort']} steering {row['steering'] or 'no'}"
+              f" effort {row['default_reasoning_effort'] or 'model default'} steering {row['steering'] or 'no'}"
               f" read {'enforced' if row.get('read_only_enforced') else 'soft (not enforced)'}"
               + allowed + "".join(f"; {item}" for item in blocked))
+        binary = (row.get("config") or {}).get("binary")
+        if binary:
+            print(f"  binary {binary['value']} ({binary['source']})")
+        if row.get("providers"):
+            print(f"  providers (default {row['default_provider']}): " + ", ".join(
+                f"{item['provider']} ({'ready' if item['ready'] else 'not ready' if item['ready'] is False else 'unknown'}"
+                f"{', disabled' if not item['enabled'] else ''})" for item in row["providers"]))
+    return 0
+
+
+def engine_config_report(name=None, json_output=False):
+    """Every effective setting for one engine (or all), with its source.
+
+    Read-only and non-interactive: it never launches a worker, never writes, and
+    never prompts, so a headless host can audit its engine configuration.
+    """
+    if name is not None and name not in ENGINE_NAMES:
+        raise ValueError(f"unknown worker engine: {name}; choose {', '.join(ENGINE_NAMES)}")
+    rows = {}
+    for engine_name in [name] if name else list(ENGINE_NAMES):
+        try:
+            rows[engine_name] = config.engine_effective(engine_name, get_engine(engine_name))
+        except ValueError as error:
+            rows[engine_name] = {"error": str(error)}
+    if json_output:
+        print(json.dumps({"engines": rows}, indent=2))
+        return 0
+    for engine_name, settings in rows.items():
+        print(f"{engine_name}:")
+        if "error" in settings:
+            print(f"  unavailable: {settings['error']}")
+            continue
+        for key in sorted(settings):
+            entry = settings[key]
+            value = entry["value"]
+            if key == "binary" and value:
+                state = "executable" if Path(value).is_file() and os.access(value, os.X_OK) else "missing or not executable"
+                print(f"  binary = {value} ({entry['source']}, {state})")
+                continue
+            if isinstance(value, (dict, list)):
+                value = json.dumps(value)
+            print(f"  {key} = {'none' if value is None else value} ({entry['source']})")
+    return 0
+
+
+def models_report(name=None, json_output=False):
+    """The three model tiers per engine: the default, the allowed set, and the extra set.
+
+    Read-only and non-interactive. An extra model needs an explicit opt-in, so the
+    report names the flag and the config edit that allow it.
+    """
+    if name is not None and name not in ENGINE_NAMES:
+        raise ValueError(f"unknown worker engine: {name}; choose {', '.join(ENGINE_NAMES)}")
+    rows = {}
+    for engine_name in [name] if name else list(ENGINE_NAMES):
+        try:
+            rows[engine_name] = config.model_tiers(engine_name, get_engine(engine_name))
+        except ValueError as error:
+            rows[engine_name] = {"error": str(error)}
+    if json_output:
+        print(json.dumps({"engines": rows}, indent=2))
+        return 0
+    for engine_name, tiers in rows.items():
+        if "error" in tiers:
+            print(f"{engine_name}: unavailable: {tiers['error']}")
+            continue
+        allowed = tiers["allowed"]
+        print(f"{engine_name}: default {tiers['default'] or 'engine default'}")
+        print("  allowed: " + ("any model" if allowed is None else ", ".join(allowed) or "none"))
+        print("  extra: " + (", ".join(tiers["extra"]) or "none"))
+        if tiers["extra"]:
+            print(f"  to run an extra model: pass --allow-model MODEL, or add it to "
+                  f"engines.{engine_name}.models")
+    return 0
+
+
+def config_path_report():
+    """The active config file, one line, so a script can read it."""
+    print(config.config_path())
+    return 0
+
+
+def config_check_report(json_output=False):
+    """Parse and validate the active config, and run the cross-checks a launch runs."""
+    path = config.config_path()
+    try:
+        data = config.load()
+        check_engine_policy(None)
+    except ValueError as error:
+        if json_output:
+            print(json.dumps({"ok": False, "path": str(path), "error": str(error)}, indent=2))
+        else:
+            print(f"FAIL {error}")
+        return 1
+    summary = {"ok": True, "path": str(path), "exists": path.is_file(),
+               "format": config.config_format(path) or "by content",
+               "default_engine": data.get("default_engine"),
+               "engines": sorted(data.get("engines", {})),
+               "roles": sorted(data.get("roles", {}))}
+    shadowed = config.config_files()[1:]
+    if json_output:
+        print(json.dumps(dict(summary, shadowed=[str(item) for item in shadowed]), indent=2))
+    elif not path.is_file():
+        print(f"ok {path} (missing; built-in defaults apply)")
+    else:
+        print(f"ok {path} ({summary['format']}, {len(summary['engines'])} engines, "
+              f"{len(summary['roles'])} roles)")
+    if shadowed and not json_output:
+        print("shadowed: " + ", ".join(str(item) for item in shadowed))
+    return 0
+
+
+def config_show_report(json_output=False):
+    """The active config file: its text, or the parsed object as JSON."""
+    path = config.config_path()
+    if not path.is_file():
+        raise ValueError(f"no claive config file at {path}; run `claive config init`")
+    data = config.load()
+    if json_output:
+        print(json.dumps(data, indent=2))
+    else:
+        print(path.read_text(encoding="utf-8").rstrip())
+    return 0
+
+
+def config_init(force=False):
+    """Write the commented YAML template, after validating it and refusing to overwrite."""
+    target = config.config_target()
+    if config.config_format(target) == "json":
+        raise ValueError(f"config init writes YAML but {target} is a JSON path; unset CLAIVE_CONFIG "
+                         "or name a .yaml file, then run `claive config migrate`")
+    existing = [item for item in config.config_files() if item != target]
+    if existing and not force:
+        raise ValueError(f"{existing[0]} already exists; run `claive config migrate` to convert it, "
+                         "or pass --force to write a fresh template beside it")
+    if target.exists() and not force:
+        raise ValueError(f"{target} already exists; pass --force to replace it")
+    data = config.load_text(config.TEMPLATE, target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}")
+    temporary.write_text(config.TEMPLATE, encoding="utf-8")
+    os.replace(temporary, target)
+    print(f"wrote {target} ({len(data.get('engines', {}))} engines; every key is listed as a comment)")
+    return 0
+
+
+def config_migrate(force=False):
+    """Write the active config as YAML, then keep the old file as a timestamped backup."""
+    source = config.config_path()
+    if not source.is_file():
+        raise ValueError(f"no claive config file at {source}")
+    if config.config_format(source) == "yaml":
+        raise ValueError(f"{source} is already YAML")
+    target = config.config_target()
+    if target == source:
+        raise ValueError("the YAML target would replace the source file; unset CLAIVE_CONFIG and retry")
+    if target.exists() and not force:
+        raise ValueError(f"{target} already exists; pass --force to replace it")
+    text = config.dump_yaml(config.load())
+    config.load_text(text, target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}")
+    temporary.write_text(text, encoding="utf-8")
+    os.replace(temporary, target)
+    backup = source.with_name(f"{source.name}.bak-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}")
+    source.rename(backup)
+    print(f"wrote {target}; kept {backup}")
     return 0
 
 
@@ -2587,6 +2966,12 @@ def parser():
         launch.add_argument("--worktree-setup", help="shell command run once in a new worktree")
         launch.add_argument("--web", action="store_true", help="compatibility flag; web is always on for Claude, Codex and Muse; Pi refuses it")
         launch.add_argument("--model")
+        launch.add_argument("--set", action="append", default=[], dest="overrides", metavar="YAML",
+                            help="temporarily override any config key for this worker (repeatable); "
+                                 "value is a YAML or JSON object, e.g. '{engines: {pi: {default_model: x}}}'")
+        launch.add_argument("--allow-model", action="append", default=[], metavar="MODEL",
+                            help="run a model outside the allowed tier for this worker (repeatable); "
+                                 "the permission is recorded on the launch and kept for follow-ups")
         launch.add_argument("--session-id", help="reuse this engine's session ID with the same workspace and policy")
         launch.add_argument("--output-schema")
         launch.add_argument("--no-session-log", action="store_true")
@@ -2644,6 +3029,46 @@ def parser():
     channel_show.add_argument("--json", action="store_true")
     channel_close = channel_sub.add_parser("close")
     channel_close.add_argument("name")
+    pi_cmd = commands.add_parser("pi", help="inspect and edit Pi's provider configuration")
+    pi_sub = pi_cmd.add_subparsers(dest="pi_action", required=True)
+    pi_provider = pi_sub.add_parser("provider", help="list, add, remove or check a Pi provider")
+    pi_provider_sub = pi_provider.add_subparsers(dest="pi_provider_action", required=True)
+    pi_provider_list = pi_provider_sub.add_parser("list", help="every provider Pi knows, with readiness")
+    pi_provider_list.add_argument("--json", action="store_true")
+    pi_provider_add = pi_provider_sub.add_parser("add", help="add or replace a provider in models.json")
+    pi_provider_add.add_argument("name")
+    pi_provider_add.add_argument("--base-url", required=True)
+    pi_provider_add.add_argument("--api", required=True,
+                                 help="one of " + ", ".join(provider.APIS))
+    pi_provider_add.add_argument("--model", action="append", default=[], dest="models",
+                                 help="model id this provider serves; repeat the flag")
+    pi_provider_add.add_argument("--api-key-env", help="environment variable holding the key")
+    pi_provider_add.add_argument("--display-name")
+    pi_provider_add.add_argument("--replace", action="store_true")
+    pi_provider_remove = pi_provider_sub.add_parser("remove", help="remove a provider from models.json")
+    pi_provider_remove.add_argument("name")
+    pi_provider_check = pi_provider_sub.add_parser("check", help="report auth readiness and endpoint latency")
+    pi_provider_check.add_argument("name")
+    pi_provider_check.add_argument("--json", action="store_true")
+    engine_cmd = commands.add_parser("engine", help="inspect an engine's effective configuration")
+    engine_sub = engine_cmd.add_subparsers(dest="engine_action", required=True)
+    engine_config = engine_sub.add_parser("config", help="effective settings and their source")
+    engine_config.add_argument("name", nargs="?", help="engine name; omit for every engine")
+    engine_config.add_argument("--json", action="store_true")
+    models_cmd = commands.add_parser("models", help="the default, allowed and extra model tiers")
+    models_cmd.add_argument("name", nargs="?", help="engine name; omit for every engine")
+    models_cmd.add_argument("--json", action="store_true")
+    config_cmd = commands.add_parser("config", help="inspect, validate or create the claive config file")
+    config_sub = config_cmd.add_subparsers(dest="config_action", required=True)
+    config_sub.add_parser("path", help="print the active config file")
+    config_check = config_sub.add_parser("check", help="parse and validate the config file")
+    config_check.add_argument("--json", action="store_true")
+    config_show = config_sub.add_parser("show", help="print the active config file")
+    config_show.add_argument("--json", action="store_true")
+    config_init_cmd = config_sub.add_parser("init", help="write a commented YAML config template")
+    config_init_cmd.add_argument("--force", action="store_true")
+    config_migrate_cmd = config_sub.add_parser("migrate", help="convert the active config to YAML")
+    config_migrate_cmd.add_argument("--force", action="store_true")
     schedule = commands.add_parser("schedule", help="list or cancel scheduled wakes for a worker")
     schedule_commands = schedule.add_subparsers(dest="schedule_action", required=True)
     schedule_list = schedule_commands.add_parser("list", help="list a worker's scheduled wakes")
@@ -2895,6 +3320,14 @@ def main(launcher=None):
         from claivelib import batch as batch_mod
         return batch_mod.runner(sys.argv[2])
     args = parser().parse_args()
+    overrides = getattr(args, "overrides", None) or []
+    if overrides:
+        try:
+            config.set_overrides(*[config.parse_override(text) for text in overrides])
+        except ValueError as error:
+            raise ValueError(f"--set: {error}") from error
+        print(f"Config overrides (this worker only): {json.dumps(config.overrides(), sort_keys=True)}",
+              file=sys.stderr)
     if args.action == "monitor" and args.monitor_action in {"add", "cancel", "run-due"}:
         check_nested()
     if args.action == "monitor" and args.monitor_action in {"add", "list"} and args.id:
@@ -2907,6 +3340,13 @@ def main(launcher=None):
     elif args.action == "wait":
         args.id = [job_path(value).name if value.startswith("@") or not re.fullmatch(r"[0-9a-f]{12}", value)
                    else value for value in args.id]
+    if args.action in {"followup", "effort", "fork", "steer", "ask", "handoff"}:
+        try:
+            stored = json.loads((job_path(args.id) / "state.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            stored = {}
+        if isinstance(stored, dict) and stored.get("config_overrides"):
+            config.set_overrides(stored["config_overrides"])
     if args.action in {"run", "start", "open"}:
         check_nested()
         from claivelib import aliases
@@ -3471,6 +3911,33 @@ def main(launcher=None):
             return serve_mod.cmd_cancel(args.id)
         if args.goal_action == "retry":
             return serve_mod.cmd_retry(args.id)
+    elif args.action == "pi":
+        if args.pi_provider_action in {"add", "remove"}:
+            check_nested()
+        if args.pi_provider_action == "list":
+            return pi_provider_list(args.json)
+        if args.pi_provider_action == "add":
+            return pi_provider_add(args)
+        if args.pi_provider_action == "remove":
+            return pi_provider_remove(args)
+        if args.pi_provider_action == "check":
+            return pi_provider_check(args.name, args.json)
+    elif args.action == "engine":
+        if args.engine_action == "config":
+            return engine_config_report(args.name, args.json)
+    elif args.action == "models":
+        return models_report(args.name, args.json)
+    elif args.action == "config":
+        if args.config_action == "path":
+            return config_path_report()
+        if args.config_action == "check":
+            return config_check_report(args.json)
+        if args.config_action == "show":
+            return config_show_report(args.json)
+        if args.config_action == "init":
+            return config_init(args.force)
+        if args.config_action == "migrate":
+            return config_migrate(args.force)
     elif args.action == "serve":
         from claivelib import serve as serve_mod
         return serve_mod.cmd_serve(args)

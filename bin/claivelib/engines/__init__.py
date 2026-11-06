@@ -36,8 +36,19 @@ def register_engine(name, engine):
     _ENGINES[name] = engine
 
 
+def engine_binary(name):
+    """The configured executable for one engine, else the engine's declared default.
+
+    Readiness checks use this so doctor and orchestration agree with the launch path
+    instead of testing a path the config overrode.
+    """
+    module = importlib.import_module(f"claivelib.engines.{_MODULES[name][0]}")
+    return config.engine_setting(name, "binary", module.default_binary())
+
+
 def unregister_engine(name):
     _ENGINES.pop(name, None)
 
 
-__all__ = ["DEFAULT_ENGINE", "ENGINE_NAMES", "default_engine", "get_engine", "register_engine", "unregister_engine"]
+__all__ = ["DEFAULT_ENGINE", "ENGINE_NAMES", "default_engine", "engine_binary", "get_engine",
+           "register_engine", "unregister_engine"]

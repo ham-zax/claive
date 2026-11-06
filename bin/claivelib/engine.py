@@ -39,7 +39,7 @@ class TurnRequest:
     session_id: Optional[str]
     provider: str
     model: Optional[str]
-    reasoning_effort: str
+    reasoning_effort: Optional[str]
     max_model_steps: Optional[int]
     read_only: bool
     web: bool
@@ -51,6 +51,9 @@ class TurnRequest:
     fork_session_id: Optional[str] = None
     fork_session_dir: Optional[str] = None
     budget: Optional[dict] = None
+    # Models the user explicitly allowed for this worker (--allow-model), so a follow-up
+    # keeps the same permission instead of being refused by the allowlist.
+    allowed_models: Tuple[str, ...] = ()
 
 
 class WorkerEngine:
@@ -60,7 +63,7 @@ class WorkerEngine:
     handles_read_only_prompt = False
     allows_startup_banner = False
     supports_fork = False
-    default_reasoning_effort = "high"
+    default_reasoning_effort = None
     default_max_model_steps = None
     supports_max_model_steps = False
 
@@ -113,6 +116,20 @@ class WorkerEngine:
     def child_env(self):
         """Extra environment variables for the worker process."""
         return {}
+
+    def child_env_for_turn(self, request):
+        """Turn-specific process settings: the engine's own env plus engines.<name>.env."""
+        from claivelib import config
+        return dict(self.child_env(), **config.engine_env(self.name))
+
+    def defaults(self):
+        """The engine's declared defaults: every value config.json may override.
+
+        Each engine extends this with its binary, provider and prompt limit, so
+        `claive engine config` can report a value and its source for every key.
+        """
+        return {"default_model": getattr(self, "default_model", None),
+                "env": {}, "prompt_limit": None}
 
     def resolve_launch(self, **options):
         raise NotImplementedError

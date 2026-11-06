@@ -139,6 +139,8 @@ class ProviderChecks(unittest.TestCase):
             self.assertEqual(code, 1, bad)
             self.assertIn("base_url", checks["config"]["detail"], bad)
         self.config.write_text(json.dumps({"providers": {"other": {"base_url": override}}}))
+        self.assertTrue(self.doctor()[1]["config"]["ok"])
+        self.config.write_text(json.dumps({"providers": {"other": {"base_url": "http://10.0.0.1/v1"}}}))
         self.assertFalse(self.doctor()[1]["config"]["ok"])
 
     def test_pi_turns_use_the_override_without_editing_models_json(self):

@@ -153,12 +153,12 @@ class WorkerChecks(unittest.TestCase):
             time.sleep(0.025)
         self.fail("worker did not become idle after assigned turn")
 
-    def test_pinned_model_xhigh_defaults_and_rejected_overrides(self):
+    def test_pinned_model_defaults_and_rejected_overrides(self):
         result, state = self.launch()
         self.assertEqual(result.returncode, 0)
         command = state["command"]
         self.assertEqual(command[command.index("--model") + 1], "muse-spark-1.3-contributor")
-        self.assertEqual(command[command.index("--reasoning-effort") + 1], "xhigh")
+        self.assertNotIn("--reasoning-effort", command)
         self.assertNotIn("--max-model-steps", command)
         for option, value in [("--model", "other-model"), ("--reasoning-effort", "low")]:
             result = self.cli("run", "--workspace", str(self.path), "--prompt-file", str(self.prompt), option, value)
@@ -283,7 +283,7 @@ class WorkerChecks(unittest.TestCase):
         job = initial["id"]
         self.until_running(job)
         self.assertEqual(self.cli("effort", job, "--reasoning-effort", "max").returncode, 0)
-        self.assertEqual(json.loads(self.cli("show", job, "--json").stdout)["reasoning_effort"], "xhigh")
+        self.assertIsNone(json.loads(self.cli("show", job, "--json").stdout)["reasoning_effort"])
         for _ in range(2):
             self.assertEqual(self.cli("followup", job, "--prompt-file", str(self.prompt)).returncode, 0)
         self.assertEqual(self.cli("close", job).returncode, 0)

@@ -183,11 +183,12 @@ class ForkChecks(unittest.TestCase):
         self.assertIn("model test-model on worker engine fixture is explicitly disabled", disabled_model.stderr)
 
         config_path.write_text(json.dumps({"engines": {"fixture": {
-            "disabled_reasoning_efforts": {"low": "paused"},
+            "disabled_model_efforts": {"test-model": {"low": "paused"}},
         }}}))
         disabled_effort = self.command("fork", source["id"], "--prompt", "branch prompt")
         self.assertNotEqual(disabled_effort.returncode, 0)
-        self.assertIn("reasoning effort low on worker engine fixture is explicitly disabled", disabled_effort.stderr)
+        self.assertIn("reasoning effort low for model test-model on worker engine fixture is explicitly disabled",
+                      disabled_effort.stderr)
 
     def test_fork_rechecks_the_global_model_policy(self):
         _process, source = self.open_fixture("--model", "test-model")

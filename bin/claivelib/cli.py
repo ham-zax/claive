@@ -2410,12 +2410,13 @@ def report(state):
 
 
 def pi_models_needed():
-    """Models claive may ask Pi for: Pi-engine roles and Pi's remembered or built-in default."""
+    """Models claive may ask Pi for: its configured default, Pi's remembered default, and Pi roles."""
     from claivelib.engines.pi import PiEngine
     settings = PiEngine._settings()
     chosen = config.pi_default_provider()
     remembered = settings.get("defaultModel") if settings.get("defaultProvider") == chosen else None
-    needed = [remembered or provider.FALLBACK_MODEL]
+    configured = config.engine_policy("pi").get("default_model")
+    needed = [configured or remembered or provider.FALLBACK_MODEL]
     for role in resolved_roles().values():
         if role.get("engine") == "pi" and role.get("model") and role["model"] not in needed:
             needed.append(role["model"])

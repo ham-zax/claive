@@ -18,7 +18,7 @@ MODELS = ["muse-spark-1.3-contributor-free", "big-pickle", "mimo-v2.6-flash-free
 
 class Models(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        body = json.dumps({"data": [{"id": name} for name in MODELS]}).encode()
+        body = json.dumps({"data": [{"id": name} for name in self.server.models]}).encode()
         self.send_response(200 if self.path.endswith("/models") else 404)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -56,6 +56,7 @@ class ProviderChecks(unittest.TestCase):
     def serve(self):
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Models)
         server.hits = []
+        server.models = list(MODELS)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.servers.append(server)
         return server
@@ -101,7 +102,7 @@ class ProviderChecks(unittest.TestCase):
 
     def test_endpoint_requires_configured_models_when_pi_is_default(self):
         available = [model for model in MODELS if model != "space-bunny-free"]
-        with mock.patch(__name__ + ".MODELS", available):
+        with mock.patch.object(self.remote, "models", available):
             code, checks = self.doctor(CLAIVE_ENGINE="pi")
         self.assertEqual(code, 1)
         self.assertTrue(checks["pi_provider"]["ok"], "local registration is complete")
@@ -112,11 +113,30 @@ class ProviderChecks(unittest.TestCase):
     def test_endpoint_does_not_require_unused_preferred_models(self):
         self.config.write_text(json.dumps({"roles": {"oracle": {"model": "big-pickle"}}}))
         available = [model for model in MODELS if model != "space-bunny-free"]
-        with mock.patch(__name__ + ".MODELS", available):
+        with mock.patch.object(self.remote, "models", available):
             code, checks = self.doctor(CLAIVE_ENGINE="pi")
         self.assertEqual(code, 0, checks)
         self.assertTrue(checks["opencode2api"]["ok"])
         self.assertNotIn("space-bunny-free", checks["opencode2api"]["detail"])
+
+    def test_doctor_requires_the_configured_default_model(self):
+        configured_model = "claive-configured-default"
+        available = [model for model in MODELS if model != "muse-spark-1.3-contributor-free"]
+        available.append(configured_model)
+        self.remote.models = available
+        self.write_models(f"http://127.0.0.1:{self.remote.server_port}/v1", available)
+        self.config.write_text(json.dumps({"engines": {"pi": {"default_model": configured_model}}}))
+
+        code, checks = self.doctor(CLAIVE_ENGINE="pi")
+        self.assertEqual(code, 0, checks)
+        self.assertTrue(checks["pi_provider"]["ok"])
+        self.assertTrue(checks["opencode2api"]["ok"])
+
+        self.remote.models = [model for model in available if model != configured_model]
+        code, checks = self.doctor(CLAIVE_ENGINE="pi")
+        self.assertEqual(code, 1)
+        self.assertFalse(checks["opencode2api"]["ok"])
+        self.assertIn(f"not served: {configured_model}", checks["opencode2api"]["detail"])
 
     def test_endpoint_latency_and_loopback_override(self):
         _code, checks = self.doctor()

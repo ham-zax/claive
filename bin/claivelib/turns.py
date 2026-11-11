@@ -6,17 +6,25 @@ from pathlib import Path
 import re
 import time
 import uuid
+from contextlib import contextmanager
 
 from claivelib import cli
 from claivelib.engines import DEFAULT_ENGINE
 
 
-def queue(path, prompt_file, label=None, reasoning_effort=None, max_model_steps=None,
-          expires_at=None, requires_no_parent=False, stop_file=None, receipt=False,
-          only_if_idle=False, message_id=None):
+@contextmanager
+def request_lock(path):
+    """Serialize request admission with idle-session suspension."""
     fd = os.open(path / ".requests.lock", os.O_WRONLY | os.O_CREAT, 0o600)
     with os.fdopen(fd, "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def queue(path, prompt_file, label=None, reasoning_effort=None, max_model_steps=None,
+          expires_at=None, requires_no_parent=False, stop_file=None, receipt=False,
+          only_if_idle=False, message_id=None):
+    with request_lock(path):
         state = cli.load(path)
         if not state.get("reusable") or state["status"] not in cli.ACTIVE or (path / "close.request").exists():
             raise ValueError("worker is not available for follow-up; reopen its retained --session-id if appropriate")

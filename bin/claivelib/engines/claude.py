@@ -88,7 +88,7 @@ class ClaudeEngine(WorkerEngine):
 
     def steering_capability(self):
         return SteeringCapability(True, "claude-stream-json", notes=(
-            "Requires --enable-steering; input joins the turn after the current tool calls finish.",
+            "Enabled by context/time budgets or --enable-steering; input joins after current tool calls finish.",
             "Acknowledgement is Claude's replay of the message as it enters the conversation; "
             "compliance is not established.",))
 

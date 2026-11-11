@@ -299,11 +299,12 @@ def validate(data, path):
     if not isinstance(launch, dict):
         raise ValueError(f"invalid claive config {path}: launch must be an object")
     for name, value in launch.items():
-        if name not in {"start_timeout", "git_timeout", "worktree_setup_timeout"}:
+        if name not in {"start_timeout", "git_timeout", "worktree_setup_timeout", "stall_timeout", "idle_ttl"}:
             raise ValueError(f"invalid claive config {path}: launch: unknown key {name}")
-        maximum = 3600 if name == "worktree_setup_timeout" else 600
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 1 <= value <= maximum:
-            raise ValueError(f"invalid claive config {path}: launch.{name} must be a number from 1 to {maximum}")
+        maximum = 2592000 if name == "idle_ttl" else 3600 if name in {"worktree_setup_timeout", "stall_timeout"} else 600
+        minimum = 0 if name in {"stall_timeout", "idle_ttl"} else 1
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not minimum <= value <= maximum:
+            raise ValueError(f"invalid claive config {path}: launch.{name} must be a number from {minimum} to {maximum}")
     engine = data.get("default_engine")
     if engine is not None and (not isinstance(engine, str) or not engine):
         raise ValueError(f"invalid claive config {path}: default_engine must be a nonempty string")
@@ -796,6 +797,12 @@ def check_workspace(directories, read_only):
     for directory in directories:
         real = Path(os.path.realpath(directory))
         matches = [(base, write) for base, write in entries if real == base or base in real.parents]
+        if not matches:
+            from claivelib import worktrees
+            source = worktrees.managed_source(real)
+            if source:
+                real = Path(source).resolve()
+                matches = [(base, write) for base, write in entries if real == base or base in real.parents]
         if not matches:
             raise ValueError(f"workspace {real} is outside the claive config workspaces allowlist")
         _base, write = max(matches, key=lambda match: len(match[0].parts))

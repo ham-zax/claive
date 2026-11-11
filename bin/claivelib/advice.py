@@ -12,7 +12,10 @@ def launch_notes(state, prompt_bytes=0):
         notes.append("Fit: no --checks-file. Delegate when an executable check exists and a wrong first "
                      "attempt is costly; small or tightly coupled work is faster inline.")
     if state.get("turn_timeout") is None:
-        notes.append("Bound: no --turn-timeout; a stalled turn runs until cancelled.")
+        stall = state.get("stall_timeout", 180)
+        notes.append(f"Bound: no total turn budget; inactivity watchdog {stall:g}s "
+                     "(active local tools are exempt)." if stall else
+                     "Bound: no total turn budget or inactivity watchdog; cancel stalled workers manually.")
     if not state.get("fit_checked") and not state.get("reusable") and prompt_bytes >= LARGE_BRIEF_BYTES:
         notes.append(f"Scope: {prompt_bytes}-byte brief for a single-turn worker. Use open --detach + followup: "
                      "one small scoped task per turn, read its summary, then send the next.")

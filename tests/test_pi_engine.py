@@ -15,7 +15,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "bin"))
 from claivelib import cli
 from claivelib.engine import TurnRequest
-from claivelib.engines.pi import READ_ONLY_NOTE, PiEngine
+from claivelib.engines.pi import READ_ONLY_NOTE, WRITE_CHUNK_NOTE, PiEngine
 
 
 class PiChecks(unittest.TestCase):
@@ -91,6 +91,17 @@ class PiChecks(unittest.TestCase):
             time.sleep(0.025)
         self.fail("Pi worker did not create state")
 
+    def test_automatic_steering_is_disabled_with_model_fallbacks(self):
+        result, state = self.launch("--turn-timeout", "10", "--fallback-models", "glm-5.3-flash-free")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(state["launch"]["steering"])
+        self.assertIn("--print", state["command"])
+        explicit = self.command("run", "--engine", "pi", "--workspace", str(self.workspace),
+                                "--prompt-file", str(self.prompt), "--enable-steering",
+                                "--fallback-models", "glm-5.3-flash-free")
+        self.assertNotEqual(explicit.returncode, 0)
+        self.assertIn("steering cannot be combined", explicit.stderr)
+
     def test_tool_selection_and_isolation_flags_for_json_and_rpc(self):
         for steering in (False, True):
             for read_only in (False, True):
@@ -113,7 +124,8 @@ class PiChecks(unittest.TestCase):
                         else:
                             self.assertEqual(command[-1], READ_ONLY_NOTE)
                     else:
-                        self.assertNotIn("--append-system-prompt", command)
+                        self.assertEqual(command[command.index("--append-system-prompt") + 1], WRITE_CHUNK_NOTE)
+                        self.assertIn("150 lines", WRITE_CHUNK_NOTE)
                     for flag in ("--offline", "--no-extensions", "--no-prompt-templates",
                                  "--no-themes", "--no-approve"):
                         self.assertIn(flag, command)

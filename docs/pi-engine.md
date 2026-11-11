@@ -69,7 +69,8 @@ that turn and keep the supervisor available.
   or `--worktree-existing` for an existing worktree.
 - `engines.pi.extra_args` adds opt-in engine arguments. Claive refuses `--`
   and its owned flags. See the README config section.
-- Pi supports steering with `--enable-steering` and forks from idle reusable
+- Pi writers use RPC steering by default (`--disable-steering` opts out); readers
+  can opt in with `--enable-steering`. Pi supports forks from idle reusable
   sessions with `claive fork ID --prompt '...'`.
 - `--no-session-log` maps to Pi's `--no-session` for a single turn. Reusable workers
   still require retained sessions.

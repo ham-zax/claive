@@ -132,7 +132,6 @@ def create(path, message, at, every=None, identifier=None):
     from claivelib import messaging
 
     messaging.validate_message(message)
-    messaging._worker_for_note_or_wake(path)
     now = time.time()
     next_at = parse_at(at, now)
     if next_at is None:
@@ -153,6 +152,7 @@ def create(path, message, at, every=None, identifier=None):
     record = dict(id=identifier, message=message, created_at=now, next_at=next_at,
                   every=interval, status="scheduled", fired_count=0, skipped_count=0)
     with _lock(path):
+        messaging._worker_for_note_or_wake(path)
         existing = _records(path)
         if any(item["id"] == identifier for item in existing):
             raise ValueError(f"schedule {identifier} already exists")

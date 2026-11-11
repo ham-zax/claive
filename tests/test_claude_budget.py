@@ -21,6 +21,8 @@ FINAL = 'Done.\n```claive-report\n{"status":"done","summary":"Finished"}\n```'
 FIXTURE = '''#!/usr/bin/env python3
 import json, os, select, sys, time
 from pathlib import Path
+# select() must observe the same buffer as readline(), including coalesced frames.
+sys.stdin = os.fdopen(sys.stdin.fileno(), "rb", buffering=0)
 root = Path(os.environ["BUDGET_FIXTURE_DIR"])
 counter = root / "count"
 index = int(counter.read_text()) if counter.exists() else 0
@@ -810,6 +812,7 @@ class ClaudeBudgetChecks(unittest.TestCase):
         self.assertEqual(state["model"], "claude-sonnet-5-5")
         self.assertEqual(len(state["fallbacks"]), 1)
         self.assertEqual(state["handoffs"], 0)
+        self.assertFalse(state["launch"]["steering"])
 
     def test_cancelled_session_does_not_count_as_handoff(self):
         self.plan([{"result": HANDOFF}, {"cancel": True}])

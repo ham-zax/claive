@@ -19,7 +19,7 @@ import tempfile
 import time
 import uuid
 
-from claivelib import config, provider, acceptance, steering, procname
+from claivelib import config, provider, acceptance, steering, procname, runtime_limits
 from claivelib.ansi import strip_controls
 from claivelib.engine import SOFT_READ_NOTE, TurnRequest
 from claivelib.engines import DEFAULT_ENGINE, ENGINE_NAMES, default_engine, engine_binary, get_engine
@@ -506,7 +506,7 @@ def jobs(limit=20):
     records.sort(key=lambda item: item["started_at"], reverse=True)
     active = [item for item in records if item["status"] in ACTIVE]
     finished = [item for item in records if item["status"] not in ACTIVE]
-    return active + finished[:limit]
+    return active + (finished if limit is None else finished[:limit])
 
 
 def clean(value):
@@ -641,6 +641,9 @@ def render(records, color=False, height=None):
         if color:
             badge = f"\033[{palette.get(status, '0')}m{badge}\033[0m"
         label = clean(state["label"])
+        delta = state.get("workspace_delta") or {}
+        if delta.get("files"):
+            label += f" [workspace +{delta['added']}/-{delta['deleted']}, {delta['files']} files]"
         if state.get("task_failures"):
             reasons = state.get("task_failure_reasons") or []
             if reasons:
@@ -675,7 +678,7 @@ def event_update(state, event):
     state["last_activity"] = time.time()
     state["last_observed_activity"] = event.get("native_kind", kind)
     command = event.get("command")
-    if kind in {"task_warning", "tool_completed"} and isinstance(command, str) and command:
+    if kind in {"task_warning", "tool_completed", "tool_probe"} and isinstance(command, str) and command:
         results = state.setdefault("turn_command_results", {})
         results.pop(command, None)
         results[command] = "fail" if kind == "task_warning" else "ok"
@@ -690,7 +693,7 @@ def event_update(state, event):
         identifier = event.get("tool_id") or f"uncorrelated:{len(active)}:{tool}"
         active[identifier] = tool
         state["phase"] = "tool: " + ", ".join(active.values())
-    elif kind == "tool_completed":
+    elif kind in {"tool_completed", "tool_probe"}:
         active = state.setdefault("active_tools", {})
         identifier = event.get("tool_id")
         if identifier:
@@ -713,6 +716,8 @@ def event_update(state, event):
         active = state.setdefault("active_tools", {})
         if event.get("tool_id"):
             active.pop(event["tool_id"], None)
+        elif len(active) == 1 and next(iter(active)).startswith("uncorrelated:"):
+            active.clear()
         state["phase"] = "tool: " + ", ".join(active.values()) if active else "task failure reported"
         detail = " ".join(str(event.get("reason") or "").split())
         if event.get("tool"):
@@ -756,12 +761,14 @@ def event_update(state, event):
             state["quota_reset_at"] = event["reset_at"]
 
 
-FALLBACKABLE_FAILURES = {"timeout", "quota", "worker", "protocol"}
+FALLBACKABLE_FAILURES = {"timeout", "stall_timeout", "output_truncated", "quota", "worker", "protocol"}
 
 PER_TURN_RESET_KEYS = ("ended_at", "error", "terminal", "terminal_reason", "budget_warning", "quota_exhausted",
                        "quota_reset_at", "fallback_requires_user_approval", "report", "report_state",
                        "report_error", "needs_parent", "failure_kind", "active_tools", "turn_command_results",
-                       "attempt_failed", "turn_usage")
+                       "attempt_failed", "turn_usage", "workspace_delta", "time_wrap_up_sent",
+                       "time_wrap_up_error", "consecutive_truncations", "truncation_hint_sent",
+                       "truncation_steering_error", "time_wrap_up_attempted", "shutdown_error")
 
 
 def context_overflow_reason(reason):
@@ -813,6 +820,7 @@ def rebuild_for_fallback(state, engine, new_model):
         output_schema=output_schema, session_logging=session_logging,
         isolation=isolation, session_id=fresh_session,
         session_root=str(root() / "sessions"), workspace=workspace,
+        steering=bool(launch.get("steering")),
     )
     engine.validate_launch(fresh_launch)
     request = TurnRequest(
@@ -871,6 +879,9 @@ def supervise(job_id, control=None):
     transport = None
     timed_out = False
     timeout_start = None
+    last_event_monotonic = time.monotonic()
+    limit_failure = None
+    limit_error = None
     budget_values = None
     gate = {"stop": None, "seen": []}
 
@@ -912,10 +923,27 @@ def supervise(job_id, control=None):
 
     def apply_events(normalized):
         """Apply one native event; then publish its tool calls and any stop change to the budget gate."""
+        nonlocal last_event_monotonic, limit_failure, limit_error
         tool_ids = [item["tool_id"] for item in normalized if item.get("type") == "tool_started" and item.get("tool_id")]
         stop_before = gate["stop"]
         for normalized_event in normalized:
+            if normalized_event.get("type") != "control_response":
+                last_event_monotonic = time.monotonic()
             event_update(state, normalized_event)
+            if normalized_event.get("native_kind") == "tool_output_truncated":
+                state["consecutive_truncations"] = state.get("consecutive_truncations", 0) + 1
+                if not state.get("truncation_hint_sent") and transport:
+                    state["truncation_hint_sent"] = True
+                    save(path / "state.json", state)
+                    try:
+                        steering.submit(path, runtime_limits.TRUNCATION_HINT, source="truncation")
+                    except (OSError, ValueError) as error:
+                        state["truncation_steering_error"] = str(error)
+                if state["consecutive_truncations"] >= 3:
+                    limit_failure = "output_truncated"
+                    limit_error = "three tool calls hit the output token limit without a successful tool; split the calls or choose another model"
+            elif normalized_event.get("type") in {"tool_completed", "tool_probe"}:
+                state["consecutive_truncations"] = 0
             update_budget(normalized_event)
             if budget_values is not None:
                 try:
@@ -1025,7 +1053,8 @@ def supervise(job_id, control=None):
                 budget.write_gate(path, None, [])
             if attempt > 0:
                 for key in PER_TURN_RESET_KEYS:
-                    state.pop(key, None)
+                    if key not in {"time_wrap_up_sent", "time_wrap_up_attempted", "time_wrap_up_error", "truncation_hint_sent"}:
+                        state.pop(key, None)
                 state.pop("answer", None)
                 state.pop("exit_code", None)
                 state["malformed_events"] = 0
@@ -1041,6 +1070,9 @@ def supervise(job_id, control=None):
             log_mode = "a" if (state.get("reusable") or attempt > 0) else "w"
             child = None
             timed_out = False
+            limit_failure = None
+            limit_error = None
+            state["consecutive_truncations"] = 0
             kill_at = None
             child_env = dict(os.environ, CLAIVE_WORKER_ID=job_id, CLAIVE_BIN=launcher_path(), **engine.child_env_for_turn(turn_request(state)))
             if state.get("engine") == "pi":
@@ -1071,6 +1103,7 @@ def supervise(job_id, control=None):
                 transport = steering.Transport(path, state, child.stdin, initial_input) if initial_input is not None else None
                 if timeout_start is None:
                     timeout_start = time.monotonic()
+                last_event_monotonic = time.monotonic()
                 state["worker_pid"] = child.pid
                 state["worker_identity"] = identity(child.pid)
                 state["phase"] = "waiting for first event"
@@ -1083,8 +1116,29 @@ def supervise(job_id, control=None):
                         now = time.monotonic()
                         if transport and not stopping and not timed_out and not state.get("terminal"):
                             transport.pump()
-                        if (turn_timeout is not None and not timed_out and not stopping
-                                and child.poll() is None and now - timeout_start > turn_timeout):
+                        action = runtime_limits.turn_action(
+                            now - timeout_start, now - last_event_monotonic, state.get("active_tools"),
+                            turn_timeout, state.get("stall_timeout", 180), state.get("turn_grace", 0),
+                            bool(state.get("time_wrap_up_attempted") or state.get("time_wrap_up_sent")))
+                        if action == "wrap_up" and not timed_out and not stopping and not state.get("terminal"):
+                            state["time_wrap_up_attempted"] = True
+                            save(path / "state.json", state)
+                            if transport:
+                                try:
+                                    steering.submit(path, runtime_limits.WRAP_UP, source="time_budget")
+                                    state["time_wrap_up_sent"] = True
+                                    transport.pump()
+                                except (OSError, ValueError) as error:
+                                    state["time_wrap_up_error"] = str(error)
+                            else:
+                                state["time_wrap_up_error"] = "no steering transport; wrap-up was not delivered"
+                        if (not timed_out and not stopping and child.poll() is None
+                                and (limit_failure or action in {"timeout", "stall_timeout"})):
+                            if not limit_failure:
+                                limit_failure = action
+                                limit_error = (f"turn stream stalled for {state.get('stall_timeout', 180):g}s"
+                                               if action == "stall_timeout" else
+                                               f"turn timed out after {turn_timeout:g}s")
                             timed_out = True
                             state["status"] = "cancelling"
                             state["phase"] = "stopping worker"
@@ -1146,10 +1200,10 @@ def supervise(job_id, control=None):
                     answer if isinstance(answer, str) else json.dumps(answer))
             if stopping:
                 state["status"] = "cancelled"
-            elif timed_out:
+            elif timed_out or limit_failure:
                 state["status"] = "failed"
-                state["failure_kind"] = "timeout"
-                state["error"] = f"turn timed out after {'%g' % turn_timeout}s"
+                state["failure_kind"] = limit_failure or "timeout"
+                state["error"] = limit_error or f"turn timed out after {'%g' % turn_timeout}s"
             elif state["exit_code"] != 0 or state.get("terminal") != "completed" or state["malformed_events"]:
                 state["status"] = "failed"
                 state["error"] = (f"exit={state['exit_code']}; terminal={state.get('terminal', 'missing')}; "
@@ -1213,6 +1267,7 @@ def supervise(job_id, control=None):
                     state["launch"] = fresh_launch
                     state["command"] = fresh_command
                     state["session_id"] = fresh_session
+                    state.pop("truncation_hint_sent", None)
                     state["reasoning_effort"] = fresh_launch["reasoning_effort"]
                     timeout_start = None
                     policy = load_policy(path, state)
@@ -1222,19 +1277,15 @@ def supervise(job_id, control=None):
                     continue
             break
     except Exception as error:
-        if budget_values is not None and isinstance(error, steering.ReceiptError) and not stopping:
-            budget.recovery_failure(path, state, state.get("answer", ""), str(error))
-        elif timed_out and not stopping:
+        if (timed_out or limit_failure) and not stopping:
             state["status"] = "failed"
-            state["failure_kind"] = "timeout"
-            turn_timeout = state.get("turn_timeout")
-            try:
-                label = "%g" % parse_turn_timeout(turn_timeout)
-            except ValueError:
-                label = str(turn_timeout)
-            state["error"] = f"turn timed out after {label}s"
+            state["failure_kind"] = limit_failure or "timeout"
+            state["error"] = limit_error or "worker stopped after its runtime limit"
+            state["shutdown_error"] = str(error)
             if state.get("report_contract"):
                 record_report(state, state.get("answer", ""))
+        elif budget_values is not None and isinstance(error, steering.ReceiptError) and not stopping:
+            budget.recovery_failure(path, state, state.get("answer", ""), str(error))
         else:
             state["status"] = "cancelled" if stopping else "failed"
             state["error"] = str(error)
@@ -1253,7 +1304,18 @@ def supervise(job_id, control=None):
                 child.wait()
             except Exception:
                 pass
-    close_transport()
+    try:
+        close_transport()
+    except (OSError, ValueError) as error:
+        state["shutdown_error"] = str(error)
+        if state["status"] not in {"failed", "cancelled"}:
+            state.update(status="failed", failure_kind="supervisor", error=str(error))
+    if not (path / "result.txt").exists():
+        from claivelib import messaging
+        text = state.get("answer", "")
+        text = text if isinstance(text, str) else json.dumps(text)
+        messaging._write_text(path / "result.txt", text)
+        messaging._write_text(path / "results" / f"turn-{state['turn']:04}.txt", text)
     state.pop("answer", None)
     state["ended_at"] = time.time()
     state["phase"] = state["status"]
@@ -1333,7 +1395,11 @@ def remove_worktree(isolation, force=True):
 
 
 def active_worktree_user(target, exclude=None):
-    """Find another live worker whose workspace lies in this worktree."""
+    """Find another live worker or batch whose workspace lies in this worktree."""
+    from claivelib import worktrees
+    batch = worktrees.active_batch_user(target)
+    if batch:
+        return f"batch {batch}"
     target = Path(target).resolve()
     for state in jobs():
         if state.get("status") not in ACTIVE or state.get("id") == exclude:
@@ -1537,7 +1603,7 @@ def _release_worktree(state):
         pass  # the terminal may be gone (SIGHUP); retained_worktree records it anyway
 
 
-def run_supervisor(job_id, reusable):
+def run_supervisor(job_id, reusable, resume_idle=False):
     procname.set_supervisor_process_name(job_id)
     try:
         record = json.loads((job_path(job_id) / "state.json").read_text(encoding="utf-8"))
@@ -1546,7 +1612,7 @@ def run_supervisor(job_id, reusable):
     if isinstance(record, dict) and record.get("config_overrides"):
         config.set_overrides(record["config_overrides"])
     try:
-        return reusable_worker(job_id) if reusable else supervise(job_id)
+        return reusable_worker(job_id, resume_idle=resume_idle) if reusable else supervise(job_id)
     finally:
         # Normal exits released the worktree already; this covers a supervisor that raised.
         # A failure here must not replace the supervisor's own result or exception.
@@ -1554,7 +1620,8 @@ def run_supervisor(job_id, reusable):
             path = job_path(job_id)
             state = load(path, check_alive=False)
             before = state.get("retained_worktree")
-            release_worktree(state)
+            if state.get("supervisor_pid") == os.getpid():
+                release_worktree(state)
             if state.get("retained_worktree") != before:
                 save(path / "state.json", state)
         except Exception as error:
@@ -1570,23 +1637,33 @@ def _remove_withdrawn_ask_marker(path, request):
         stop_file.unlink(missing_ok=True)
 
 
-def reusable_worker(job_id):
+def reusable_worker(job_id, resume_idle=False):
     """Keep one supervisor and durable worker session available between turns."""
     from claivelib import budget
     path = job_path(job_id)
     control = {"stopping": False}
+    if resume_idle:
+        def stop_idle(_signum, _frame):
+            control["stopping"] = True
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            signal.signal(sig, stop_idle)
     while True:
-        supervise(job_id, control)
+        if not resume_idle:
+            supervise(job_id, control)
         state = load(path, check_alive=False)
         if control["stopping"] or state["status"] == "cancelled":
             return 130
-        state["last_turn_status"] = state["status"]
-        state["last_turn_ended_at"] = state.pop("ended_at")
+        if not resume_idle:
+            state["last_turn_status"] = state["status"]
+            state["last_turn_ended_at"] = state.pop("ended_at")
+        resume_idle = False
         state.update(status="idle", phase=f"turn {state['turn']} {state['last_turn_status']}; ready for follow-up")
+        state.update(supervisor_pid=os.getpid(), supervisor_identity=identity(os.getpid()))
         save(path / "state.json", state)
         print(f"Worker {job_id}: turn {state['turn']} {state['last_turn_status']}; "
               f"idle in session {worker_session_id(state)}", flush=True)
         report(state)
+        idle_started = time.monotonic()
         while not control["stopping"]:
             from claivelib import wakes
             wake_result = wakes.deliver_due(path)
@@ -1741,7 +1818,13 @@ def reusable_worker(job_id):
                 save(path / "state.json", state)
                 print(f"Worker {job_id} closed; durable session {worker_session_id(state)} retained", flush=True)
                 return outcome_code(state)
-            time.sleep(0.2)
+            from claivelib import idle_sessions
+            idle_age = time.monotonic() - idle_started
+            ttl = state.get("idle_ttl", config.launch_setting("idle_ttl", 7200))
+            if ttl and idle_age >= ttl and idle_sessions.expire(path, idle_age):
+                print(f"Worker {job_id}: idle TTL closed; durable session retained", flush=True)
+                return outcome_code(load(path, check_alive=False))
+            time.sleep(0.5)
         if control["stopping"]:
             state.update(status="cancelled", phase="cancelled", ended_at=time.time())
             release_worktree(state)
@@ -1796,6 +1879,8 @@ def create_fork(args):
         output_schema=launch.get("output_schema"), no_session_log=False,
         provider=launch.get("provider"), mission=source.get("mission"),
         turn_timeout=source.get("turn_timeout"), fallback_models=None, remember_model=False,
+        stall_timeout=source.get("stall_timeout"), idle_ttl=source.get("idle_ttl"),
+        turn_grace=source.get("turn_grace"),
         fork_session_id=source_session_id, fork_session_dir=launch.get("session_dir"),
         forked_from=source_id,
         context_file=getattr(args, "context_file", []),
@@ -1869,6 +1954,11 @@ def _create_job(args):
     if args.max_model_steps is not None and args.max_model_steps < 1:
         raise ValueError("--max-model-steps must be positive")
     turn_timeout = parse_turn_timeout(getattr(args, "turn_timeout", None))
+    stall_timeout = runtime_limits.seconds(getattr(args, "stall_timeout", None), "--stall-timeout",
+                                          config.launch_setting("stall_timeout", 180))
+    idle_ttl = runtime_limits.seconds(getattr(args, "idle_ttl", None), "--idle-ttl",
+                                     config.launch_setting("idle_ttl", 7200))
+    turn_grace = runtime_limits.seconds(getattr(args, "turn_grace", None), "--turn-grace", 0)
     cli_fallback_raw = getattr(args, "fallback_models", None)
     if args.action == "open" and args.no_session_log:
         raise ValueError("reusable workers require session logging to preserve follow-up history")
@@ -1940,6 +2030,10 @@ def _create_job(args):
     if worktree_setup is not None and isolation["mode"] != "create":
         raise ValueError("--worktree-setup requires --worktree")
     budget_options = {}
+    requested_steering = (False if getattr(args, "steering_disabled", False)
+                          else getattr(args, "enable_steering", None))
+    default_steering = not fallback_models and (
+        (engine_name == "pi" and not read_only) or bool(turn_timeout and engine_name == "claude"))
     if engine_name == "claude":
         if getattr(args, "inherit_budget", False):
             budget, off_reason = args.budget, args.budget_off_reason
@@ -1951,11 +2045,13 @@ def _create_job(args):
                 elif fallback_models:
                     budget, off_reason = None, "fallback models"
         budget_options = dict(budget=budget, budget_off_reason=off_reason)
+        if getattr(args, "steering_disabled", False):
+            budget_options = dict(budget=None, budget_off_reason="steering disabled")
     launch = engine.resolve_launch(
         provider=requested_provider, model=effective_model, read_only=read_only, web=args.web,
         output_schema=args.output_schema, session_logging=not args.no_session_log,
         isolation=isolation, session_id=session_id, session_root=str(root() / "sessions"),
-        steering=bool(getattr(args, "enable_steering", False)),
+        steering=bool(requested_steering if requested_steering is not None else default_steering),
         workspace=str(workspace), remember_model=bool(requested_model and getattr(args, "remember_model", True)),
         **budget_options,
     )
@@ -2012,12 +2108,19 @@ def _create_job(args):
                                  "cancel it, or pass another --label")
     # Check both sides: a later writer must not bypass an existing ownership lane.
     if not (read_only and engine.read_only_enforced) and isolation["mode"] == "none":
+        warned_shared_writer = False
         for other in jobs():
             if (other["status"] in ACTIVE
                     and (ownership is not None or other.get("acceptance_contract", {}).get("owned_paths") is not None)
                     and Path(other.get("actual_workspace") or other["workspace"]).resolve() == workspace.resolve()
                     and read_mode(other) != "enforced"):
                 raise ValueError("owned concurrent writers require isolated worktrees")
+            if (not warned_shared_writer and other["status"] in {"starting", "running", "cancelling"}
+                    and Path(other.get("actual_workspace") or other["workspace"]).resolve() == workspace.resolve()
+                    and read_mode(other) != "enforced"):
+                print(f"warning: writer {other['id']} also targets {workspace}; use --worktree "
+                      "to isolate parallel edits", file=sys.stderr)
+                warned_shared_writer = True
     if ownership is not None or check_manifest:
         if root().resolve().is_relative_to(Path(args.worktree_existing or str(workspace)).resolve()):
             raise ValueError("ownership/check contracts require CLAIVE_DIR outside the workspace")
@@ -2077,6 +2180,7 @@ def _create_job(args):
             state["acceptance_contract"]["owned_paths"] = ownership
         if turn_timeout is not None:
             state["turn_timeout"] = turn_timeout
+        state.update(stall_timeout=stall_timeout, idle_ttl=idle_ttl, turn_grace=turn_grace)
         if report_contract:
             state["report_contract"] = True
         if role:
@@ -2152,7 +2256,7 @@ def spawn_supervisor(path, state, entry):
                                        "spawned_at": time.time()})
             print(f"claive: supervisor pid {process.pid}", file=log, flush=True)
     except BaseException:
-        if process is None:
+        if process is None and entry != "_reusable_idle":
             discard_job(path, launch_config(state))
         raise
 
@@ -2212,6 +2316,13 @@ def report(state):
               f"(claive config providers.{clean(state.get('provider') or provider.PROVIDER)})")
     if state.get("error"):
         print(clean(state["error"]))
+    delta = state.get("workspace_delta")
+    if delta:
+        if delta.get("error"):
+            print("Workspace evidence unavailable: " + clean(delta["error"]))
+        else:
+            print(f"Workspace changes: +{delta['added']}/-{delta['deleted']} in {delta['files']} files "
+                  f"({delta['untracked']} untracked; includes pre-existing changes)")
     evidence = state.get("evidence") or acceptance.view(path, state)
     print(f"Verification: {evidence['verification']['status']} | Acceptance: {evidence['acceptance']['status']}")
     if evidence.get("freshness"):
@@ -3023,7 +3134,10 @@ def parser():
         launch.add_argument("--team")
         launch.add_argument("--member")
         launch.add_argument("--project-file", help="override the team's project context for this launch")
-        launch.add_argument("--enable-steering", action="store_true", help="opt into the duplex provider transport (Pi, Codex, Claude)")
+        duplex = launch.add_mutually_exclusive_group()
+        duplex.add_argument("--enable-steering", action="store_true", default=None,
+                            help="enable duplex provider transport (default for Pi writers and time-bounded Claude turns)")
+        duplex.add_argument("--disable-steering", action="store_true", dest="steering_disabled")
         launch.add_argument("--checks-file", help="absolute JSON required-check manifest for parent verification")
         launch.add_argument("--check", action="append", help="required check as NAME=COMMAND (repeatable)")
         launch.add_argument("--fit-checked", action="store_true", help="skip delegation fit and scope reminders")
@@ -3052,8 +3166,11 @@ def parser():
         launch.add_argument("--no-session-log", action="store_true")
         launch.add_argument("--provider")
         launch.add_argument("--mission", help="link the new worker to a mission")
-        launch.add_argument("--turn-timeout",
+        launch.add_argument("--turn-timeout", "--turn-budget",
                             help="fail a turn that runs longer than SECONDS (positive number)")
+        launch.add_argument("--stall-timeout", help="stream inactivity limit in seconds (default 180; 0 disables)")
+        launch.add_argument("--turn-grace", help="extra wrap-up seconds after the turn budget (default 0)")
+        launch.add_argument("--idle-ttl", help="close idle reusable supervisors after SECONDS (default 7200; 0 disables)")
         launch.add_argument("--fallback-models",
                             help="comma-separated fallback models for run/start, and reusable AGY open workers")
         if action == "open":
@@ -3199,6 +3316,8 @@ def parser():
     scope.add_argument("--reason", required=True)
     listing = commands.add_parser("list", help="list active workers and recent results")
     listing.add_argument("--json", action="store_true")
+    listing.add_argument("--limit", type=int, help="maximum matching workers, newest first")
+    listing.add_argument("--active", action="store_true", help="only starting, running, cancelling, or idle workers")
     worktree = commands.add_parser("worktree", help="list and clean managed worktrees")
     worktree_sub = worktree.add_subparsers(dest="worktree_action", required=True)
     worktree_list = worktree_sub.add_parser("list")
@@ -3209,10 +3328,16 @@ def parser():
     worktree_clean.add_argument("--discard-changed", action="store_true")
     worktree_clean.add_argument("--json", action="store_true")
     prune = commands.add_parser("prune", help="remove old interrupted workers")
-    prune.add_argument("--interrupted", action="store_true", required=True)
+    prune_mode = prune.add_mutually_exclusive_group(required=True)
+    prune_mode.add_argument("--interrupted", action="store_true")
+    prune_mode.add_argument("--idle-older-than", help="close reusable supervisors idle for a duration such as 2h")
     prune.add_argument("--older-than", default="24h")
     prune.add_argument("--dry-run", action="store_true")
     prune.add_argument("--json", action="store_true")
+    cleanup = commands.add_parser("cleanup", help="close old idle reusable supervisors without deleting history")
+    cleanup.add_argument("--idle-older-than", default="2h")
+    cleanup.add_argument("--dry-run", action="store_true")
+    cleanup.add_argument("--json", action="store_true")
     alias = commands.add_parser("alias", help="give workers persistent names, referenced as @name")
     alias_sub = alias.add_subparsers(dest="alias_action", required=True)
     alias_set = alias_sub.add_parser("set", help="bind a name to an existing worker")
@@ -3243,7 +3368,7 @@ def parser():
     conversation_show.add_argument("id")
     conversation_show.add_argument("--json", action="store_true")
     for action in ("show", "logs", "cancel", "close", "usage"):
-        command = commands.add_parser(action)
+        command = commands.add_parser(action, aliases=["status"] if action == "show" else [])
         command.add_argument("id", nargs="?" if action == "usage" else None)
         if action in {"show", "usage"}:
             command.add_argument("--json", action="store_true")
@@ -3394,12 +3519,16 @@ def main(launcher=None):
         return run_supervisor(sys.argv[2], reusable=False)
     if len(sys.argv) == 3 and sys.argv[1] == "_reusable":
         return run_supervisor(sys.argv[2], reusable=True)
+    if len(sys.argv) == 3 and sys.argv[1] == "_reusable_idle":
+        return run_supervisor(sys.argv[2], reusable=True, resume_idle=True)
     if len(sys.argv) == 2 and sys.argv[1] == "_budget_gate":
         return run_budget_gate()
     if len(sys.argv) == 3 and sys.argv[1] == "_batch":
         from claivelib import batch as batch_mod
         return batch_mod.runner(sys.argv[2])
     args = parser().parse_args()
+    if args.action == "status":
+        args.action = "show"
     overrides = getattr(args, "overrides", None) or []
     if overrides:
         try:
@@ -3541,7 +3670,13 @@ def main(launcher=None):
         return worktree_command(args.worktree_action, getattr(args, "older_than", "24h"),
                                 getattr(args, "dry_run", False), getattr(args, "discard_changed", False), args.json)
     elif args.action == "prune":
+        if args.idle_older_than:
+            from claivelib import idle_sessions
+            return idle_sessions.cleanup(args.idle_older_than, args.dry_run, args.json)
         return prune_interrupted(args.older_than, args.dry_run, args.json)
+    elif args.action == "cleanup":
+        from claivelib import idle_sessions
+        return idle_sessions.cleanup(args.idle_older_than, args.dry_run, args.json)
     elif args.action == "alias":
         from claivelib import aliases
         if args.alias_action == "set":
@@ -3555,7 +3690,13 @@ def main(launcher=None):
             return teams.listing(args.json)
         return teams.show(args.name, args.json)
     elif args.action == "list":
-        records = jobs()
+        if args.limit is not None and args.limit < 1:
+            raise ValueError("--limit must be positive")
+        records = jobs(limit=None if args.limit is not None else 20)
+        if args.active:
+            records = [record for record in records if record["status"] in ACTIVE]
+        if args.limit is not None:
+            records = sorted(records, key=lambda record: record["started_at"], reverse=True)[:args.limit]
         print(json.dumps(records, indent=2) if args.json else render(records, sys.stdout.isatty()))
     elif args.action == "status-line":
         print(summary(jobs()))
@@ -3868,6 +4009,11 @@ def main(launcher=None):
     elif args.action == "close":
         path = job_path(args.id)
         state = load(path)
+        if state.get("phase") == "idle ttl closed":
+            state["phase"] = "session closed"
+            save(path / "state.json", state)
+            print(f"Worker {args.id} closed; durable session retained.")
+            return 0
         if not state.get("reusable") or state["status"] not in ACTIVE:
             print(f"Worker is already {state['status']} or is not reusable.")
             return 0

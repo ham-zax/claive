@@ -23,8 +23,13 @@ if os.environ.get("PI_TEST_RECORD"):
     models = json.loads((agent / "models.json").read_text())
     Path(os.environ["PI_TEST_RECORD"]).write_text(models["providers"]["opencode2api"]["baseUrl"])
 fixture_dir = Path(__file__).parent / "fixtures/pi"
-prompt_argument = sys.argv[sys.argv.index("--") + 1]
-prompt = Path(prompt_argument[1:]).read_text()
+rpc = value("--mode") == "rpc"
+if rpc:
+    frame = json.loads(sys.stdin.readline())
+    prompt = frame["message"]
+else:
+    prompt_argument = sys.argv[sys.argv.index("--") + 1]
+    prompt = Path(prompt_argument[1:]).read_text()
 directory = value("--session-dir")
 retained = value("--session")
 identifier = value("--session-id")
@@ -40,7 +45,7 @@ elif directory:
     path.write_text(json.dumps({"type": "session", "id": identifier, "cwd": str(Path.cwd())}) + "\n")
 
 rows = [json.loads(line) for line in (fixture_dir / ("failure.jsonl" if mode == "failure" else "success.jsonl")).read_text().splitlines()]
-messages = sys.argv[sys.argv.index("--") + 2:]
+messages = [] if rpc else sys.argv[sys.argv.index("--") + 2:]
 answer = json.dumps({"prompt": prompt, "resumed": resumed, "effort": value("--thinking"), "tools": value("--tools"),
                      "system_append": value("--append-system-prompt"), "messages": messages})
 for row in rows:

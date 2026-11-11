@@ -17,7 +17,7 @@ from claivelib.roles import resolved_roles
 STAGE_OPTIONS = {"prompt_file", "workspace", "label", "role", "engine", "model",
                  "provider", "reasoning_effort", "max_model_steps", "read_only",
                  "report", "context"}
-TOP_KEYS = {"label", "workspace", "mission", "defaults", "lanes"}
+TOP_KEYS = {"label", "workspace", "mission", "defaults", "lanes", "shared_workspace"}
 KEY_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 KEY_RULE = "(keys are 1-32 lowercase letters, digits, _ or -, starting with a letter or digit)"
 TERMINAL = {"done", "failed", "needs_parent", "cancelled", "skipped"}
@@ -123,6 +123,8 @@ def validate_plan(plan_path):
             raise ValueError("workspace must be an existing absolute directory")
     if "mission" in plan and (not isinstance(plan["mission"], str) or not plan["mission"]):
         raise ValueError("mission must be a non-empty string")
+    if "shared_workspace" in plan and not isinstance(plan["shared_workspace"], bool):
+        raise ValueError("shared_workspace must be a boolean")
     defaults = plan.get("defaults") or {}
     if not isinstance(defaults, dict):
         raise ValueError("defaults must be an object")
@@ -206,24 +208,26 @@ def validate_plan(plan_path):
     return plan, len(lanes), total
 
 
-def _stage_args(resolved, workspace, prompt_file):
+def _stage_args(resolved, workspace, prompt_file, worktree=False, worktree_existing=None):
     return argparse.Namespace(
         action="start", workspace=workspace, prompt_file=prompt_file,
         label=resolved.get("label"), engine=resolved.get("engine"),
         role=resolved.get("role"), report=bool(resolved.get("report")),
         reasoning_effort=resolved.get("reasoning_effort"),
         max_model_steps=resolved.get("max_model_steps"),
-        read_only=bool(resolved.get("read_only")), worktree=False,
-        worktree_existing=None, worktree_base=None, web=False,
+        read_only=bool(resolved.get("read_only")), worktree=worktree,
+        worktree_existing=worktree_existing, worktree_base=None, web=False,
         model=resolved.get("model"), session_id=None, output_schema=None,
         no_session_log=False, provider=resolved.get("provider"), mission=None,
         remember_model=False)
 
 
-def _launch_stage(batch_id, lane_key, stage_key, resolved, workspace, prompt_file):
+def _launch_stage(batch_id, lane_key, stage_key, resolved, workspace, prompt_file,
+                  worktree=False, worktree_existing=None, retain_worktree=False):
     saved = os.environ.pop("CLAIVE_MISSION", None)
     try:
-        path, state = cli_mod.create_job(_stage_args(resolved, workspace, prompt_file))
+        path, state = cli_mod.create_job(_stage_args(resolved, workspace, prompt_file,
+                                                     worktree, worktree_existing))
     finally:
         if saved is not None:
             os.environ["CLAIVE_MISSION"] = saved
@@ -232,9 +236,55 @@ def _launch_stage(batch_id, lane_key, stage_key, resolved, workspace, prompt_fil
     state["batch_stage"] = f"{lane_key}.{stage_key}"
     if batch.get("mission"):
         state["mission"] = batch["mission"]
+    isolation = dict(state.get("launch", {}).get("isolation") or {})
+    if retain_worktree and isolation.get("owner") == "claive" and isolation.get("existing_path"):
+        # The batch owns this worktree: later stages reuse it and the parent reviews it, so the
+        # stage supervisor must not remove it when the stage settles.
+        state["retained_worktree"] = isolation["existing_path"]
     cli_mod.save(path / "state.json", state)
     cli_mod.spawn_supervisor(path, state, "_supervise")
-    return state["id"]
+    return state["id"], isolation
+
+
+def _git_toplevel(workspace):
+    """Repository top level for a workspace, or None when it is not a Git work tree."""
+    try:
+        result = subprocess.run(["git", "-C", workspace, "rev-parse", "--show-toplevel"],
+                                capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    top = result.stdout.strip()
+    return top if result.returncode == 0 and top else None
+
+
+def _stage_workspace_plan(plan, lane, workspace, read_only):
+    """How one stage reaches its workspace: create the lane worktree, reuse it, or share it.
+
+    A lane keeps one managed worktree per source workspace, and every later stage that selects
+    that same workspace reuses it, so a lane never silently reuses another repository's tree.
+    Read-only stages reuse the lane worktree only to read a preceding writer's output; without
+    one they run in the workspace as before.
+    """
+    key = str(Path(workspace).resolve())
+    entry = (lane.get("workspaces") or {}).get(key) or {}
+    if entry.get("mode") == "worktree" and Path(entry.get("path") or "").is_dir():
+        return dict(key=key, entry=None, create=False, existing=entry["path"], warn=None)
+    if entry.get("mode") == "shared":
+        return dict(key=key, entry=None, create=False, existing=None, warn=None)
+    if plan.get("shared_workspace"):
+        return dict(key=key, entry=dict(mode="shared", reason="the plan sets shared_workspace"),
+                    create=False, existing=None, warn=None)
+    if read_only:
+        return dict(key=key, entry=None, create=False, existing=None, warn=None)
+    top = _git_toplevel(workspace)
+    if top is not None and Path(top).resolve() == Path(workspace).resolve():
+        return dict(key=key, entry=None, create=True, existing=None, warn=None)
+    reason = (f"{workspace} is not a Git repository" if top is None
+              else f"{workspace} is inside the Git repository {top}")
+    return dict(key=key, entry=dict(mode="shared", reason=reason), create=False, existing=None,
+                warn=(f"lane {lane['key']}: {reason}, so its stages share that workspace directly and "
+                      "writes from one lane are visible to the others; set \"shared_workspace\": true "
+                      "in the plan to accept this, or point the workspace at a Git repository root"))
 
 
 def _settle_worker(worker_id):
@@ -294,9 +344,10 @@ def cmd_start(plan_path, json_output=False):
     state = dict(id=batch_id, label=label, workspace=plan.get("workspace"),
                  mission=mission_id, status="running", code=None,
                  started_at=time.time(), ended_at=None,
-                 lanes=[dict(key=lane["key"], stages=[dict(key=stage["key"], status="pending",
-                                                            worker=None, code=None)
-                                                       for stage in lane["stages"]])
+                 lanes=[dict(key=lane["key"], workspaces={},
+                             stages=[dict(key=stage["key"], status="pending",
+                                          worker=None, code=None)
+                                     for stage in lane["stages"]])
                         for lane in plan["lanes"]])
     cli_mod.save(path / "state.json", state)
     if mission_id:
@@ -313,6 +364,12 @@ def _render(state):
     lines = [f"Batch {state['id']} | {state['label']} | {state['status']}"
              + (f" ({state['error']})" if state.get("error") else "")]
     for lane in state.get("lanes", []):
+        for source, entry in sorted((lane.get("workspaces") or {}).items()):
+            if entry.get("mode") == "worktree":
+                branch = f" (branch {entry['branch']})" if entry.get("branch") else ""
+                lines.append(f"{lane['key']} worktree {entry.get('path')}{branch}")
+            else:
+                lines.append(f"{lane['key']} shared workspace {source}: {entry.get('reason')}")
         for stage in lane.get("stages", []):
             worker = stage.get("worker") or "-"
             line = f"{lane['key']}.{stage['key']} {str(stage['status']).upper()} {worker}"
@@ -497,6 +554,9 @@ def _run(batch_id):
             resolved = _effective_stage(plan, lane_index, pending_index)
             try:
                 workspace = resolved["workspace"]
+                placement = _stage_workspace_plan(plan, lane, workspace, bool(resolved.get("read_only")))
+                if placement["warn"]:
+                    print(f"warning: {placement['warn']}", file=sys.stderr, flush=True)
                 if resolved.get("context") == "previous":
                     prev = lane["stages"][pending_index - 1]
                     prev_text = ""
@@ -513,7 +573,10 @@ def _run(batch_id):
                     prompt_file = str(target)
                 else:
                     prompt_file = resolved["prompt_file"]
-                worker_id = _launch_stage(batch_id, lane_key, stage_key, resolved, workspace, prompt_file)
+                worker_id, isolation = _launch_stage(
+                    batch_id, lane_key, stage_key, resolved, workspace, prompt_file,
+                    worktree=placement["create"], worktree_existing=placement["existing"],
+                    retain_worktree=placement["create"])
             except (ValueError, OSError) as error:
                 state = load_state(batch_id)
                 for lane_item in state["lanes"]:
@@ -532,6 +595,10 @@ def _run(batch_id):
             for lane_item in state["lanes"]:
                 if lane_item["key"] != lane_key:
                     continue
+                if placement["entry"] is not None or placement["create"]:
+                    lane_item.setdefault("workspaces", {})[placement["key"]] = placement["entry"] or dict(
+                        mode="worktree", path=isolation.get("existing_path"),
+                        branch=isolation.get("branch"), source=workspace, job=worker_id)
                 for stage in lane_item["stages"]:
                     if stage["key"] == stage_key and stage.get("status") == "pending":
                         stage.update(status="running", worker=worker_id, code=None)

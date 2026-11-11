@@ -315,6 +315,8 @@ def send(path, message, mode="note", identifier=None, *, kind="send", expires_at
             before_delivery()
         message_digest = hashlib.sha256(message.encode("utf-8")).hexdigest()
         from claivelib import cli
+        from claivelib import idle_sessions
+        idle_sessions.resume(path)
         state = cli.load(path)
         metadata = dict(sender=sender_identity(), target=state.get("id", path.name),
                         engine=state.get("engine"), model=state.get("model"),

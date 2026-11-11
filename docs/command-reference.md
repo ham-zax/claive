@@ -35,7 +35,7 @@ model-step cap.
 | `--team` | Configured team name. Requires --member and forbids --role |
 | `--member` | Team member name. Requires --team |
 | `--project-file` | override the team's project context for this launch |
-| `--enable-steering` | opt into the duplex provider transport (Pi, Codex, Claude) |
+| `--enable-steering` / `--disable-steering` | enable/disable duplex transport; enabled by default for Pi writers and Claude with a turn budget. Codex uses its existing exec transport unless steering is explicitly enabled. Disabling steering also disables Claude's context budget. |
 | `--checks-file` | absolute JSON required-check manifest for parent verification |
 | `--check` | required check as `NAME=COMMAND` (repeatable); combines with `--checks-file` |
 | `--fit-checked` | omit delegation fit and scope reminders |
@@ -59,6 +59,10 @@ model-step cap.
 | `--provider` | Engine provider. Pi accepts any provider it knows; see `claive pi provider list` |
 | `--mission` | link the new worker to a mission |
 | `--turn-timeout` | fail a turn that runs longer than SECONDS (positive number) |
+| `--turn-budget` | alias for `--turn-timeout`; a total budget, independent of stream activity |
+| `--stall-timeout` | inactivity watchdog in seconds; default 180, 0 disables. Active local tools are exempt. |
+| `--turn-grace` | extra wrap-up seconds after the total budget; default 0. SIGTERM still escalates to SIGKILL after the existing process grace. |
+| `--idle-ttl` | suspend an unused reusable supervisor after this many seconds; default 7200, 0 disables |
 | `--fallback-models` | comma-separated fallback models for run/start. Pi accepts `provider/model` to switch provider. Defaults to `engines.<name>.fallback_models`. AGY also supports reusable open workers |
 
 `--set` is the general override for a key that has no dedicated flag:
@@ -122,6 +126,27 @@ and returns 0. Run `claive show ID` before any relaunch.
 Example: `claive start --workspace /abs/repo --prompt-file /abs/task.md --turn-timeout 300`.
 
 ## `prune`
+
+`claive cleanup --idle-older-than 2h [--dry-run] [--json]` safely requests closure
+of old idle reusable supervisors without deleting sessions or history. The same
+operation is available as `claive prune --idle-older-than 2h`. Workers with parent
+questions, queued work, monitors or scheduled wakes are skipped.
+
+Reusable supervisors also suspend automatically after `--idle-ttl`. `send` restarts
+an automatically suspended supervisor using its retained session; it does not replay
+the previous assignment. An explicit `close` prevents automatic restart. Changed
+worktrees remain available; clean managed worktrees can be recreated at the same path.
+`launch.stall_timeout` and `launch.idle_ttl` configure the defaults globally.
+
+At 85% of a total turn budget, a steerable worker receives one wrap-up instruction.
+Configured model fallbacks disable automatic steering; an explicit combination is
+rejected. For engines that emit no events during a long model step, increase
+`--stall-timeout` or use `--stall-timeout 0` to disable the inactivity watchdog.
+Three Pi output-token truncations without a successful tool stop the attempt with
+`failure_kind: output_truncated`; the first receives chunking guidance when steering
+is enabled. Successful tool execution resets the consecutive counter. Failed writer
+turns and missing reports retain bounded workspace status/diff evidence, including
+untracked paths. These changes describe the workspace, including pre-existing edits.
 
 Remove interrupted workers older than the selected duration. Workers with a retained
 worktree stay in the registry. Aliases to removed workers are removed too.
@@ -529,7 +554,8 @@ Example: `claive reply MESSAGE_ID --message 'src/parser.py'`.
 
 ## `steer`
 
-Send input to an active Pi, Codex or Claude worker launched with `--enable-steering`.
+Send input to an active Pi, Codex or Claude worker with steering enabled, either
+by default or through `--enable-steering`.
 
 ```text
 claive steer (--message MESSAGE | --message-file MESSAGE_FILE) [--wait WAIT] [--json] id
@@ -643,7 +669,7 @@ Example: `claive scope @backend --owned-path 'src/*' --reason 'Include parser fi
 List active workers and recent results.
 
 ```text
-claive list [--json]
+claive list [--json] [--active] [--limit N]
 ```
 
 | Option | Meaning |
@@ -653,6 +679,11 @@ claive list [--json]
 Exit codes: 0 on success. Common errors apply.
 
 Example: `claive list --json`.
+
+`--active` includes starting, running, cancelling and idle reusable workers.
+`--limit N` selects the newest matching workers after filtering. Without a limit,
+the existing active-plus-20-finished view is preserved. `claive status ID` is an
+alias for `claive show ID`, including `--json`.
 
 ## `alias`
 
@@ -964,6 +995,12 @@ context tokens, new session ID and the first 300 characters of the handoff's Nex
 ## `batch`
 
 Manage plans with parallel lanes and sequential stages.
+
+Writer lanes at a Git repository root use separate managed worktrees by default.
+Later stages in a lane reuse that lane's worktree, including read-only stages that
+inspect earlier edits. Worktrees are retained for review after the batch. Set the
+top-level plan field `"shared_workspace": true` to explicitly use shared workspaces.
+Non-Git and repository-subdirectory workspaces retain shared behavior with a warning.
 
 ```text
 claive batch {validate,start,status,wait,cancel,retry,list} ...

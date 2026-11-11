@@ -34,9 +34,10 @@ response included the steered `CLAIVE_STEER_VERIFIED` marker. The ARM host
 reported a bubblewrap/user-namespace warning; this no-tool smoke does not
 establish that sandboxed shell tools work on the host.
 
-For Claude, launch with `--engine claude --enable-steering`. The adapter then starts
+For Claude, context budgets or a total turn budget enable steering automatically;
+`--engine claude --enable-steering` also enables it explicitly. The adapter then starts
 `claude --print --input-format stream-json --replay-user-messages` and sends the prompt and each
-steering instruction as a stream-json user message on stdin; without the flag the prompt stays in
+steering instruction as a stream-json user message on stdin; when steering is disabled the prompt stays in
 argv with stdin closed. Claude adds the instruction after the current tool calls finish and before
 its next model request, and replays it on stdout at that moment with the receipt's ID. claive
 records that replay as `acknowledged` with disposition `entered the conversation`, so for Claude
@@ -81,10 +82,12 @@ Pending requests cannot spill into another reusable turn. Instructions must be
 nonblank and at most 1 MiB. `--wait` times out with exit 124; it does not cancel
 or withdraw a sent instruction. Rejected, not_delivered, and unconfirmed receipts exit 1.
 
-Existing Pi launches retain JSON print mode. They require a new launch with
-`--enable-steering` to use RPC. `followup` still queues a separate turn; `cancel`
+Existing retained launches keep their recorded transport. New Pi writers use RPC
+by default; `--disable-steering` selects JSON print mode. Pi readers can opt in with
+`--enable-steering`. `followup` still queues a separate turn; `cancel`
 still stops the worker process group. Steering and single-turn model fallbacks
-cannot be combined. All other launch policy (model, tools, read-only settings,
+cannot be combined: configured fallbacks disable automatic steering, and an explicit
+`--enable-steering` with fallbacks is rejected. All other launch policy (model, tools, read-only settings,
 extensions, provider overlays, session retention) is preserved.
 
 The current Muse `exec` adapter explicitly rejects

@@ -161,7 +161,48 @@ def finish(path, state):
                           if state["acceptance_contract"].get("owned_paths") is not None else [])
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             record.update(ownership_validation="blocked", reason=str(error))
+    if (not state.get("launch", {}).get("read_only")
+            and (state["status"] != "completed" or state.get("report_state") == "missing")):
+        delta = workspace_delta(workspace)
+        state["workspace_delta"] = delta
+        record["workspace_delta"] = delta
     atomic(target / "execution.json", record)
+
+
+def workspace_delta(workspace):
+    """Best-effort workspace evidence, not an attribution of edits to this worker."""
+    result = {"scope": "workspace", "workspace": str(workspace)}
+
+    def git(*args):
+        run = subprocess.run(["git", "-C", str(workspace), *args], capture_output=True,
+                             text=True, errors="replace", timeout=3)
+        if run.returncode:
+            raise ValueError(run.stderr.strip()[:500] or "git query failed")
+        return run.stdout
+
+    try:
+        status = git("status", "--short", "--untracked-files=all")
+        # Include staged and unstaged changes together, where a HEAD exists.
+        try:
+            git("rev-parse", "--verify", "HEAD")
+            base = ["HEAD"]
+        except ValueError:
+            base = ["--cached"]
+        stat = git("diff", *base, "--stat", "--no-ext-diff")
+        numbers = git("diff", *base, "--numstat", "--no-ext-diff")
+        added = deleted = 0
+        for line in numbers.splitlines():
+            fields = line.split("\t", 2)
+            if len(fields) == 3:
+                added += int(fields[0]) if fields[0].isdigit() else 0
+                deleted += int(fields[1]) if fields[1].isdigit() else 0
+        result.update(status_short=status[:16000], diff_stat=stat[:8000],
+                      files=len(status.splitlines()), added=added, deleted=deleted,
+                      untracked=sum(line.startswith("?? ") for line in status.splitlines()),
+                      truncated=len(status) > 16000 or len(stat) > 8000)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        result["error"] = str(error)[:500]
+    return result
 
 
 def check_freshness(path, state, evidence=None):

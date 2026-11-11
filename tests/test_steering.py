@@ -326,6 +326,8 @@ class SteeringChecks(unittest.TestCase):
             command.append("--detach")
         if enabled:
             command.append("--enable-steering")
+        else:
+            command.append("--disable-steering")
         result = self.run_cli(*command)
         self.assertEqual(result.returncode, 0, result.stderr)
         identifier = re.search(r"Worker ([0-9a-f]{12})", result.stdout)[1]
@@ -375,7 +377,7 @@ class SteeringChecks(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["status"], "unconfirmed")
         self.assertEqual(self.run_cli("wait", identifier, "--timeout", "5").returncode, 0)
 
-    def test_default_transport_remains_print_and_rejects_steering(self):
+    def test_explicit_opt_out_keeps_print_and_rejects_steering(self):
         self.prompt.write_text("settle")
         identifier = self.start(False)
         state = json.loads(self.run_cli("show", identifier, "--json").stdout)

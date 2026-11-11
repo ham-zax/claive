@@ -63,6 +63,21 @@ class CodexChecks(unittest.TestCase):
             with self.subTest(model=model):
                 self.assertEqual(self.engine.default_effort_for(model), effort)
 
+    def test_turn_budget_preserves_exec_policy_unless_steering_is_explicit(self):
+        with patch.dict(os.environ, {"CODEX_WORKER_BINARY": str(self.binary),
+                                    "CLAIVE_DIR": str(self.root / "state")}):
+            args = ["run", "--engine", "codex", "--workspace", str(self.root),
+                    "--prompt-file", str(self.prompt), "--turn-timeout", "10"]
+            path, state = cli.create_job(cli.parser().parse_args(args))
+            self.assertFalse(state["launch"]["steering"])
+            self.assertIn("--ignore-rules", state["command"])
+            self.assertIn("--skip-git-repo-check", state["command"])
+            state["status"] = "completed"
+            cli.save(path / "state.json", state)
+            _, enabled = cli.create_job(cli.parser().parse_args([*args, "--enable-steering"]))
+            self.assertTrue(enabled["launch"]["steering"])
+            self.assertTrue(any("codex_appserver.py" in arg for arg in enabled["command"]))
+
     def test_model_and_effort_are_locked(self):
         launch = dict(self.engine.resolve_launch(), binary=str(self.binary))
         self.assertEqual(launch["model"], "gpt-6.1-terra")

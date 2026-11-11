@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import tempfile
 import time
 
@@ -15,6 +16,70 @@ from claivelib.state import launch_config, session_id
 READ_ONLY_NOTE = ("This is a read-only turn. Do not create, change or delete files, and do not run "
                   "commands that write to the workspace or to git. Read, search and run read-only "
                   "commands only, then report.")
+
+WRITE_CHUNK_NOTE = ("Keep write/edit tool calls small: write or edit at most 150 lines per call. "
+                    "Split larger changes into successive chunks.")
+
+
+def _benign_bash_probe(command, reason):
+    """Recognize silent predicate failures, without interpreting general shell programs."""
+    if not isinstance(command, str) or not re.fullmatch(
+            r"\s*(?:\(no output\)\s*)?Command exited with code 1\s*", reason):
+        return False
+    # Reject expansion, redirects, pipelines and other shell constructs even inside
+    # quotes. False negatives are preferable to hiding an actual tool failure.
+    if any(char in command for char in "$`\n\r;|<>(){}\\#"):
+        return False
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars="&")
+        lexer.whitespace_split = True
+        words = list(lexer)
+    except ValueError:
+        return False
+    # A single, silent cd prefix is common in Pi searches. Any other compound is
+    # ambiguous: its exit 1 may belong to an earlier command.
+    if "&&" in words:
+        if (words.count("&&") != 1 or words.index("&&") != 2 or words[0] != "cd"
+                or not words[1] or words[1].startswith("-")
+                or any(char in words[1] for char in "*?[]~")):
+            return False
+        words = words[3:]
+    if not words or any("&" in word for word in words):
+        return False
+    tool, *args = words
+    if tool in {"rg", "grep"}:
+        # Only options whose exit 1 means no match; no preprocessors, output files,
+        # inverted file listing, or arbitrary options with operands.
+        flags = {"--line-number", "--ignore-case", "--fixed-strings", "--quiet",
+                 "--files-with-matches", "--word-regexp", "--invert-match"}
+        while args and args[0].startswith("-"):
+            flag = args.pop(0)
+            if flag == "--":
+                break
+            short = "niFqlwvx" + ("EHhrsR" if tool == "grep" else "HhsSU")
+            if flag not in flags and not re.fullmatch(r"-[" + short + r"]+", flag):
+                return False
+        return bool(args) and all(not arg.startswith("-") for arg in args[1:])
+    if tool == "git":
+        return args in (["diff", "--quiet"], ["diff", "--quiet", "--exit-code"],
+                        ["diff", "--cached", "--quiet"], ["diff", "--staged", "--quiet"])
+    if tool == "[":
+        if not args or args.pop() != "]":
+            return False
+    elif tool != "test":
+        return False
+    if any(any(char in arg for char in "*?[]~") for arg in args):
+        return False
+    if len(args) == 1:
+        return not args[0].startswith("-") and args[0] != "!"
+    if len(args) == 2:
+        return args[0] in {"-e", "-f", "-d", "-s", "-r", "-w", "-x", "-L", "-h", "-n", "-z"}
+    if len(args) == 3:
+        if args[1] in {"=", "==", "!="}:
+            return all(not arg.startswith("-") and arg != "!" for arg in (args[0], args[2]))
+        return (args[1] in {"-eq", "-ne", "-lt", "-le", "-gt", "-ge"}
+                and all(re.fullmatch(r"-?[0-9]+", arg) for arg in (args[0], args[2])))
+    return False
 
 STALE_LOCK_SECONDS = 10
 
@@ -36,7 +101,7 @@ class PiEngine(WorkerEngine):
 
     def steering_capability(self):
         return SteeringCapability(True, "pi-rpc", notes=(
-            "Requires --enable-steering; input is queued at the next model boundary.",
+            "Enabled by default for writers; input is queued at the next model boundary.",
             "Provider acknowledgement does not prove the model consumed the input.",))
 
     def initial_input(self, request):
@@ -50,6 +115,7 @@ class PiEngine(WorkerEngine):
     def __init__(self):
         self._last_assistant = None
         self._selected = None
+        self._tool_calls = {}
 
     @staticmethod
     def _settings_path():
@@ -180,6 +246,8 @@ class PiEngine(WorkerEngine):
             command += ["--thinking", request.reasoning_effort]
         if request.read_only:
             command += ["--append-system-prompt", READ_ONLY_NOTE]
+        else:
+            command += ["--append-system-prompt", WRITE_CHUNK_NOTE]
         if request.session_logging:
             if not request.session_id or not request.session_dir or not Path(request.session_dir).is_absolute():
                 raise ValueError("Pi requires a session ID and absolute session directory")
@@ -249,10 +317,12 @@ class PiEngine(WorkerEngine):
                      "data": event.get("data"), "error": event.get("error")}]
         if kind == "session":
             self._last_assistant = None
+            self._tool_calls.clear()
             if isinstance(event.get("id"), str):
                 return [{"type": "session_bound", "native_kind": kind, "session_id": event["id"]}]
         elif kind == "agent_start":
             self._last_assistant = None
+            self._tool_calls.clear()
         elif kind == "message_start":
             message = event.get("message")
             if isinstance(message, dict) and message.get("role") == "assistant":
@@ -266,16 +336,31 @@ class PiEngine(WorkerEngine):
             if isinstance(message, dict) and message.get("role") == "assistant":
                 self._last_assistant = message
         elif kind == "tool_execution_start":
-            return [{"type": "tool_started", "native_kind": kind, "tool": event.get("toolName", "tool"), "tool_id": event.get("toolCallId")}]
-        elif kind == "tool_execution_end" and event.get("isError"):
-            result = event.get("result") if isinstance(event.get("result"), dict) else {}
-            reason = " ".join(part.get("text", "") for part in result.get("content", [])
-                              if isinstance(part, dict) and part.get("type") == "text")
-            return [{"type": "task_warning", "native_kind": kind,
-                     "tool": event.get("toolName", "tool"), "tool_id": event.get("toolCallId"), "reason": reason,
-                     "command": (event.get("args") or {}).get("command") if isinstance(event.get("args"), dict) else None}]
+            args = event.get("args") if isinstance(event.get("args"), dict) else {}
+            tool_id = event.get("toolCallId")
+            if isinstance(tool_id, str):
+                self._tool_calls[tool_id] = (event.get("toolName", "tool"), dict(args))
+            return [{"type": "tool_started", "native_kind": kind, "tool": event.get("toolName", "tool"),
+                     "tool_id": tool_id, "command": args.get("command")}]
         elif kind == "tool_execution_end":
-            return [{"type": "tool_completed", "native_kind": kind, "tool": event.get("toolName", "tool"), "tool_id": event.get("toolCallId")}]
+            tool_id = event.get("toolCallId")
+            tool, args = self._tool_calls.pop(tool_id, ("tool", {})) if isinstance(tool_id, str) else ("tool", {})
+            end_args = event.get("args") if isinstance(event.get("args"), dict) else {}
+            metadata = {"native_kind": kind, "tool": event.get("toolName", tool),
+                        "tool_id": tool_id, "command": end_args.get("command", args.get("command"))}
+            if event.get("isError"):
+                result = event.get("result") if isinstance(event.get("result"), dict) else {}
+                content = result.get("content")
+                reason = " ".join(part["text"] for part in (content if isinstance(content, list) else [])
+                                  if isinstance(part, dict) and part.get("type") == "text"
+                                  and isinstance(part.get("text"), str))
+                normalized_type = "task_warning"
+                if re.search(r"\bhit the output token limit\b", reason):
+                    metadata["native_kind"] = "tool_output_truncated"
+                elif metadata["tool"] == "bash" and _benign_bash_probe(metadata["command"], reason):
+                    normalized_type = "tool_probe"
+                return [{"type": normalized_type, **metadata, "reason": reason}]
+            return [{"type": "tool_completed", **metadata}]
         elif kind == "agent_settled":
             message = self._last_assistant or {}
             stop = message.get("stopReason")

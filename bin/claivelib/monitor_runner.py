@@ -88,6 +88,12 @@ def _require_open_reusable(path, state):
 
 
 def add(worker_id, command, every, label=None):
+    path = _cli().job_path(worker_id)
+    with messaging.lock(path):
+        return _add(worker_id, command, every, label)
+
+
+def _add(worker_id, command, every, label=None):
     """Persist one read-only shell monitor on an open reusable worker."""
     if not isinstance(command, str) or not command.strip():
         raise ValueError("--command must not be empty")

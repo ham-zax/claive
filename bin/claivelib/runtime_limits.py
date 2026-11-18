@@ -7,6 +7,10 @@ WRAP_UP = ("Turn time budget nearly reached: stop further edits and commands, "
 TRUNCATION_HINT = ("Your tool call hit the output token limit. Do not resend the full file or "
                    "command. Split writes/edits into chunks of at most 150 lines, starting "
                    "with a compact skeleton if necessary.")
+TOOL_IDLE_WRAP_UP = ("[claive] Active tool command was killed after {seconds:g}s without output. "
+                     "Do not re-run the hanging command without a bounded timeout; recover and "
+                     "emit your final claive-report.")
+TOOL_INTERRUPTED_NOTE = "[claive] Active tool command was interrupted by the parent.{extra}"
 
 
 def seconds(value, name, default=0):
@@ -21,9 +25,12 @@ def seconds(value, name, default=0):
     return number
 
 
-def turn_action(elapsed, inactive, active_tools, budget, stall, grace=0, wrapped=False):
+def turn_action(elapsed, inactive, active_tools, budget, stall, grace=0, wrapped=False,
+                tool_idle=0, tool_inactive=0):
     if budget is not None and elapsed >= budget + grace:
         return "timeout"
+    if tool_idle and active_tools and tool_inactive >= tool_idle:
+        return "tool_idle_timeout"
     if stall and inactive >= stall and not active_tools:
         return "stall_timeout"
     if budget is not None and not wrapped and elapsed >= budget * .85:

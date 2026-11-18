@@ -264,13 +264,24 @@ See `docs/command-reference.md` for command-specific codes.
   `--report` requests it without a role. `--output-schema /abs/schema.json` (Muse,
   Claude) makes the result schema-shaped JSON.
 - **Checks and worktrees:** add required checks with repeatable `--check NAME=CMD`
-  or `--checks-file`. Use `--fit-checked` after assessing delegation fit. Every
-  engine supports opt-in `--worktree` and one-time `--worktree-setup CMD`.
+  or `--checks-file` (add `--verify-in-worktree` when checks need `.git`, `node_modules`, `dist`, or `.venv`).
+  Use `--fit-checked` after assessing delegation fit. Every
+  engine supports opt-in `--worktree`, `--worktree --carry-dirty` (carries uncommitted
+  parent edits into the isolated worktree without `git commit`), `claive worktree apply ID [--dry-run] [--force] [--json]`
+  (conflict-checked progressive integration back to the parent checkout), and one-time `--worktree-setup CMD`.
   Inspect logged trees with `claive worktree list` and `claive worktree clean --dry-run`.
   Clean skips trees used by active workers, missing job state, and pending acceptance.
   It keeps ignored dependency directories unless `--discard-changed` is passed.
   Use `claive prune --interrupted`
   for old interrupted jobs after their worktrees are cleared.
+- **Zero-shell inspection, hung-tool rescue, and MCP:** every job maintains an atomic
+  `<job>/status.json` file (readable directly with `read_file` without shell calls),
+  and `claive-mcp` (`claive mcp`) provides flat-schema MCP tools (`claive_start`,
+  `claive_peek`, `claive_steer`, `claive_wait`, `claive_cancel`, `claive_verify`, `claive_list`).
+  Pass `--tool-idle-timeout SECONDS` or run `claive interrupt-tool ID [--message ...]` to kill
+  only a hung silent tool child so the worker recovers and emits its `claive-report`.
+  Pass `--no-fallback` to disable configured fallbacks (`--enable-steering` and non-default
+  `--provider` also auto-suppress configured `fallback_models`).
 - Workers cannot launch claive workers (`CLAIVE_WORKER_ID` guard).
   Claude native subagents remain available through its default tools.
 

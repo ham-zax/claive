@@ -5,7 +5,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shlex
 import signal
 import subprocess
 import tempfile
@@ -171,16 +170,18 @@ class IsolationChecks(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("lacks 3 uncommitted paths", result.stderr)
         self.assertIn("(staged 1, unstaged 1, untracked 1)", result.stderr)
-        self.assertIn("To include them, commit by path: git -C", result.stderr)
+        self.assertIn("--worktree --carry-dirty", result.stderr)
+        self.assertNotIn("git -C", result.stderr)
 
     def test_dirty_warning_quotes_renames_and_special_filenames(self):
         self.git("mv", "tracked", "renamed name")
         (self.repo / 'quote"name').write_text("new")
         result, _ = self.launch("codex", "--worktree")
         self.assertEqual(result.returncode, 0, result.stderr)
-        command = result.stderr.split("To include them, commit by path: ", 1)[1].splitlines()[0]
-        paths = shlex.split(command)[shlex.split(command).index("--") + 1:]
-        self.assertEqual(set(paths), {"tracked", "renamed name", 'quote"name'})
+        first_line = result.stderr.splitlines()[0]
+        for expected in ("tracked", "renamed name", 'quote"name'):
+            self.assertIn(expected, first_line)
+        self.assertIn("--worktree --carry-dirty", result.stderr)
 
     def test_cancel_during_setup_or_lock_wait(self):
         for waiting in (False, True):
@@ -255,3 +256,87 @@ class IsolationChecks(unittest.TestCase):
                              env=self.env, capture_output=True, text=True, timeout=10)
         self.assertNotEqual(bad.returncode, 0)
         self.assertIn("invalid lock name", bad.stderr)
+
+    def test_carry_dirty_untouched_cleanup_and_worktree_apply(self):
+        (self.repo / "other_dirty").write_text("parent-v1")
+        (self.repo / "tracked").write_text("dirty-tracked")
+        (self.repo / "staged_file").write_text("staged-content")
+        self.git("add", "staged_file")
+
+        # 1. Untouched --carry-dirty worktree sees dirty files and auto-cleans on exit.
+        seen_file = self.base / "seen.json"
+        probe_worker = self.base / "probe_worker"
+        probe_worker.write_text(
+            "#!/usr/bin/python3\n"
+            "import json, os\n"
+            "from pathlib import Path\n"
+            f"Path({str(seen_file)!r}).write_text(json.dumps({{\n"
+            "    'tracked': Path('tracked').read_text(),\n"
+            "    'other': Path('other_dirty').read_text(),\n"
+            "    'staged': Path('staged_file').read_text(),\n"
+            "}))\n"
+            "if os.environ.get('EDIT_WORKTREE') == '1':\n"
+            "    Path('tracked').write_text('worker-v2')\n"
+            "    Path('worker_new.txt').write_text('created-by-worker')\n"
+            "print(json.dumps({'type': 'turn.completed'}), flush=True)\n",
+            encoding="utf-8",
+        )
+        probe_worker.chmod(0o755)
+        env = dict(self.env, CODEX_WORKER_BINARY=str(probe_worker))
+
+        clean_run = subprocess.run(
+            [CLI, "run", "--engine", "codex", "--workspace", str(self.repo),
+             "--prompt-file", str(self.prompt), "--worktree", "--carry-dirty"],
+            env=env, capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(clean_run.returncode, 0, clean_run.stderr)
+        self.assertNotIn("lacks", clean_run.stderr)
+        seen = json.loads(seen_file.read_text(encoding="utf-8"))
+        self.assertEqual(seen, {"tracked": "dirty-tracked", "other": "parent-v1", "staged": "staged-content"})
+        clean_id = re.search(r"Worker ([0-9a-f]{12})", clean_run.stdout).group(1)
+        clean_state = json.loads(
+            subprocess.run([CLI, "show", clean_id, "--json"], env=env, capture_output=True, text=True).stdout
+        )
+        self.assertIsNone(clean_state.get("retained_worktree"))
+
+        # 2. Writer --carry-dirty edits disjoint paths while parent edits other_dirty -> clean apply.
+        edit_run = subprocess.run(
+            [CLI, "run", "--engine", "codex", "--workspace", str(self.repo),
+             "--prompt-file", str(self.prompt), "--worktree", "--carry-dirty"],
+            env=dict(env, EDIT_WORKTREE="1"), capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(edit_run.returncode, 0, edit_run.stderr)
+        edit_id = re.search(r"Worker ([0-9a-f]{12})", edit_run.stdout).group(1)
+
+        # Parent modifies an unrelated dirty file while/after worker ran.
+        (self.repo / "other_dirty").write_text("parent-v2-concurrent")
+
+        applied = subprocess.run(
+            [CLI, "worktree", "apply", edit_id, "--json"],
+            env=env, capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        apply_data = json.loads(applied.stdout)
+        self.assertEqual(apply_data["applied"], ["tracked", "worker_new.txt"])
+        self.assertEqual(apply_data["conflicts"], [])
+        self.assertEqual((self.repo / "tracked").read_text(), "worker-v2")
+        self.assertEqual((self.repo / "worker_new.txt").read_text(), "created-by-worker")
+        self.assertEqual((self.repo / "other_dirty").read_text(), "parent-v2-concurrent")
+
+        # 3. Divergent parent edit on worker-touched path refuses without --force, succeeds with --force.
+        (self.repo / "tracked").write_text("parent-diverged")
+        conflict_res = subprocess.run(
+            [CLI, "worktree", "apply", edit_id, "--json"],
+            env=env, capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(conflict_res.returncode, 1)
+        conflict_data = json.loads(conflict_res.stdout)
+        self.assertEqual(conflict_data["conflicts"], ["tracked"])
+        self.assertEqual((self.repo / "tracked").read_text(), "parent-diverged")
+
+        forced_res = subprocess.run(
+            [CLI, "worktree", "apply", edit_id, "--force", "--json"],
+            env=env, capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(forced_res.returncode, 0, forced_res.stderr)
+        self.assertEqual((self.repo / "tracked").read_text(), "worker-v2")

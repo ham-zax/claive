@@ -20,7 +20,7 @@ Select an engine deliberately and follow the parent's current authorization poli
 
 | Engine | Runtime contract |
 | --- | --- |
-| `agy` | `--engine agy`; Gemini 3.8 Flash high, medium or low. Effort must match the model suffix. Soft read is not enforced. Resume through followup. No steering, fork, web, schema or step cap |
+| `agy` | `--engine agy`; default `gemini-3.8-flash-high`, plus Gemini 4 Carbon/Argon/Hydrogen, Orchestrator, Claude 4.6, and GPT-OSS 120B (`claive models agy`). Soft read is not enforced. Loads `~/.gemini/GEMINI.md`, workspace `GEMINI.md`/`AGENTS.md`, and `~/.agents/skills`. Resume through followup (`native_cache_read_tokens` tracked per turn). No steering, fork, web, schema or step cap |
 | `muse` | Disabled on this host for now. When enabled, pinned to `muse-spark-1.3-contributor` |
 | `pi` | `--engine pi`; provider and model come from the config (`claive engines` shows both); models selected explicitly or inherited; managed worktrees supported; no `--web` or model-step cap |
 | `claude` | `--engine claude`; default `claude-haiku-5-5`; managed worktrees supported; no model-step cap; output schema and steering supported |

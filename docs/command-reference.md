@@ -46,9 +46,11 @@ model-step cap.
 | `--read-only` | Native enforced reading where supported. AGY, Pi and Claude use a reported soft instruction |
 | `--require-read-only` | Require native write prevention. Refuse engines with only soft read mode |
 | `--worktree` | Create a linked worktree from the selected base |
+| `--carry-dirty` | Copy uncommitted parent edits (staged, unstaged, untracked, deletions) into `--worktree` at HEAD |
 | `--worktree-existing` | resume a lane in its existing absolute worktree path |
 | `--worktree-base` | base commit. Default HEAD |
 | `--worktree-setup` | run a shell command once in the new worktree under the heavy lock |
+| `--verify-in-worktree` | run verification checks directly in the worktree (cleans tool caches; fails if checks mutate workspace files) |
 | `--web` | compatibility flag. web is always on for Claude, Codex and Muse. Pi refuses it |
 | `--model` | Engine model. Pins and config policy apply. Pi also accepts `provider/id` |
 | `--allow-model` | run a model outside the allowed tier for this worker (repeatable). The permission is recorded on the launch and kept for follow-ups |
@@ -60,10 +62,12 @@ model-step cap.
 | `--mission` | link the new worker to a mission |
 | `--turn-timeout` | fail a turn that runs longer than SECONDS (positive number) |
 | `--turn-budget` | alias for `--turn-timeout`; a total budget, independent of stream activity |
+| `--tool-idle-timeout` | kill silent active tool child processes after SECONDS without output (default 0; `launch.tool_idle_timeout` in config) so the worker can recover and emit its report |
 | `--stall-timeout` | inactivity watchdog in seconds; default 180, 0 disables. Active local tools are exempt. |
 | `--turn-grace` | extra wrap-up seconds after the total budget; default 0. SIGTERM still escalates to SIGKILL after the existing process grace. |
 | `--idle-ttl` | suspend an unused reusable supervisor after this many seconds; default 7200, 0 disables |
 | `--fallback-models` | comma-separated fallback models for run/start. Pi accepts `provider/model` to switch provider. Defaults to `engines.<name>.fallback_models`. AGY also supports reusable open workers |
+| `--no-fallback` | disable configured `fallback_models` for this worker (config fallbacks also auto-suppress when `--enable-steering` or a non-default `--provider` is passed) |
 
 `--set` is the general override for a key that has no dedicated flag:
 

@@ -34,4 +34,5 @@ os.environ.update(
     PI_CODING_AGENT_DIR=str(SANDBOX / "pi-agent"),
     # Fixtures ignore SIGTERM to prove SIGKILL escalation; the 3 s production grace only adds waiting.
     CLAIVE_KILL_GRACE="0.3",
+    CLAIVE_NO_SYSTEMD_SCOPE="1",
 )

@@ -1,7 +1,10 @@
 """Engine-neutral turn request contract."""
 from dataclasses import dataclass, field
+import hashlib
 import json
-from pathlib import Path
+import os
+from pathlib import Path, PurePosixPath
+import shutil
 import subprocess
 from typing import Optional, Tuple
 import uuid
@@ -13,6 +16,20 @@ SOFT_READ_NOTE = (
     "Do not run commands that change files or external state. This is soft read mode, "
     "an instruction without enforced write prevention."
 )
+
+
+def entry_for_path(path):
+    """Return acceptance snapshot entry [kind, ...] for path, or None when absent."""
+    path = Path(path)
+    if path.is_symlink():
+        return ["symlink", os.readlink(path)]
+    if path.is_file():
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        return ["file", digest.hexdigest(), path.stat().st_mode & 0o777]
+    return None
 
 
 @dataclass(frozen=True)
@@ -154,11 +171,77 @@ class WorkerEngine:
     def discover_workspace(self, command, stderr_text):
         return None
 
+    def _carry_dirty_changes(self, workspace, target, job_dir, base_commit):
+        """Mirror uncommitted changes (staged, unstaged, untracked, deletions) into target."""
+        from claivelib import acceptance
+        status_res = subprocess.run(
+            ["git", "-C", workspace, "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            capture_output=True, timeout=60,
+        )
+        if status_res.returncode:
+            detail = os.fsdecode(status_res.stderr).strip()[:300]
+            raise ValueError(f"cannot read uncommitted changes in {workspace}: {detail}")
+        entries = iter(status_res.stdout.split(b"\0"))
+        paths = []
+        for entry in entries:
+            if not entry:
+                continue
+            code = os.fsdecode(entry[:2])
+            if "U" in code or code in {"AA", "DD"}:
+                raise ValueError("cannot --carry-dirty from a workspace with unresolved merge conflicts")
+            rel = os.fsdecode(entry[3:])
+            paths.append(rel)
+            if "R" in code or "C" in code:
+                paths.append(os.fsdecode(next(entries, b"")))
+        unique_paths = [p for p in dict.fromkeys(paths) if p]
+        ws_root = Path(workspace)
+        wt_root = Path(target)
+        for rel in unique_paths:
+            parts = PurePosixPath(rel).parts
+            if not parts or rel.startswith("/") or ".." in parts or ".git" in parts:
+                raise ValueError(f"unsafe dirty path in workspace: {rel}")
+            src = ws_root / rel
+            dst = wt_root / rel
+            if os.path.lexists(src):
+                if src.is_symlink():
+                    if dst.is_dir() and not dst.is_symlink():
+                        shutil.rmtree(dst)
+                    elif os.path.lexists(dst):
+                        dst.unlink()
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    dst.symlink_to(os.readlink(src))
+                elif src.is_file():
+                    if dst.is_dir() and not dst.is_symlink():
+                        shutil.rmtree(dst)
+                    elif dst.is_symlink():
+                        dst.unlink()
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dst)
+            else:
+                if dst.is_dir() and not dst.is_symlink():
+                    shutil.rmtree(dst)
+                elif os.path.lexists(dst):
+                    dst.unlink()
+                parent = dst.parent
+                while parent != wt_root:
+                    try:
+                        parent.rmdir()
+                    except OSError:
+                        break
+                    parent = parent.parent
+        dirty_files = {rel: entry_for_path(wt_root / rel) for rel in unique_paths}
+        acceptance.atomic(
+            Path(job_dir) / "carried-baseline.json",
+            {"base_commit": base_commit, "dirty_files": dirty_files},
+        )
+        return len(unique_paths)
+
     def prepare_isolation(self, launch, workspace, job_dir):
         """Create a managed worktree for the worker."""
         isolation = launch.get("isolation") or {}
         if isolation.get("mode") != "create":
             return launch
+        carry_dirty = bool(isolation.get("carry_dirty"))
         target = Path(job_dir) / "worktree"
         base = isolation.get("base") or "HEAD"
         resolved = subprocess.run(["git", "-C", workspace, "rev-parse", "--verify", "--quiet", base + "^{commit}"],
@@ -166,6 +249,11 @@ class WorkerEngine:
         if resolved.returncode:
             raise ValueError(f"cannot create the worktree: {base} is not a commit in a git repository at {workspace}")
         base_commit = resolved.stdout.strip()
+        if carry_dirty:
+            head_res = subprocess.run(["git", "-C", workspace, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+                                      capture_output=True, text=True, timeout=60)
+            if head_res.returncode or head_res.stdout.strip() != base_commit:
+                raise ValueError("--carry-dirty requires --worktree at HEAD")
         branch = None if launch.get("read_only") else f"claive/{Path(job_dir).name}"
         command = ["git", "-C", workspace, "worktree", "add"]
         command += ["--detach", str(target)] if branch is None else ["-b", branch, str(target)]
@@ -173,18 +261,21 @@ class WorkerEngine:
         if result.returncode:
             detail = " ".join(result.stderr.split())[:300]
             raise ValueError(f"cannot create the worktree at {base}: {detail}")
-        isolation = dict(mode="existing", base=None, existing_path=str(target), owner="claive",
-                         source=workspace, branch=branch, base_commit=base_commit)
+        new_isolation = dict(mode="existing", base=None, existing_path=str(target), owner="claive",
+                             source=workspace, branch=branch, base_commit=base_commit)
         from claivelib import worktrees
         try:
-            worktrees.record_isolation("created", Path(job_dir).name, isolation)
+            if carry_dirty:
+                carried_count = self._carry_dirty_changes(workspace, target, job_dir, base_commit)
+                new_isolation["carried_dirty"] = carried_count
+            worktrees.record_isolation("created", Path(job_dir).name, new_isolation)
         except BaseException:
             subprocess.run(["git", "-C", workspace, "worktree", "remove", "--force", str(target)],
                            capture_output=True, timeout=120)
             if branch:
                 subprocess.run(["git", "-C", workspace, "branch", "-D", branch], capture_output=True, timeout=120)
             raise
-        return dict(launch, isolation=isolation)
+        return dict(launch, isolation=new_isolation)
 
     def validate_isolation(self, launch):
         isolation = launch.get("isolation") or {}
@@ -197,6 +288,8 @@ class WorkerEngine:
                 raise ValueError("--worktree-existing must be an existing absolute directory")
         if isolation.get("base") and mode != "create":
             raise ValueError("--worktree-base requires --worktree")
+        if isolation.get("carry_dirty") and mode != "create" and isolation.get("owner") != "claive":
+            raise ValueError("--carry-dirty requires --worktree")
 
     def session_usage(self, state):
         raise ValueError(f"worker engine {self.name or 'unknown'} does not provide session usage")

@@ -10,10 +10,16 @@ import json
 import os
 from pathlib import Path
 import selectors
+import signal
 import subprocess
 import sys
 import time
 import tempfile
+
+_BIN_DIR = str(Path(__file__).resolve().parents[2])
+if _BIN_DIR not in sys.path:
+    sys.path.insert(0, _BIN_DIR)
+from claivelib import procgroup
 
 
 def emit(event):
@@ -38,6 +44,15 @@ def home_for_server(base, opt_in, target, ephemeral=False):
 
 
 def run(args):
+    procgroup.enable_subreaper()
+    stopping = False
+
+    def handle_stop(_signum, _frame):
+        nonlocal stopping
+        stopping = True
+
+    signal.signal(signal.SIGTERM, handle_stop)
+    signal.signal(signal.SIGHUP, handle_stop)
     base = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser().resolve()
     with tempfile.TemporaryDirectory(prefix="claive-codex-home-") as home:
         home_for_server(base, args.user_config, Path(home), args.ephemeral)
@@ -51,7 +66,7 @@ def run(args):
                    "-c", 'sandbox_mode="' + args.sandbox + '"',
                    "-c", 'web_search="live"']
         child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                 stderr=sys.stderr, env=env, bufsize=0)
+                                 stderr=sys.stderr, env=env, bufsize=0, start_new_session=True)
         incoming = {child.stdout.fileno(): bytearray()}
         selector = selectors.DefaultSelector()
         selector.register(child.stdout, selectors.EVENT_READ)
@@ -100,7 +115,7 @@ def run(args):
         send("initialize", {"clientInfo": {"name": "claive", "version": "1.0"},
                             "capabilities": {"experimentalApi": True}}, "initialize")
         try:
-            while not finished:
+            while not finished and not stopping:
                 if turn_id is None and time.monotonic() - startup_at > 90:
                     raise RuntimeError("Codex App Server did not start an active turn within 90 seconds")
                 if child.poll() is not None and child.stdout.fileno() not in selector.get_map():
@@ -206,13 +221,13 @@ def run(args):
             emit({"type": "turn.failed", "error": {"message": str(error)}})
         finally:
             selector.close()
-            if child.poll() is None:
-                child.terminate()
-            try:
-                child.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait()
+            procgroup.terminate_tree(
+                child.pid,
+                grace=0.5 if stopping else 1.5,
+                subreaper_pid=os.getpid() if procgroup.subreaper_active() else None,
+                reap_exclude={child.pid},
+            )
+            child.wait()
         return code
 
 

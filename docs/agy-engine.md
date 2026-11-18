@@ -1,7 +1,6 @@
 # AGY engine
 
-The initial adapter targets AGY 1.4.12, checked on 2026-11-03.
-The machine-readable baseline is [agy-1.4.12.json](compatibility/agy-1.4.12.json).
+The initial adapter targeted AGY 1.4.12 ([agy-1.4.12.json](compatibility/agy-1.4.12.json)), checked on 2026-11-03, and was expanded and live-verified against AGY 1.5.10 ([agy-1.5.10.json](compatibility/agy-1.5.10.json)) on 2026-11-18.
 Recorded streams retain their CLI version and provenance in the fixture manifest.
 The implementation commit also names the tested CLI version.
 
@@ -24,8 +23,13 @@ The binary comes from `AGY_WORKER_BINARY`, `~/.local/bin/agy`, or PATH.
 | Model | Required effort |
 | --- | --- |
 | gemini-3.8-flash-high | high, the default |
-| gemini-3.8-flash-medium | medium |
-| gemini-3.8-flash-low | low |
+| gemini-3.8-flash-medium / gemini-3.8-flash-low | medium / low |
+| gemini-4-carbon-{high,medium,low} | high / medium / low |
+| gemini-4-argon-{high,medium,low} | high / medium / low |
+| gemini-4-hydrogen-{xhigh,high,medium,low} | xhigh / high / medium / low |
+| gemini-pro-orchestrator / gemini-pro-orchestrator-argon | high |
+| claude-sonnet-4-6 / claude-opus-4-6-thinking | high |
+| gpt-oss-120b-medium | medium |
 
 An explicit effort must match the model suffix. The base alias is unsupported.
 `--fallback-models gemini-3.8-flash-low` re-derives effort on retry and retains
@@ -54,8 +58,16 @@ AGY does not support steering, fork, web selection, output schemas, step caps,
 provider selection, imported session IDs, or disabled session logging in this
 adapter. Configuration rejects AGY token budgets. Unknown authentication and
 quota errors remain worker failures. No guessed quota marker triggers retry policy.
-AGY inherits user configuration, MCP servers, skills, proxy settings, and certificates.
-Configuration overhead and nonzero cache semantics remain unmeasured.
+AGY inherits user configuration, MCP servers, skills, proxy settings, and certificates:
+live AGY 1.5.10 runs load global `~/.gemini/GEMINI.md` rules, hierarchical workspace
+`GEMINI.md` / `AGENTS.md` / `.agents/` rules and skills (present inside `--worktree` and
+carried when uncommitted via `--worktree --carry-dirty`), and Skillshare's universal skill
+directory (`~/.agents/skills` via `~/.gemini/config/skills` and `skills.json`).
+On resumed conversations (`--conversation ID`), AGY 1.5.10 reports cumulative `input_tokens`,
+`output_tokens`, `thinking_tokens`, and `total_tokens`, alongside per-turn prompt cache hits
+in `cache_read_tokens` (live-verified nonzero on Turn 2, e.g., `8124` cached tokens).
+Claive surfaces per-turn cache reads as `native_cache_read_tokens` in `claive usage ID`
+and `<job>/status.json` without folding them into cumulative session totals.
 
 `claive usage ID --json` returns `model_calls: null`, `calls: []`, an
 `aggregates` list, totals, and the latest turn. Each aggregate identifies its

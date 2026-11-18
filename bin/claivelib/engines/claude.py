@@ -300,8 +300,15 @@ class ClaudeEngine(WorkerEngine):
                     if not isinstance(block, dict):
                         continue
                     if block.get("type") == "tool_use":
-                        result.append({"type": "tool_started", "native_kind": kind,
-                                       "tool": block.get("name", "tool"), "tool_id": block.get("id")})
+                        entry = {"type": "tool_started", "native_kind": kind,
+                                 "tool": block.get("name", "tool"), "tool_id": block.get("id")}
+                        inp = block.get("input") if isinstance(block.get("input"), dict) else {}
+                        if isinstance(inp.get("command"), str) and inp["command"]:
+                            entry["command"] = inp["command"]
+                        path = inp.get("file_path") or inp.get("path")
+                        if isinstance(path, str) and path:
+                            entry["path"] = path
+                        result.append(entry)
                     elif block.get("type") == "text":
                         self._last_text = block.get("text", "")
                         result.append({"type": "output_delta", "native_kind": kind})

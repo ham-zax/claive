@@ -9,7 +9,26 @@ from claivelib.usage import aggregate_usage
 
 
 AGY_MODEL = "gemini-3.8-flash-high"
-AGY_MODELS = {f"gemini-3.8-flash-{effort}": (effort,) for effort in ("high", "medium", "low")}
+AGY_MODELS = {
+    "gemini-3.8-flash-high": ("high",),
+    "gemini-3.8-flash-medium": ("medium",),
+    "gemini-3.8-flash-low": ("low",),
+    "gemini-4-carbon-high": ("high",),
+    "gemini-4-carbon-medium": ("medium",),
+    "gemini-4-carbon-low": ("low",),
+    "gemini-4-argon-high": ("high",),
+    "gemini-4-argon-medium": ("medium",),
+    "gemini-4-argon-low": ("low",),
+    "gemini-4-hydrogen-xhigh": ("xhigh",),
+    "gemini-4-hydrogen-high": ("high",),
+    "gemini-4-hydrogen-medium": ("medium",),
+    "gemini-4-hydrogen-low": ("low",),
+    "gemini-pro-orchestrator": ("high",),
+    "gemini-pro-orchestrator-argon": ("high",),
+    "claude-sonnet-4-6": ("high",),
+    "claude-opus-4-6-thinking": ("high",),
+    "gpt-oss-120b-medium": ("medium",),
+}
 PROMPT_LIMIT = 100000
 
 
@@ -137,8 +156,17 @@ class AgyEngine(WorkerEngine):
             if step_type == "agent_response" and state == "DONE" and isinstance(body.get("usage"), dict):
                 mapped.append(dict(type="model_step", native_kind=kind))
             if step_type in {"tool", "subagent"} and body.get("tool_name") and state in {"ACTIVE", "DONE"}:
-                mapped.append(dict(type="tool_started" if state == "ACTIVE" else "tool_completed",
-                                   tool=body["tool_name"], tool_id=f"{identifier}:{index}", native_kind=kind))
+                entry = dict(type="tool_started" if state == "ACTIVE" else "tool_completed",
+                             tool=body["tool_name"], tool_id=f"{identifier}:{index}", native_kind=kind)
+                info = body.get("tool_info")
+                params = info.get("parameters") if isinstance(info, dict) and isinstance(info.get("parameters"), dict) else {}
+                cmd = params.get("CommandLine") or params.get("command")
+                if isinstance(cmd, str) and cmd:
+                    entry["command"] = cmd
+                path = params.get("Path") or params.get("TargetFile") or params.get("AbsolutePath") or params.get("file_path")
+                if isinstance(path, str) and path:
+                    entry["path"] = path
+                mapped.append(entry)
             return mapped or [activity]
         if kind != "result":
             return mapped + [activity]

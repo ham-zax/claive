@@ -16,7 +16,9 @@ from claivelib.roles import resolved_roles
 
 STAGE_OPTIONS = {"prompt_file", "workspace", "label", "role", "engine", "model",
                  "provider", "reasoning_effort", "max_model_steps", "read_only",
-                 "report", "context"}
+                 "report", "context", "turn_timeout", "stall_timeout",
+                 "tool_idle_timeout", "carry_dirty", "no_fallback",
+                 "verify_in_worktree", "worktree_setup"}
 TOP_KEYS = {"label", "workspace", "mission", "defaults", "lanes", "shared_workspace"}
 KEY_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 KEY_RULE = "(keys are 1-32 lowercase letters, digits, _ or -, starting with a letter or digit)"
@@ -77,12 +79,18 @@ def save_state(batch_id, state):
 def _check_option_types(where, options):
     for key, value in options.items():
         if key in {"prompt_file", "workspace", "label", "role", "engine", "model",
-                   "provider", "reasoning_effort"} and not isinstance(value, str):
+                   "provider", "reasoning_effort", "worktree_setup"} and not isinstance(value, str):
             raise ValueError(f"{where}: {key} must be a string")
         if key == "max_model_steps" and (not isinstance(value, int) or isinstance(value, bool)):
             raise ValueError(f"{where}: max_model_steps must be an integer")
-        if key in {"read_only", "report"} and not isinstance(value, bool):
+        if key in {"read_only", "report", "carry_dirty", "no_fallback", "verify_in_worktree"} and not isinstance(value, bool):
             raise ValueError(f"{where}: {key} must be a boolean")
+        if key == "turn_timeout":
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or value <= 0 or value == float("inf"):
+                raise ValueError(f"{where}: turn_timeout must be a finite positive number")
+        if key in {"stall_timeout", "tool_idle_timeout"}:
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or value < 0 or value == float("inf"):
+                raise ValueError(f"{where}: {key} must be a finite nonnegative number")
         if key == "context" and value != "previous":
             raise ValueError(f"{where}: context must be \"previous\"")
 
@@ -216,9 +224,16 @@ def _stage_args(resolved, workspace, prompt_file, worktree=False, worktree_exist
         reasoning_effort=resolved.get("reasoning_effort"),
         max_model_steps=resolved.get("max_model_steps"),
         read_only=bool(resolved.get("read_only")), worktree=worktree,
-        worktree_existing=worktree_existing, worktree_base=None, web=False,
-        model=resolved.get("model"), session_id=None, output_schema=None,
+        carry_dirty=bool(resolved.get("carry_dirty")) if worktree else False,
+        worktree_existing=worktree_existing, worktree_base=None,
+        worktree_setup=resolved.get("worktree_setup") if worktree else None,
+        verify_in_worktree=bool(resolved.get("verify_in_worktree")),
+        web=False, model=resolved.get("model"), session_id=None, output_schema=None,
         no_session_log=False, provider=resolved.get("provider"), mission=None,
+        turn_timeout=resolved.get("turn_timeout"),
+        stall_timeout=resolved.get("stall_timeout"),
+        tool_idle_timeout=resolved.get("tool_idle_timeout"),
+        no_fallback=bool(resolved.get("no_fallback")),
         remember_model=False)
 
 

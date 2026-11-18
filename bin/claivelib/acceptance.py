@@ -9,14 +9,28 @@ import os
 import re
 from pathlib import Path, PurePosixPath
 import shutil
-import signal
 import subprocess
 import tempfile
 import time
 
-from claivelib import config
+from claivelib import config, procgroup
 
 OUTCOMES = {"passed", "failed", "blocked", "not_run"}
+VERIFIER_BYPRODUCT_DIRS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".vitest", ".turbo"}
+
+
+def _is_verifier_byproduct(rel_path):
+    parts = PurePosixPath(rel_path).parts
+    return bool(VERIFIER_BYPRODUCT_DIRS.intersection(parts)) or rel_path.endswith((".pyc", ".pyo"))
+
+
+def _refresh_status(path, state):
+    if (path / "state.json").is_file() and isinstance(state, dict) and "id" in state and "status" in state:
+        try:
+            from claivelib import status_file
+            status_file.write(path, state)
+        except Exception:
+            pass
 
 
 def atomic(path, value):
@@ -72,10 +86,29 @@ def validate_manifest(value):
         timeout = check.get("timeout", 300)
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 3600:
             raise ValueError("check timeout must be between 0 and 3600 seconds")
+        in_worktree = check.get("in_worktree")
+        if in_worktree is not None and not isinstance(in_worktree, bool):
+            raise ValueError("check in_worktree must be boolean")
     return value
 
 
-def snapshot(workspace):
+def validate_workspace(workspace):
+    """Verify workspace is a Git work tree without hashing all files."""
+    workspace = Path(workspace)
+    timeout = config.launch_setting("git_timeout", 30)
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(workspace), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ValueError(f"git rev-parse timed out after {timeout} s in {workspace} "
+                         f"(load {os.getloadavg()[0]:.2f}); raise launch.git_timeout in the claive config") from error
+    if result.returncode or result.stdout.strip() != "true":
+        raise ValueError("write ownership validation requires a Git workspace")
+
+
+def snapshot(workspace, stat_cache_path=None):
     """Hash tracked and all untracked paths; retain dirty baseline and deletions."""
     workspace = Path(workspace)
     timeout = config.launch_setting("git_timeout", 30)
@@ -91,6 +124,16 @@ def snapshot(workspace):
     if result.returncode:
         raise ValueError("write ownership validation requires a Git workspace")
     head = git(workspace, "rev-parse", "HEAD", capture_output=True, text=True)
+    prev_cache = {}
+    if stat_cache_path is not None:
+        try:
+            loaded = json.loads(Path(stat_cache_path).read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                prev_cache = loaded
+        except (OSError, ValueError):
+            prev_cache = {}
+    now_ns = time.time_ns()
+    new_cache = {}
     files = {}
     for raw in set(result.stdout.split(b"\0")) - {b""}:
         name = os.fsdecode(raw)
@@ -98,16 +141,36 @@ def snapshot(workspace):
         if path.is_symlink():
             files[name] = ["symlink", os.readlink(path)]
         elif path.is_file():
-            digest = hashlib.sha256()
-            with path.open("rb") as stream:
-                for block in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(block)
-            files[name] = ["file", digest.hexdigest(), path.stat().st_mode & 0o777]
+            st = path.stat()
+            mode = st.st_mode & 0o777
+            sig = [st.st_ino, st.st_size, mode, st.st_mtime_ns, st.st_ctime_ns]
+            cached = prev_cache.get(name)
+            if (stat_cache_path is not None and isinstance(cached, list) and len(cached) == 6
+                    and cached[:5] == sig and st.st_mtime_ns < now_ns - 2_000_000_000):
+                hex_digest = cached[5]
+            else:
+                digest = hashlib.sha256()
+                with path.open("rb") as stream:
+                    for block in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(block)
+                hex_digest = digest.hexdigest()
+            files[name] = ["file", hex_digest, mode]
+            new_cache[name] = sig + [hex_digest]
         elif path.is_dir():
             # A submodule is a tracked directory: bind its commit and dirtiness.
             sub = git(path, "status", "--porcelain", capture_output=True)
             commit = git(path, "rev-parse", "HEAD", capture_output=True)
             files[name] = ["directory", commit.stdout.decode(errors="replace"), sub.stdout.decode(errors="replace")]
+    if stat_cache_path is not None:
+        cache_path = Path(stat_cache_path)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(dir=cache_path.parent, prefix=".stat-cache-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(new_cache, stream, separators=(",", ":"))
+            os.replace(temp_name, cache_path)
+        finally:
+            Path(temp_name).unlink(missing_ok=True)
     return {"head": head.stdout.strip(), "files": files}
 
 
@@ -130,10 +193,11 @@ def begin(path, state):
     target.mkdir(parents=True, exist_ok=True)
     contract = state.get("acceptance_contract", {})
     workspace = state.get("actual_workspace") or state["workspace"]
+    isolation = (state.get("launch") or {}).get("isolation") or {}
     state.pop("ownership_error", None)
-    if contract.get("owned_paths") is not None or contract.get("checks"):
+    if contract.get("owned_paths") is not None or contract.get("checks") or isolation.get("owner") == "claive":
         try:
-            atomic(target / "before.json", snapshot(workspace))
+            atomic(target / "before.json", snapshot(workspace, target / ".stat-cache.json"))
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             state["ownership_error"] = str(error)
     # Never carry verification or an accepted decision into another turn.
@@ -141,6 +205,7 @@ def begin(path, state):
                for check in contract.get("checks", [])]
     atomic(target / "verification.json", {"checks": pending, "status": "not_run"})
     atomic(target / "acceptance.json", {"status": "pending", "turn": state.get("turn", 1)})
+    _refresh_status(path, state)
 
 
 def finish(path, state):
@@ -153,7 +218,7 @@ def finish(path, state):
         record.update(ownership_validation="blocked", reason=state["ownership_error"])
     elif before_file.exists():
         try:
-            after = snapshot(workspace)
+            after = snapshot(workspace, target / ".stat-cache.json")
             atomic(target / "after.json", after)
             paths = changed(json.loads(before_file.read_text()), after)
             record.update(changed_paths=paths, ownership_validation="passed",
@@ -167,6 +232,7 @@ def finish(path, state):
         state["workspace_delta"] = delta
         record["workspace_delta"] = delta
     atomic(target / "execution.json", record)
+    _refresh_status(path, state)
 
 
 def workspace_delta(workspace):
@@ -291,18 +357,62 @@ def serialized(function):
     return locked
 
 
+def _run_check_command(command, cwd, timeout, env=None):
+    with tempfile.TemporaryFile() as output_log, tempfile.TemporaryFile() as error_log:
+        child = subprocess.Popen(command, cwd=cwd, env=env, stdout=output_log,
+                                 stderr=error_log, start_new_session=True, stdin=subprocess.DEVNULL)
+        try:
+            child.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            procgroup.terminate_tree(child.pid, grace=0.2, reap_exclude={child.pid})
+            child.wait()
+            raise
+
+        def tail(stream):
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, stream.tell() - 8000))
+            return stream.read().decode("utf-8", errors="replace")
+
+        return child.returncode, tail(output_log), tail(error_log)
+
+
+def _cleanup_byproducts(workspace, pre_files, post_files):
+    ws = Path(workspace)
+    added = sorted(set(post_files) - set(pre_files))
+    created_dirs = set()
+    for rel in added:
+        if not _is_verifier_byproduct(rel):
+            continue
+        target = ws / rel
+        if target.is_symlink() or target.is_file():
+            target.unlink(missing_ok=True)
+        parent = target.parent
+        while parent != ws:
+            if parent.name in VERIFIER_BYPRODUCT_DIRS:
+                created_dirs.add(parent)
+            parent = parent.parent
+    for directory in sorted(created_dirs, key=lambda item: len(item.parts), reverse=True):
+        try:
+            shutil.rmtree(directory)
+        except OSError:
+            pass
+
+
 @serialized
-def verify(path, state, name=None, status=None, reason=None, environment=None):
+def verify(path, state, name=None, status=None, reason=None, environment=None, in_worktree=False):
     target = settled(path, state)
     atomic(target / "acceptance.json", {"status": "pending", "turn": state.get("turn", 1)})
-    checks = state.get("acceptance_contract", {}).get("checks", [])
+    contract = state.get("acceptance_contract", {})
+    checks = contract.get("checks", [])
     required = [item["name"] for item in checks if item.get("required", True)]
     evidence = view(path, state)["verification"]
     records = {item["name"]: item for item in evidence["checks"]}
     workspace = state.get("actual_workspace") or state["workspace"]
+    stat_cache = target / ".stat-cache.json"
     after_file = target / "after.json"
-    if after_file.exists() and snapshot(workspace) != json.loads(after_file.read_text()):
+    if after_file.exists() and snapshot(workspace, stat_cache) != json.loads(after_file.read_text()):
         raise ValueError("workspace changed since execution; verification requires a fresh turn")
+    check_mutated = False
     if name:
         if name not in {item["name"] for item in checks}:
             raise ValueError("check must be declared in the launch manifest")
@@ -312,53 +422,64 @@ def verify(path, state, name=None, status=None, reason=None, environment=None):
     else:
         if status or reason or environment:
             raise ValueError("--status, --reason and --environment require --check")
-        workspace = state.get("actual_workspace") or state["workspace"]
+        clean_env = {key: value for key, value in os.environ.items() if key != "CLAIVE_WORKER_ID"}
         for check in checks:
             record = dict(name=check["name"], command=check["command"], observed_at=time.time(), source="verifier")
+            run_in_place = bool(in_worktree or contract.get("verify_in_worktree") or check.get("in_worktree"))
             try:
-                with tempfile.TemporaryDirectory(prefix="claive-verify-") as scratch:
-                    copy = Path(scratch) / "workspace"
-                    ignored = shutil.ignore_patterns(".git", "__pycache__", ".venv", "venv", "node_modules",
-                                                     ".tox", ".nox", ".pytest_cache", ".mypy_cache",
-                                                     ".ruff_cache", "build", "dist")
-                    shutil.copytree(workspace, copy, symlinks=True, ignore=ignored)
-                    # Never dereference a source symlink into the original checkout or an external path.
-                    # Relative links internal to the scratch copy remain functional.
-                    for link in copy.rglob("*"):
-                        if link.is_symlink() and not (link.parent / os.readlink(link)).resolve().is_relative_to(copy.resolve()):
-                            raise ValueError(f"unsafe verification symlink: {link.relative_to(copy)}")
-                    record["environment"] = {"workspace": workspace, "scratch": str(copy), "platform": os.uname().sysname}
-                    with tempfile.TemporaryFile() as output_log, tempfile.TemporaryFile() as error_log:
-                        child = subprocess.Popen(check["command"], cwd=copy, stdout=output_log,
-                                                 stderr=error_log, start_new_session=True, stdin=subprocess.DEVNULL)
-                        try:
-                            child.wait(timeout=check.get("timeout", 300))
-                        except subprocess.TimeoutExpired:
-                            try:
-                                os.killpg(child.pid, signal.SIGKILL)
-                            except ProcessLookupError:
-                                pass
-                            child.wait()
-                            raise
-                        def tail(stream):
-                            stream.seek(0, os.SEEK_END)
-                            stream.seek(max(0, stream.tell() - 8000))
-                            return stream.read().decode("utf-8", errors="replace")
-                        output, errors = tail(output_log), tail(error_log)
-                    record.update(status="passed" if child.returncode == 0 else "failed", exit_code=child.returncode,
-                                  stdout=output, stderr=errors, reason=f"exit {child.returncode}")
-                    if child.returncode == 0:
-                        verdict = pytest_outcome(check, output + "\n" + errors)
-                        if verdict:
-                            record.update(status=verdict[0], reason=verdict[1])
+                if run_in_place:
+                    pre_snap = snapshot(workspace, stat_cache)
+                    record["environment"] = {"workspace": workspace, "mode": "in_worktree",
+                                             "platform": os.uname().sysname}
+                    code, output, errors = _run_check_command(
+                        check["command"], workspace, check.get("timeout", 300), env=clean_env)
+                    post_snap = snapshot(workspace, stat_cache)
+                    _cleanup_byproducts(workspace, pre_snap["files"], post_snap["files"])
+                    clean_snap = snapshot(workspace, stat_cache)
+                    mutated = changed(pre_snap, clean_snap)
+                    if mutated:
+                        check_mutated = True
+                        record.update(status="failed", exit_code=code, stdout=output, stderr=errors,
+                                      mutated_files=mutated[:20],
+                                      reason="check mutated workspace files: " + ", ".join(mutated[:10]))
+                    else:
+                        record.update(status="passed" if code == 0 else "failed", exit_code=code,
+                                      stdout=output, stderr=errors, reason=f"exit {code}")
+                        if code == 0:
+                            verdict = pytest_outcome(check, output + "\n" + errors)
+                            if verdict:
+                                record.update(status=verdict[0], reason=verdict[1])
+                else:
+                    with tempfile.TemporaryDirectory(prefix="claive-verify-") as scratch:
+                        copy = Path(scratch) / "workspace"
+                        ignored = shutil.ignore_patterns(".git", "__pycache__", ".venv", "venv", "node_modules",
+                                                         ".tox", ".nox", ".pytest_cache", ".mypy_cache",
+                                                         ".ruff_cache", "build", "dist")
+                        shutil.copytree(workspace, copy, symlinks=True, ignore=ignored)
+                        # Never dereference a source symlink into the original checkout or an external path.
+                        # Relative links internal to the scratch copy remain functional.
+                        for link in copy.rglob("*"):
+                            if link.is_symlink() and not (link.parent / os.readlink(link)).resolve().is_relative_to(copy.resolve()):
+                                raise ValueError(f"unsafe verification symlink: {link.relative_to(copy)}")
+                        record["environment"] = {"workspace": workspace, "scratch": str(copy),
+                                                 "mode": "scratch", "platform": os.uname().sysname}
+                        code, output, errors = _run_check_command(
+                            check["command"], copy, check.get("timeout", 300), env=clean_env)
+                        record.update(status="passed" if code == 0 else "failed", exit_code=code,
+                                      stdout=output, stderr=errors, reason=f"exit {code}")
+                        if code == 0:
+                            verdict = pytest_outcome(check, output + "\n" + errors)
+                            if verdict:
+                                record.update(status=verdict[0], reason=verdict[1])
             except (OSError, ValueError, subprocess.TimeoutExpired) as error:
                 record.update(status="blocked", reason=str(error), environment=record.get("environment", {"workspace": workspace}))
             records[check["name"]] = record
-    if after_file.exists() and snapshot(workspace) != json.loads(after_file.read_text()):
+    if not check_mutated and after_file.exists() and snapshot(workspace, stat_cache) != json.loads(after_file.read_text()):
         raise ValueError("workspace changed during verification; results are stale")
     evidence = {"checks": list(records.values()), "status": aggregate(list(records.values()), required)}
     atomic(target / "verification.json", evidence)
     atomic(target / "acceptance.json", {"status": "pending", "turn": state.get("turn", 1)})
+    _refresh_status(path, state)
     return evidence
 
 
@@ -371,6 +492,7 @@ def scope(path, state, paths, reason):
         raise ValueError("worker has no ownership contract")
     atomic(target / "scope.json", {"owned_paths": owned_paths(paths), "reason": reason, "source": "parent", "changed_at": time.time()})
     atomic(target / "acceptance.json", {"status": "pending", "turn": state.get("turn", 1)})
+    _refresh_status(path, state)
 
 
 @serialized
@@ -392,7 +514,7 @@ def decide(path, state, reject=False, reason=None, exception=None):
             raise ValueError("ownership/evidence snapshot missing; acceptance remains pending")
         if (target / "after.json").exists():
             after = json.loads((target / "after.json").read_text())
-            if snapshot(execution["workspace"]) != after:
+            if snapshot(execution["workspace"], target / ".stat-cache.json") != after:
                 raise ValueError("workspace changed since execution; verification evidence is stale")
             allowlist = data.get("scope", {}).get("owned_paths", contract.get("owned_paths"))
             outside = violations(execution.get("changed_paths", []), allowlist) if allowlist is not None else []
@@ -410,4 +532,5 @@ def decide(path, state, reject=False, reason=None, exception=None):
     record = dict(status="rejected" if reject else "accepted", turn=state.get("turn", 1),
                   reason=reason, exception=exception, source="parent", decided_at=time.time())
     atomic(target / "acceptance.json", record)
+    _refresh_status(path, state)
     return record

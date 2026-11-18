@@ -232,6 +232,67 @@ class AcceptanceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             a.owned_paths(["../escape"])
 
+    def test_verify_in_worktree_preserves_deps_and_catches_mutations(self):
+        (self.workspace / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.workspace), "add", ".gitignore"], check=True)
+        subprocess.run(
+            ["git", "-C", str(self.workspace), "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+             "commit", "-qm", "ignore node_modules"],
+            check=True,
+        )
+        nm = self.workspace / "node_modules" / "dep"
+        nm.mkdir(parents=True)
+        (nm / "mod.txt").write_text("present", encoding="utf-8")
+
+        job_ok = self.root / "job_in_wt"
+        check_code = (
+            "from pathlib import Path; "
+            "assert Path('.git').exists(), 'missing .git'; "
+            "assert Path('node_modules/dep/mod.txt').read_text() == 'present'; "
+            "Path('__pycache__').mkdir(exist_ok=True); "
+            "Path('__pycache__/temp.pyc').write_bytes(b'123')"
+        )
+        state_ok = dict(
+            status="running",
+            workspace=str(self.workspace),
+            turn=1,
+            acceptance_contract={
+                "owned_paths": ["owned.txt"],
+                "verify_in_worktree": True,
+                "checks": [dict(name="in_place", command=[sys.executable, "-c", check_code])],
+            },
+        )
+        a.begin(job_ok, state_ok)
+        (self.workspace / "owned.txt").write_text("updated", encoding="utf-8")
+        state_ok["status"] = "completed"
+        a.finish(job_ok, state_ok)
+
+        evidence = a.verify(job_ok, state_ok)
+        self.assertEqual(evidence["status"], "passed", evidence)
+        self.assertEqual(evidence["checks"][0]["environment"]["mode"], "in_worktree")
+        self.assertFalse((self.workspace / "__pycache__" / "temp.pyc").exists())
+        self.assertEqual(a.check_freshness(job_ok, state_ok)["status"], "fresh")
+        self.assertEqual(a.decide(job_ok, state_ok)["status"], "accepted")
+
+        # A check that mutates tracked/untracked workspace files must fail verification.
+        job_mut = self.root / "job_mut"
+        mut_code = "from pathlib import Path; Path('owned.txt').write_text('tampered by check')"
+        state_mut = dict(
+            status="running",
+            workspace=str(self.workspace),
+            turn=1,
+            acceptance_contract={
+                "owned_paths": ["owned.txt"],
+                "checks": [dict(name="mutator", command=[sys.executable, "-c", mut_code])],
+            },
+        )
+        a.begin(job_mut, state_mut)
+        state_mut["status"] = "completed"
+        a.finish(job_mut, state_mut)
+        bad_ev = a.verify(job_mut, state_mut, in_worktree=True)
+        self.assertEqual(bad_ev["status"], "failed")
+        self.assertIn("check mutated workspace files", bad_ev["checks"][0]["reason"])
+
 class AcceptanceCliTests(unittest.TestCase):
     def test_launch_verify_accept_and_turn_warning_reset(self):
         import os

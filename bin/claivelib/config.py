@@ -299,10 +299,11 @@ def validate(data, path):
     if not isinstance(launch, dict):
         raise ValueError(f"invalid claive config {path}: launch must be an object")
     for name, value in launch.items():
-        if name not in {"start_timeout", "git_timeout", "worktree_setup_timeout", "stall_timeout", "idle_ttl"}:
+        if name not in {"start_timeout", "git_timeout", "worktree_setup_timeout",
+                        "stall_timeout", "tool_idle_timeout", "idle_ttl"}:
             raise ValueError(f"invalid claive config {path}: launch: unknown key {name}")
-        maximum = 2592000 if name == "idle_ttl" else 3600 if name in {"worktree_setup_timeout", "stall_timeout"} else 600
-        minimum = 0 if name in {"stall_timeout", "idle_ttl"} else 1
+        maximum = 2592000 if name == "idle_ttl" else 3600 if name in {"worktree_setup_timeout", "stall_timeout", "tool_idle_timeout"} else 600
+        minimum = 0 if name in {"stall_timeout", "tool_idle_timeout", "idle_ttl"} else 1
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not minimum <= value <= maximum:
             raise ValueError(f"invalid claive config {path}: launch.{name} must be a number from {minimum} to {maximum}")
     engine = data.get("default_engine")
@@ -892,5 +893,5 @@ engines:
 #     members: {reader: oracle, writer: worker}
 
 # Launch timeouts in seconds.
-# launch: {start_timeout: 60, git_timeout: 30, worktree_setup_timeout: 120}
+# launch: {start_timeout: 60, git_timeout: 30, worktree_setup_timeout: 120, stall_timeout: 180, tool_idle_timeout: 0, idle_ttl: 7200}
 """

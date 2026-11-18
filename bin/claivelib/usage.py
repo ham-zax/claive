@@ -60,6 +60,10 @@ def aggregate_usage(state):
     turn = dict(index=latest_index, complete=bool(latest) and all(row["complete"] for row in latest))
     turn.update({key: sum(row[key] for row in latest if key in row)
                  for key in fields if any(key in row for row in latest)})
+    for row in reversed(latest):
+        if "native_cache_read_tokens" in row:
+            turn["native_cache_read_tokens"] = row["native_cache_read_tokens"]
+            break
     return dict(model_calls=None, calls=[], aggregates=records, totals=totals, turn=turn,
                 usage_complete=bool(records) and all(row["complete"] for row in records),
                 cache_hit_ratio=None, granularity="attempt")

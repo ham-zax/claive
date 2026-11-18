@@ -14,7 +14,7 @@ from pathlib import Path
 
 PROVENANCE_FILENAME = "provenance.json"
 # Launchers synced by install.sh alongside the claivelib package.
-LAUNCHER_NAMES = ("claive", "claive-worker", "claive-codex", "claive-orch", "claive-memcap")
+LAUNCHER_NAMES = ("claive", "claive-worker", "claive-codex", "claive-orch", "claive-memcap", "claive-mcp")
 # The installed Codex adapter must stay opt-in: hermetic by default, user config
 # only when CLAIVE_CODEX_USE_USER_CONFIG=1, while --ignore-rules always stays.
 CODEX_OPT_IN_MARKER = "CLAIVE_CODEX_USE_USER_CONFIG"
@@ -301,3 +301,62 @@ def doctor_checks(source_dir=None, installed_package_dir=None):
         "detail": smoke_result["detail"],
     }
     return [provenance_check, drift_check, smoke_check_result]
+
+
+def _resolve_git_head(source_dir):
+    """Read HEAD commit SHA purely from .git files (no subprocess)."""
+    git_entry = Path(source_dir) / ".git"
+    if git_entry.is_file():
+        try:
+            text = git_entry.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return None
+        if text.startswith("gitdir:"):
+            target = Path(text[7:].strip())
+            git_entry = target if target.is_absolute() else (Path(source_dir) / target)
+    if not git_entry.is_dir():
+        return None
+    try:
+        head = (git_entry / "HEAD").read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    if not head.startswith("ref: "):
+        return head if len(head) >= 7 else None
+    ref = head[5:].strip()
+    ref_file = git_entry / ref
+    if ref_file.is_file():
+        try:
+            return ref_file.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return None
+    packed = git_entry / "packed-refs"
+    if packed.is_file():
+        try:
+            for line in packed.read_text(encoding="utf-8", errors="replace").splitlines():
+                if not line or line.startswith(("#", "^")):
+                    continue
+                sha, _, name = line.partition(" ")
+                if name.strip() == ref:
+                    return sha.strip()
+        except OSError:
+            pass
+    return None
+
+
+def quick_drift_note(installed_package_dir=None):
+    """Return a concise drift notice if installed provenance lags behind source HEAD."""
+    provenance = load_provenance(installed_package_dir)
+    if not provenance:
+        return None
+    source_dir = provenance.get("source_dir")
+    installed_rev = provenance.get("source_revision")
+    if not isinstance(source_dir, str) or not isinstance(installed_rev, str) or installed_rev == "unknown":
+        return None
+    if not Path(source_dir).is_dir():
+        return None
+    head_sha = _resolve_git_head(source_dir)
+    installed_sha = installed_rev.split("+", 1)[0]
+    if head_sha and installed_sha and head_sha != installed_sha:
+        return (f"Drift: installed claive runtime ({installed_sha[:7]}) differs from {source_dir} "
+                f"HEAD ({head_sha[:7]}); sync with {Path(source_dir) / 'install.sh'} --runtime-only.")
+    return None

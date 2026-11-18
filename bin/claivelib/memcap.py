@@ -19,6 +19,8 @@ import sys
 import tempfile
 import time
 
+from claivelib import procgroup
+
 POLL = 0.2
 EXCEEDED_EXIT = 137
 TIMEOUT_EXIT = 124
@@ -92,33 +94,54 @@ def format_size(size):
     return f"{size}B"
 
 
-def session_processes(session):
-    """Return {pid: rss_bytes} for every live process in a session."""
-    found = {}
+def session_processes(session, root_pid=None, include_reparented=False):
+    """Return {pid: rss_bytes} for every live process in a session or descendant tree."""
+    rss = {}
+    children_by_ppid = {}
+    seeds = set()
+    my_pid = os.getpid()
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
             continue
+        pid = int(entry.name)
         try:
             fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
         except (OSError, IndexError):
             continue
         # After the command name: state ppid pgrp session ... rss is the 22nd.
-        if len(fields) > 21 and fields[0] != "Z" and int(fields[3]) == session:
-            found[int(entry.name)] = int(fields[21]) * PAGE
+        if len(fields) <= 21 or fields[0] == "Z":
+            continue
+        ppid = int(fields[1])
+        sid = int(fields[3])
+        rss[pid] = int(fields[21]) * PAGE
+        children_by_ppid.setdefault(ppid, []).append(pid)
+        if sid == session or (root_pid is not None and pid == root_pid):
+            seeds.add(pid)
+        elif include_reparented and ppid == my_pid and pid != my_pid:
+            seeds.add(pid)
+    found = {}
+    stack = list(seeds)
+    while stack:
+        current = stack.pop()
+        if current in found or current not in rss or current == my_pid:
+            continue
+        found[current] = rss[current]
+        stack.extend(children_by_ppid.get(current, ()))
     return found
 
 
-def kill_session(session):
+def kill_session(session, root_pid=None, include_reparented=False):
     for _ in range(3):
-        pids = session_processes(session)
+        pids = session_processes(session, root_pid=root_pid, include_reparented=include_reparented)
         if not pids:
-            return
+            break
         for pid in pids:
             try:
                 os.kill(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
         time.sleep(0.05)
+    procgroup.reap_reparented({root_pid} if root_pid else set())
 
 
 def _die_with_parent():
@@ -151,10 +174,12 @@ def run_capped(command, limit=None, timeout=None, cwd=None, env=None, capture=Tr
     started = time.monotonic()
     exceeded = timed_out = False
     peak = 0
+    reparented = procgroup.subreaper_active()
     try:
         while process.poll() is None:
             if limit:
-                total = sum(session_processes(process.pid).values())
+                total = sum(session_processes(process.pid, root_pid=process.pid,
+                                              include_reparented=reparented).values())
                 peak = max(peak, total)
                 if total > limit:
                     exceeded = True
@@ -164,16 +189,16 @@ def run_capped(command, limit=None, timeout=None, cwd=None, env=None, capture=Tr
                 break
             time.sleep(POLL)
     except BaseException:
-        kill_session(process.pid)
+        kill_session(process.pid, root_pid=process.pid, include_reparented=reparented)
         process.kill()
         process.wait()
         raise
     if exceeded or timed_out:
-        kill_session(process.pid)
+        kill_session(process.pid, root_pid=process.pid, include_reparented=reparented)
         process.kill()
     code = process.wait()
-    # The leader may exit while children keep running in the session.
-    kill_session(process.pid)
+    # The leader may exit while children keep running in the session or reparented to us.
+    kill_session(process.pid, root_pid=None, include_reparented=reparented)
     texts = []
     for handle in outputs:
         if handle is None:
@@ -210,6 +235,7 @@ def entrypoint(argv=None):
         # Default SIGTERM/SIGHUP handling would exit without killing the session.
         for signum in (signal.SIGTERM, signal.SIGHUP):
             signal.signal(signum, _raise_stopped)
+        procgroup.enable_subreaper()
         with hold_lock(args.lock, args.lock_timeout) if args.lock else nullcontext():
             result = run_capped(command, limit, args.timeout, capture=False, die_with_parent=True)
     except LockTimeout as error:

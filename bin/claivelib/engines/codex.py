@@ -303,7 +303,11 @@ class CodexEngine(WorkerEngine):
             self._last_text = ""
             return [{"type": "model_step", "native_kind": kind}]
         if kind == "item.started" and item_kind in {"command_execution", "mcp_tool_call", "file_change"}:
-            return [{"type": "tool_started", "native_kind": kind, "tool": item.get("command") or item_kind, "tool_id": item.get("id")}]
+            entry = {"type": "tool_started", "native_kind": kind,
+                     "tool": item.get("command") or item_kind, "tool_id": item.get("id")}
+            if isinstance(item.get("command"), str) and item["command"]:
+                entry["command"] = item["command"]
+            return [entry]
         if kind == "item.completed":
             if item_kind == "agent_message" and isinstance(item.get("text"), str):
                 self._last_text = item["text"]

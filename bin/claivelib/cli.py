@@ -5,9 +5,10 @@ import argparse
 import contextlib
 import dataclasses
 import datetime
+import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import selectors
 import shlex
@@ -19,9 +20,9 @@ import tempfile
 import time
 import uuid
 
-from claivelib import config, provider, acceptance, steering, procname, runtime_limits
+from claivelib import config, provider, acceptance, steering, procname, runtime_limits, procgroup
 from claivelib.ansi import strip_controls
-from claivelib.engine import SOFT_READ_NOTE, TurnRequest
+from claivelib.engine import SOFT_READ_NOTE, TurnRequest, entry_for_path
 from claivelib.engines import DEFAULT_ENGINE, ENGINE_NAMES, default_engine, engine_binary, get_engine
 from claivelib.roles import ROLES, resolved_roles
 from claivelib.state import SCHEMA_VERSION, launch_config, session_id as worker_session_id
@@ -392,6 +393,12 @@ def save(path, data):
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+    if path.name == "state.json" and isinstance(data, dict) and "id" in data and "status" in data:
+        try:
+            from claivelib import status_file
+            status_file.write(path.parent, data)
+        except Exception:
+            pass
 
 
 def identity(pid):
@@ -670,6 +677,39 @@ def render(records, color=False, height=None):
 TASK_FAILURE_REASONS = 5
 
 
+MUTATING_FILE_TOOLS = frozenset({
+    "write", "edit", "multiedit", "write_file", "write_to_file", "edit_file",
+    "replace_file_content", "multi_replace_file_content", "sed_file",
+    "notebook_edit", "apply_patch",
+})
+
+
+def _record_touched_path(state, raw_path, tool_name=None):
+    if tool_name and str(tool_name).lower() not in MUTATING_FILE_TOOLS:
+        return
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return
+    candidate = raw_path.strip()
+    workspace = state.get("actual_workspace") or state.get("workspace")
+    if workspace and Path(candidate).is_absolute():
+        try:
+            rel = Path(candidate).resolve(strict=False).relative_to(Path(workspace).resolve(strict=False))
+            candidate = rel.as_posix()
+        except ValueError:
+            pass
+    touched = state.setdefault("touched_files", [])
+    if candidate not in touched and len(touched) < 200:
+        touched.append(candidate)
+
+
+def _tool_detail(event):
+    for key in ("command", "path"):
+        value = event.get(key)
+        if isinstance(value, str) and value.strip():
+            return " ".join(value.split())[:200]
+    return ""
+
+
 def event_update(state, event):
     if state.get("attempt_failed"):
         return
@@ -686,14 +726,26 @@ def event_update(state, event):
             results.pop(next(iter(results)))
     if kind == "model_step":
         state["steps"] += 1
+        state["event_steps"] = state.get("event_steps", 0) + 1
         state["phase"] = "model working"
     elif kind == "tool_started":
         tool = str(event.get("tool", "tool"))
+        state["event_steps"] = state.get("event_steps", 0) + 1
+        state["last_tool"] = {"tool": tool, "detail": _tool_detail(event), "status": "running"}
+        _record_touched_path(state, event.get("path"), tool)
         active = state.setdefault("active_tools", {})
         identifier = event.get("tool_id") or f"uncorrelated:{len(active)}:{tool}"
         active[identifier] = tool
         state["phase"] = "tool: " + ", ".join(active.values())
     elif kind in {"tool_completed", "tool_probe"}:
+        prev_tool = state.get("last_tool") if isinstance(state.get("last_tool"), dict) else {}
+        tool = str(event.get("tool") or prev_tool.get("tool") or "tool")
+        state["last_tool"] = {
+            "tool": tool,
+            "detail": _tool_detail(event) or str(prev_tool.get("detail") or "")[:200],
+            "status": "ok",
+        }
+        _record_touched_path(state, event.get("path"), tool)
         active = state.setdefault("active_tools", {})
         identifier = event.get("tool_id")
         if identifier:
@@ -709,6 +761,11 @@ def event_update(state, event):
     elif kind == "task_warning":
         state["task_failures"] = state.get("task_failures", 0) + 1
         state["turn_task_failures"] = state.get("turn_task_failures", 0) + 1
+        prev_tool = state.get("last_tool") if isinstance(state.get("last_tool"), dict) else {}
+        tool = str(event.get("tool") or prev_tool.get("tool") or "tool")
+        detail_text = _tool_detail(event) or " ".join(str(event.get("reason") or "").split())[:200]
+        state["last_tool"] = {"tool": tool, "detail": detail_text, "status": "error"}
+        _record_touched_path(state, event.get("path"), tool)
         warning = dict(turn=state.get("turn", 1), observed_at=time.time(),
                        tool=event.get("tool"), reason=event.get("reason"),
                        command=event.get("command"), native_kind=event.get("native_kind"))
@@ -761,14 +818,16 @@ def event_update(state, event):
             state["quota_reset_at"] = event["reset_at"]
 
 
-FALLBACKABLE_FAILURES = {"timeout", "stall_timeout", "output_truncated", "quota", "worker", "protocol"}
+FALLBACKABLE_FAILURES = {"timeout", "stall_timeout", "tool_idle_timeout", "output_truncated", "quota", "worker", "protocol"}
 
 PER_TURN_RESET_KEYS = ("ended_at", "error", "terminal", "terminal_reason", "budget_warning", "quota_exhausted",
                        "quota_reset_at", "fallback_requires_user_approval", "report", "report_state",
                        "report_error", "needs_parent", "failure_kind", "active_tools", "turn_command_results",
                        "attempt_failed", "turn_usage", "workspace_delta", "time_wrap_up_sent",
                        "time_wrap_up_error", "consecutive_truncations", "truncation_hint_sent",
-                       "truncation_steering_error", "time_wrap_up_attempted", "shutdown_error")
+                       "truncation_steering_error", "time_wrap_up_attempted", "shutdown_error",
+                       "event_steps", "last_tool", "touched_files", "turn_started_at",
+                       "last_tool_interrupt", "worker_cgroup")
 
 
 def context_overflow_reason(reason):
@@ -863,8 +922,6 @@ def supervise(job_id, control=None):
     state["turn_prompt_file"] = state["prompt_file"]
     state.setdefault("handoffs", 0)
     state.setdefault("budget_missed", 0)
-    acceptance.begin(path, state)
-    progress("acceptance ready")
     (path / "result.txt").unlink(missing_ok=True)
     engine = get_engine(state.get("engine", DEFAULT_ENGINE))
     if not isinstance(state.get("fallbacks"), list):
@@ -872,9 +929,7 @@ def supervise(job_id, control=None):
     if not isinstance(state.get("fallback_models"), list):
         fallback_raw = state.get("fallback_models")
         state["fallback_models"] = parse_fallback_models(fallback_raw) if fallback_raw else []
-    state.update(supervisor_pid=os.getpid(), supervisor_identity=identity(os.getpid()),
-                 status="running", phase="launching worker", request_receipts=True)
-    stopping = False
+    stopping = (path / "cancel.request").exists()
     child = None
     transport = None
     timed_out = False
@@ -884,6 +939,47 @@ def supervise(job_id, control=None):
     limit_error = None
     budget_values = None
     gate = {"stop": None, "seen": []}
+    subreaper_pid = os.getpid() if procgroup.subreaper_active() else None
+    cgroup_dir = None
+    scope_unit = None
+    infra_snapshot = set()
+    seen_first_tool = False
+    tool_last_activity = time.monotonic()
+    tool_idle_strikes = 0
+
+    def stop_requested(_signum, _frame):
+        nonlocal stopping
+        stopping = True
+        if control is not None:
+            control["stopping"] = True
+
+    signal.signal(signal.SIGTERM, stop_requested)
+    signal.signal(signal.SIGINT, stop_requested)
+    # A foreground run whose terminal closes gets SIGHUP; stop the worker (it is in its own
+    # session and would outlive us) and release the worktree instead of dying mid-turn.
+    signal.signal(signal.SIGHUP, stop_requested)
+
+    contract = state.get("acceptance_contract") or {}
+    isolation_info = launch_config(state).get("isolation") or {}
+    will_snapshot = (contract.get("owned_paths") is not None
+                     or bool(contract.get("checks"))
+                     or isolation_info.get("owner") == "claive")
+    state.update(
+        supervisor_pid=os.getpid(),
+        supervisor_identity=identity(os.getpid()),
+        status="running",
+        phase="snapshotting workspace" if will_snapshot else "launching worker",
+        turn_started_at=time.time(),
+        request_receipts=True,
+    )
+    save(path / "state.json", state)
+    acceptance.begin(path, state)
+    progress("acceptance ready")
+    if (path / "cancel.request").exists():
+        stopping = True
+    if not stopping:
+        state["phase"] = "launching worker"
+        save(path / "state.json", state)
 
     def update_budget(event):
         if budget_values is None or state.get("terminal"):
@@ -921,15 +1017,32 @@ def supervise(job_id, control=None):
                     raise
                 state["budget_context_error"] = str(error)
 
+    def refresh_cgroup():
+        nonlocal cgroup_dir
+        if cgroup_dir is None and scope_unit and child is not None:
+            cgroup_dir = procgroup.cgroup_scope_dir(child.pid, scope_unit)
+            if cgroup_dir:
+                state["worker_cgroup"] = str(cgroup_dir)
+        return cgroup_dir
+
     def apply_events(normalized):
         """Apply one native event; then publish its tool calls and any stop change to the budget gate."""
         nonlocal last_event_monotonic, limit_failure, limit_error
+        nonlocal seen_first_tool, tool_last_activity, tool_idle_strikes
+        refresh_cgroup()
         tool_ids = [item["tool_id"] for item in normalized if item.get("type") == "tool_started" and item.get("tool_id")]
         stop_before = gate["stop"]
         for normalized_event in normalized:
             if normalized_event.get("type") != "control_response":
-                last_event_monotonic = time.monotonic()
+                now_mono = time.monotonic()
+                last_event_monotonic = now_mono
+                tool_last_activity = now_mono
+            if normalized_event.get("type") == "tool_started":
+                seen_first_tool = True
+                tool_last_activity = time.monotonic()
             event_update(state, normalized_event)
+            if not state.get("active_tools"):
+                tool_idle_strikes = 0
             if normalized_event.get("native_kind") == "tool_output_truncated":
                 state["consecutive_truncations"] = state.get("consecutive_truncations", 0) + 1
                 if not state.get("truncation_hint_sent") and transport:
@@ -987,23 +1100,11 @@ def supervise(job_id, control=None):
                 state.update(attempt_failed=True, terminal="failed", failure_kind="protocol",
                              terminal_reason="malformed AGY event", answer="")
 
-    def stop_requested(_signum, _frame):
-        nonlocal stopping
-        stopping = True
-        if control is not None:
-            control["stopping"] = True
-
-    signal.signal(signal.SIGTERM, stop_requested)
-    signal.signal(signal.SIGINT, stop_requested)
-    # A foreground run whose terminal closes gets SIGHUP; stop the worker (it is in its own
-    # session and would outlive us) and release the worktree instead of dying mid-turn.
-    signal.signal(signal.SIGHUP, stop_requested)
-    save(path / "state.json", state)
     attempt = 0
     try:
         setup_failed = False
         setup = launch_config(state).get("worktree_setup")
-        if setup and state.get("turn", 1) == 1:
+        if setup and state.get("turn", 1) == 1 and not stopping:
             from claivelib import memcap
             setup_log = path / "worktree-setup.log"
             setup_timeout = config.launch_setting("worktree_setup_timeout", 900)
@@ -1020,10 +1121,10 @@ def supervise(job_id, control=None):
                             except subprocess.TimeoutExpired:
                                 pass
                         if process.poll() is None:
-                            try:
-                                os.killpg(process.pid, signal.SIGKILL)
-                            except ProcessLookupError:
-                                pass
+                            procgroup.terminate_tree(
+                                process.pid, grace=0.2,
+                                subreaper_pid=subreaper_pid, reap_exclude={process.pid},
+                            )
                             process.wait()
                             setup_exit = memcap.TIMEOUT_EXIT
                         else:
@@ -1037,10 +1138,15 @@ def supervise(job_id, control=None):
                 setup_failed = True
                 state.update(status="failed", failure_kind="worktree_setup", exit_code=setup_exit,
                              error=f"worktree setup failed (exit {setup_exit}); see {setup_log}")
-        if engine.name == "claude" and isinstance(launch_config(state).get("budget"), dict):
+        elif stopping:
+            setup_failed = True
+            state.update(status="cancelled", exit_code=130)
+        if not setup_failed and engine.name == "claude" and isinstance(launch_config(state).get("budget"), dict):
             budget.begin_turn(path, state)
         while True:
-            if setup_failed:
+            if setup_failed or stopping:
+                if stopping:
+                    state.setdefault("status", "cancelled")
                 break
             seen_init = False
             state["attempt"] = attempt + 1
@@ -1059,7 +1165,7 @@ def supervise(job_id, control=None):
                 state.pop("exit_code", None)
                 state["malformed_events"] = 0
                 (path / "result.txt").unlink(missing_ok=True)
-                state.update(status="running", phase="launching worker")
+                state.update(status="running", phase="launching worker", turn_started_at=time.time())
                 save(path / "state.json", state)
             turn_timeout = state.get("turn_timeout")
             if turn_timeout is not None:
@@ -1067,6 +1173,14 @@ def supervise(job_id, control=None):
                     turn_timeout = parse_turn_timeout(turn_timeout)
                 except ValueError:
                     turn_timeout = None
+            tool_idle_timeout = state.get("tool_idle_timeout")
+            if tool_idle_timeout is not None:
+                try:
+                    tool_idle_timeout = runtime_limits.seconds(tool_idle_timeout, "tool_idle_timeout", 0)
+                except ValueError:
+                    tool_idle_timeout = 0
+            else:
+                tool_idle_timeout = 0
             log_mode = "a" if (state.get("reusable") or attempt > 0) else "w"
             child = None
             timed_out = False
@@ -1074,6 +1188,17 @@ def supervise(job_id, control=None):
             limit_error = None
             state["consecutive_truncations"] = 0
             kill_at = None
+            sigkill_sent_at = None
+            cgroup_dir = None
+            scope_unit = None
+            infra_snapshot = set()
+            seen_first_tool = False
+            tool_last_activity = time.monotonic()
+            tool_idle_strikes = 0
+            exec_cmd, scope_unit = procgroup.wrap_scoped_command(
+                state["command"],
+                f"claive-{job_id}-t{state.get('turn', 1)}-a{state['attempt']}",
+            )
             child_env = dict(os.environ, CLAIVE_WORKER_ID=job_id, CLAIVE_BIN=launcher_path(), **engine.child_env_for_turn(turn_request(state)))
             if state.get("engine") == "pi":
                 # Rebuilt every turn so models.json edits and config changes take effect.
@@ -1093,33 +1218,120 @@ def supervise(job_id, control=None):
                         break
                 else:
                     initial_input = engine.initial_input(soft_read_request(engine, turn_request(state)))
-                child = subprocess.Popen(state["command"], stdout=subprocess.PIPE, stderr=errors,
+                child = subprocess.Popen(exec_cmd, stdout=subprocess.PIPE, stderr=errors,
                                          stdin=subprocess.PIPE if initial_input is not None else subprocess.DEVNULL,
                                          bufsize=0, start_new_session=True,
                                          cwd=(state.get("actual_workspace") or state["workspace"])
                                          if engine.cwd_is_worktree else state["workspace"],
                                          env=child_env)
+                os.set_blocking(child.stdout.fileno(), False)
                 progress("worker process started")
                 transport = steering.Transport(path, state, child.stdin, initial_input) if initial_input is not None else None
                 if timeout_start is None:
                     timeout_start = time.monotonic()
-                last_event_monotonic = time.monotonic()
+                now_started = time.monotonic()
+                last_event_monotonic = now_started
+                tool_last_activity = now_started
+                refresh_cgroup()
+                infra_snapshot = procgroup.snapshot_infra(
+                    child.pid, subreaper_pid=subreaper_pid, cgroup_dir=cgroup_dir
+                )
                 state["worker_pid"] = child.pid
                 state["worker_identity"] = identity(child.pid)
                 state["phase"] = "waiting for first event"
                 save(path / "state.json", state)
                 pending = b""
                 last_save = 0
+
+                def _drain_stdout(fd):
+                    nonlocal pending, infra_snapshot
+                    eof = False
+                    lines_batch = []
+                    while True:
+                        try:
+                            chunk = os.read(fd, 65536)
+                        except (BlockingIOError, OSError):
+                            break
+                        if not chunk:
+                            eof = True
+                            break
+                        events.write(chunk.decode("utf-8", errors="replace"))
+                        pending += chunk
+                        while b"\n" in pending:
+                            line, pending = pending.split(b"\n", 1)
+                            if line.strip():
+                                lines_batch.append(line)
+                    events.flush()
+                    was_pre_tool = not seen_first_tool
+                    for line in lines_batch:
+                        consume_line(line)
+                    if lines_batch and was_pre_tool and not seen_first_tool and child is not None:
+                        refresh_cgroup()
+                        infra_snapshot |= procgroup.snapshot_infra(
+                            child.pid, subreaper_pid=subreaper_pid, cgroup_dir=cgroup_dir
+                        )
+                    return eof
+
+                def _poll_interrupt_tool():
+                    nonlocal tool_last_activity
+                    req_dir = path / "interrupt-tool" / "requests"
+                    if not req_dir.is_dir():
+                        return
+                    for req_file in sorted(req_dir.glob("*.json")):
+                        try:
+                            req_data = json.loads(req_file.read_text(encoding="utf-8"))
+                        except (OSError, ValueError):
+                            req_data = {}
+                        req_file.unlink(missing_ok=True)
+                        req_id = req_data.get("id") or req_file.stem
+                        refresh_cgroup()
+                        killed = procgroup.interrupt_tool_children(
+                            child.pid, infra_snapshot, grace=0.5,
+                            subreaper_pid=subreaper_pid, cgroup_dir=cgroup_dir,
+                        )
+                        tool_last_activity = time.monotonic()
+                        steered = False
+                        steer_error = None
+                        steer_msg = req_data.get("message")
+                        if transport and launch_config(state).get("steering") and not state.get("terminal"):
+                            extra = (" " + steer_msg.strip()) if isinstance(steer_msg, str) and steer_msg.strip() else ""
+                            try:
+                                steering.submit(
+                                    path,
+                                    runtime_limits.TOOL_INTERRUPTED_NOTE.format(extra=extra),
+                                    source="tool_interrupt",
+                                )
+                                transport.pump()
+                                steered = True
+                            except (OSError, ValueError) as error:
+                                steer_error = str(error)
+                        receipt = {
+                            "id": req_id,
+                            "status": "completed",
+                            "killed_pids": killed,
+                            "steered": steered,
+                            "steer_error": steer_error,
+                            "at": time.time(),
+                        }
+                        state["last_tool_interrupt"] = receipt
+                        (path / "interrupt-tool" / "receipts").mkdir(parents=True, exist_ok=True)
+                        save(path / "interrupt-tool" / "receipts" / f"{req_id}.json", receipt)
+                        save(path / "state.json", state)
+
                 with selectors.DefaultSelector() as selector:
                     selector.register(child.stdout, selectors.EVENT_READ)
                     while selector.get_map() or child.poll() is None:
                         now = time.monotonic()
                         if transport and not stopping and not timed_out and not state.get("terminal"):
                             transport.pump()
+                        if not stopping and not timed_out and not state.get("terminal") and child.poll() is None:
+                            _poll_interrupt_tool()
                         action = runtime_limits.turn_action(
                             now - timeout_start, now - last_event_monotonic, state.get("active_tools"),
                             turn_timeout, state.get("stall_timeout", 180), state.get("turn_grace", 0),
-                            bool(state.get("time_wrap_up_attempted") or state.get("time_wrap_up_sent")))
+                            bool(state.get("time_wrap_up_attempted") or state.get("time_wrap_up_sent")),
+                            tool_idle=tool_idle_timeout, tool_inactive=now - tool_last_activity,
+                        )
                         if action == "wrap_up" and not timed_out and not stopping and not state.get("terminal"):
                             state["time_wrap_up_attempted"] = True
                             save(path / "state.json", state)
@@ -1132,6 +1344,44 @@ def supervise(job_id, control=None):
                                     state["time_wrap_up_error"] = str(error)
                             else:
                                 state["time_wrap_up_error"] = "no steering transport; wrap-up was not delivered"
+                        if (action == "tool_idle_timeout" and not timed_out and not stopping
+                                and not state.get("terminal") and child.poll() is None):
+                            if tool_idle_strikes == 0:
+                                tool_idle_strikes = 1
+                                refresh_cgroup()
+                                killed = procgroup.interrupt_tool_children(
+                                    child.pid, infra_snapshot, grace=0.5,
+                                    subreaper_pid=subreaper_pid, cgroup_dir=cgroup_dir,
+                                )
+                                tool_last_activity = time.monotonic()
+                                if killed:
+                                    steered = False
+                                    steer_error = None
+                                    if transport and launch_config(state).get("steering"):
+                                        try:
+                                            steering.submit(
+                                                path,
+                                                runtime_limits.TOOL_IDLE_WRAP_UP.format(seconds=tool_idle_timeout),
+                                                source="tool_idle_timeout",
+                                            )
+                                            transport.pump()
+                                            steered = True
+                                        except (OSError, ValueError) as error:
+                                            steer_error = str(error)
+                                    state["last_tool_interrupt"] = {
+                                        "source": "tool_idle_timeout",
+                                        "killed_pids": killed,
+                                        "steered": steered,
+                                        "steer_error": steer_error,
+                                        "at": time.time(),
+                                    }
+                                    save(path / "state.json", state)
+                                else:
+                                    limit_failure = "tool_idle_timeout"
+                                    limit_error = f"active tool stalled for {tool_idle_timeout:g}s without output"
+                            else:
+                                limit_failure = "tool_idle_timeout"
+                                limit_error = f"active tool stalled for {tool_idle_timeout:g}s without output"
                         if (not timed_out and not stopping and child.poll() is None
                                 and (limit_failure or action in {"timeout", "stall_timeout"})):
                             if not limit_failure:
@@ -1144,36 +1394,50 @@ def supervise(job_id, control=None):
                             state["phase"] = "stopping worker"
                             save(path / "state.json", state)
                             kill_at = now
-                            try:
-                                os.killpg(child.pid, signal.SIGTERM)
-                            except ProcessLookupError:
-                                pass
+                            refresh_cgroup()
+                            procgroup.signal_tree(
+                                child.pid, signal.SIGTERM,
+                                subreaper_pid=subreaper_pid, cgroup_dir=cgroup_dir,
+                            )
                         elif stopping and kill_at is None:
                             state["status"] = "cancelling"
                             state["phase"] = "stopping worker"
                             save(path / "state.json", state)
                             kill_at = time.monotonic()
-                            try:
-                                os.killpg(child.pid, signal.SIGTERM)
-                            except ProcessLookupError:
-                                pass
+                            refresh_cgroup()
+                            procgroup.signal_tree(
+                                child.pid, signal.SIGTERM,
+                                subreaper_pid=subreaper_pid, cgroup_dir=cgroup_dir,
+                            )
                         if kill_at is not None and time.monotonic() - kill_at > KILL_GRACE_SECONDS:
-                            try:
-                                os.killpg(child.pid, signal.SIGKILL)
-                            except ProcessLookupError:
-                                pass
+                            if sigkill_sent_at is None or time.monotonic() - sigkill_sent_at >= 0.25:
+                                refresh_cgroup()
+                                procgroup.terminate_tree(
+                                    child.pid, grace=0.0,
+                                    subreaper_pid=subreaper_pid, cgroup_dir=cgroup_dir,
+                                    reap_exclude={child.pid},
+                                )
+                                sigkill_sent_at = time.monotonic()
                         for key, _mask in selector.select(0.01 if transport and transport.pending else 0.25):
-                            chunk = os.read(key.fd, 65536)
-                            if not chunk:
+                            if _drain_stdout(key.fd):
                                 selector.unregister(key.fileobj)
-                                continue
-                            events.write(chunk.decode("utf-8", errors="replace"))
-                            events.flush()
-                            pending += chunk
-                            while b"\n" in pending:
-                                line, pending = pending.split(b"\n", 1)
-                                if line.strip():
-                                    consume_line(line)
+                        if child.poll() is not None and selector.get_map():
+                            for key, _mask in selector.select(0.05):
+                                if _drain_stdout(key.fd):
+                                    selector.unregister(key.fileobj)
+                            if selector.get_map():
+                                refresh_cgroup()
+                                procgroup.terminate_tree(
+                                    child.pid, grace=0.2 if kill_at is None else 0.0,
+                                    subreaper_pid=subreaper_pid, cgroup_dir=cgroup_dir,
+                                    reap_exclude={child.pid},
+                                )
+                                _drain_stdout(child.stdout.fileno())
+                                try:
+                                    selector.unregister(child.stdout)
+                                except (KeyError, ValueError):
+                                    pass
+                                break
                         if time.monotonic() - last_save > 0.25:
                             save(path / "state.json", state)
                             last_save = time.monotonic()
@@ -1181,6 +1445,12 @@ def supervise(job_id, control=None):
                     consume_line(pending)
                 close_transport()
                 state["exit_code"] = child.wait()
+                refresh_cgroup()
+                procgroup.terminate_tree(
+                    child.pid, grace=0.0,
+                    subreaper_pid=subreaper_pid, cgroup_dir=cgroup_dir,
+                    reap_exclude={child.pid},
+                )
                 child.stdout.close()
             if engine.name == "agy":
                 from claivelib.usage import record_cumulative
@@ -1296,10 +1566,12 @@ def supervise(job_id, control=None):
                 if state.get("report_contract"):
                     record_report(state, state.get("answer", ""))
         if child is not None:
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            refresh_cgroup()
+            procgroup.terminate_tree(
+                child.pid, grace=0.0,
+                subreaper_pid=subreaper_pid, cgroup_dir=cgroup_dir,
+                reap_exclude={child.pid},
+            )
             try:
                 child.wait()
             except Exception:
@@ -1361,25 +1633,102 @@ def _worktree_git(cwd, *args):
     return subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, timeout=120)
 
 
-def _worktree_changes(target, base_commit, branch=None):
+def _read_carried_baseline(target, job_dir=None):
+    candidate_dirs = []
+    if job_dir is not None:
+        candidate_dirs.append(Path(job_dir))
+    target_path = Path(target)
+    if target_path.name == "worktree":
+        candidate_dirs.append(target_path.parent)
+    for directory in candidate_dirs:
+        baseline_file = directory / "carried-baseline.json"
+        if baseline_file.is_file():
+            try:
+                loaded = json.loads(baseline_file.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict) and isinstance(loaded.get("dirty_files"), dict):
+                    return loaded
+            except (OSError, ValueError):
+                return None
+    return None
+
+
+def _normalized_entry(entry):
+    if not isinstance(entry, list) or not entry:
+        return None
+    if entry[0] == "file" and len(entry) >= 3:
+        return ("file", entry[1], bool(entry[2] & 0o100))
+    return tuple(entry[:2])
+
+
+def _is_byproduct_relpath(rel_path):
+    from claivelib.orchestration import BYPRODUCT_DIRS
+    clean_rel = rel_path.strip('"').rstrip("/")
+    parts = clean_rel.split("/")
+    return bool(set(parts) & BYPRODUCT_DIRS) or acceptance._is_verifier_byproduct(clean_rel)
+
+
+def _git_status_z(target, *extra_args):
+    res = subprocess.run(
+        ["git", "-C", str(target), "status", "--porcelain=v1", "-z", *extra_args],
+        capture_output=True, timeout=120,
+    )
+    if res.returncode:
+        return None
+    items = []
+    entries = iter(res.stdout.split(b"\0"))
+    for raw in entries:
+        if not raw:
+            continue
+        code = os.fsdecode(raw[:2])
+        rel = os.fsdecode(raw[3:])
+        extra = os.fsdecode(next(entries, b"")) if ("R" in code or "C" in code) else None
+        items.append((code, rel, extra))
+    return items
+
+
+def _worktree_changes(target, base_commit, branch=None, job_dir=None):
     """Return why a writer worktree must be kept, or None when it holds nothing new.
 
-    Untracked and ignored files count, except tool caches; a failed git query counts too.
+    Untracked and ignored files count, except tool caches; carried dirty baselines are
+    subtracted so untouched `--carry-dirty` worktrees clean up cleanly.
     """
-    from claivelib.orchestration import BYPRODUCT_DIRS
-    status = _worktree_git(target, "status", "--porcelain", "--untracked-files=all", "--ignored")
-    if status.returncode:
-        return "git status failed"
-    for line in status.stdout.splitlines():
-        parts = line[3:].strip('"').rstrip("/").split("/")
-        if line.startswith("!!") and (set(parts) & BYPRODUCT_DIRS
-                                      or parts[-1].endswith((".pyc", ".pyo"))):
-            continue
-        return "has changes"
+    baseline = _read_carried_baseline(target, job_dir)
+    if baseline is None:
+        items = _git_status_z(target, "--untracked-files=all", "--ignored")
+        if items is None:
+            return "git status failed"
+        for code, rel, _extra in items:
+            if code == "!!" and _is_byproduct_relpath(rel):
+                continue
+            return "has changes"
+        for ref in ("HEAD", f"refs/heads/{branch}") if branch else ("HEAD",):
+            ahead = _worktree_git(target, "rev-list", "--count", f"{base_commit}..{ref}")
+            if ahead.returncode or ahead.stdout.strip() != "0":
+                return "has new commits"
+        return None
+
     for ref in ("HEAD", f"refs/heads/{branch}") if branch else ("HEAD",):
         ahead = _worktree_git(target, "rev-list", "--count", f"{base_commit}..{ref}")
         if ahead.returncode or ahead.stdout.strip() != "0":
             return "has new commits"
+    items = _git_status_z(target, "--untracked-files=all", "--ignored")
+    if items is None:
+        return "git status failed"
+    dirty_files = baseline["dirty_files"]
+    status_paths = set()
+    for code, rel, extra in items:
+        if code == "!!" and _is_byproduct_relpath(rel):
+            continue
+        if rel:
+            status_paths.add(rel)
+        if extra:
+            status_paths.add(extra)
+    target_root = Path(target)
+    for rel in sorted(set(dirty_files) | status_paths):
+        if _is_byproduct_relpath(rel):
+            continue
+        if _normalized_entry(entry_for_path(target_root / rel)) != _normalized_entry(dirty_files.get(rel)):
+            return "has changes"
     return None
 
 
@@ -1438,8 +1787,193 @@ def worktree_rows():
     return rows
 
 
-def worktree_command(action, older_than="24h", dry_run=False, discard_changed=False, json_output=False):
+def _entry_at_commit(target, base_commit, rel, before_files=None):
+    if before_files is not None:
+        return before_files.get(rel)
+    if not base_commit:
+        return None
+    ls = subprocess.run(
+        ["git", "-C", str(target), "ls-tree", "-z", base_commit, "--", rel],
+        capture_output=True, timeout=60,
+    )
+    if ls.returncode or not ls.stdout:
+        return None
+    first = ls.stdout.split(b"\0", 1)[0]
+    meta, _tab, _path = os.fsdecode(first).partition("\t")
+    parts = meta.split()
+    if len(parts) < 3 or parts[1] != "blob":
+        return None
+    mode, oid = parts[0], parts[2]
+    blob = subprocess.run(
+        ["git", "-C", str(target), "cat-file", "blob", oid],
+        capture_output=True, timeout=60,
+    )
+    if blob.returncode:
+        return None
+    if mode == "120000":
+        return ["symlink", os.fsdecode(blob.stdout)]
+    return ["file", hashlib.sha256(blob.stdout).hexdigest(), int(mode, 8) & 0o777]
+
+
+def _safe_relpath(rel):
+    parts = PurePosixPath(rel).parts
+    if not parts or rel.startswith("/") or ".." in parts or ".git" in parts:
+        raise ValueError(f"unsafe relative path: {rel}")
+
+
+def _copy_worktree_entry(src, dst):
+    if src.is_symlink():
+        if dst.is_dir() and not dst.is_symlink():
+            shutil.rmtree(dst)
+        elif os.path.lexists(dst):
+            dst.unlink()
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.symlink_to(os.readlink(src))
+        return
+    if dst.is_dir() and not dst.is_symlink():
+        shutil.rmtree(dst)
+    elif dst.is_symlink():
+        dst.unlink()
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    preserved_mode = None
+    if dst.exists():
+        old_mode = dst.stat().st_mode & 0o777
+        new_mode = src.stat().st_mode & 0o777
+        if (old_mode & 0o100) == (new_mode & 0o100):
+            preserved_mode = old_mode
+    shutil.copy2(src, dst)
+    if preserved_mode is not None:
+        os.chmod(dst, preserved_mode)
+
+
+def worktree_apply_command(job_id, dry_run=False, force=False, json_output=False):
+    """Apply a settled worker's managed worktree edits back into its source repository."""
     from claivelib import worktrees
+    job_dir = job_path(job_id)
+    with worktrees.lifecycle_lock():
+        state = load(job_dir)
+        if state["status"] in {"starting", "running", "cancelling"}:
+            raise ValueError("worktree apply requires a settled worker")
+        isolation = launch_config(state).get("isolation") or {}
+        if isolation.get("owner") != "claive":
+            raise ValueError("worker does not own a claive-managed worktree")
+        target_str = state.get("retained_worktree") or isolation.get("existing_path") or ""
+        source_str = isolation.get("source") or state.get("workspace") or ""
+        base_commit = isolation.get("base_commit") or ""
+        target = Path(target_str)
+        source = Path(source_str)
+        if not target.is_dir():
+            raise ValueError(f"worker worktree does not exist: {target}")
+        if not source.is_dir():
+            raise ValueError(f"source workspace does not exist: {source}")
+
+        candidates = set()
+        if base_commit:
+            diff_res = subprocess.run(
+                ["git", "-C", str(target), "diff", "--name-only", "-z", base_commit],
+                capture_output=True, timeout=60,
+            )
+            if diff_res.returncode:
+                raise ValueError(f"git diff failed in worktree {target}")
+            candidates.update(os.fsdecode(raw) for raw in diff_res.stdout.split(b"\0") if raw)
+        untracked_res = subprocess.run(
+            ["git", "-C", str(target), "ls-files", "--others", "--exclude-standard", "-z"],
+            capture_output=True, timeout=60,
+        )
+        if untracked_res.returncode:
+            raise ValueError(f"git ls-files failed in worktree {target}")
+        candidates.update(os.fsdecode(raw) for raw in untracked_res.stdout.split(b"\0") if raw)
+
+        baseline = _read_carried_baseline(target, job_dir)
+        dirty_files = baseline["dirty_files"] if baseline else {}
+        candidates.update(dirty_files.keys())
+
+        before_files = None
+        before_path = job_dir / "evidence" / "turn-0001" / "before.json"
+        if before_path.is_file():
+            try:
+                loaded_before = json.loads(before_path.read_text(encoding="utf-8"))
+                if isinstance(loaded_before, dict) and isinstance(loaded_before.get("files"), dict):
+                    before_files = loaded_before["files"]
+            except (OSError, ValueError):
+                before_files = None
+
+        to_apply = []
+        to_delete = []
+        conflicts = []
+        for rel in sorted(candidates):
+            if not rel or _is_byproduct_relpath(rel):
+                continue
+            _safe_relpath(rel)
+            initial_entry = (dirty_files[rel] if rel in dirty_files
+                             else _entry_at_commit(target, base_commit, rel, before_files))
+            wt_entry = entry_for_path(target / rel)
+            if _normalized_entry(wt_entry) == _normalized_entry(initial_entry):
+                continue
+            src_entry = entry_for_path(source / rel)
+            if _normalized_entry(src_entry) == _normalized_entry(wt_entry):
+                continue
+            if _normalized_entry(src_entry) != _normalized_entry(initial_entry):
+                conflicts.append(rel)
+            if wt_entry is None:
+                to_delete.append(rel)
+            else:
+                to_apply.append(rel)
+
+        blocked = bool(conflicts and not force)
+        if not dry_run and not blocked:
+            for rel in to_apply:
+                _copy_worktree_entry(target / rel, source / rel)
+            for rel in to_delete:
+                dst = source / rel
+                if dst.is_dir() and not dst.is_symlink():
+                    shutil.rmtree(dst)
+                elif os.path.lexists(dst):
+                    dst.unlink()
+                parent = dst.parent
+                while parent != source:
+                    try:
+                        parent.rmdir()
+                    except OSError:
+                        break
+                    parent = parent.parent
+
+        payload = {
+            "id": state["id"],
+            "source": str(source),
+            "worktree": str(target),
+            "applied": to_apply,
+            "deleted": to_delete,
+            "conflicts": conflicts,
+            "dry_run": dry_run,
+            "forced": bool(force and conflicts),
+            "status": "conflict" if blocked else "dry_run" if dry_run else "applied",
+        }
+        if json_output:
+            print(json.dumps(payload, indent=2))
+        else:
+            if blocked:
+                print(
+                    f"claive worktree apply refused due to {len(conflicts)} conflict(s) in {source}: "
+                    + ", ".join(conflicts[:10])
+                    + " (re-run with --force to overwrite)",
+                    file=sys.stderr,
+                )
+            elif dry_run:
+                print(f"Dry run for {state['id']}: would apply {len(to_apply)} file(s), "
+                      f"delete {len(to_delete)} file(s) in {source}"
+                      + (f" ({len(conflicts)} conflict(s))" if conflicts else ""))
+            else:
+                print(f"Applied {len(to_apply)} file(s), deleted {len(to_delete)} file(s) from {target} into {source}"
+                      + (f" (overwrote {len(conflicts)} conflict(s) with --force)" if conflicts else ""))
+        return 1 if blocked else 0
+
+
+def worktree_command(action, older_than="24h", dry_run=False, discard_changed=False, json_output=False,
+                     job_id=None, force=False):
+    from claivelib import worktrees
+    if action == "apply":
+        return worktree_apply_command(job_id, dry_run=dry_run, force=force, json_output=json_output)
     rows = worktree_rows()
     with worktrees.lifecycle_lock() if action == "clean" else contextlib.nullcontext():
         return _worktree_command(action, older_than, dry_run, discard_changed, json_output, rows)
@@ -1588,7 +2122,7 @@ def _release_worktree(state):
               else "is retained for parent verification/acceptance" if contract.get("checks") or contract.get("owned_paths") is not None
               else _worktree_changes(target, isolation["base_commit"], branch))
     if reason is None:
-        error = remove_worktree(isolation, force=False)
+        error = remove_worktree(isolation, force=bool(isolation.get("carried_dirty")))
         if error is None:
             worktrees.record_isolation("removed", state["id"], isolation)
             return
@@ -1605,6 +2139,7 @@ def _release_worktree(state):
 
 def run_supervisor(job_id, reusable, resume_idle=False):
     procname.set_supervisor_process_name(job_id)
+    procgroup.enable_subreaper()
     try:
         record = json.loads((job_path(job_id) / "state.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -1873,14 +2408,15 @@ def create_fork(args):
         report=bool(source.get("report_contract")),
         reasoning_effort=policy.get("reasoning_effort", source.get("reasoning_effort")),
         max_model_steps=policy.get("max_model_steps", source.get("max_model_steps")),
-        read_only=bool(launch.get("read_only")), worktree=False, worktree_existing=None,
+        read_only=bool(launch.get("read_only")), worktree=False, carry_dirty=False, worktree_existing=None,
         worktree_base=None, web=bool(launch.get("web")),
         model=launch.get("model") or source.get("model"), session_id=None,
         output_schema=launch.get("output_schema"), no_session_log=False,
         provider=launch.get("provider"), mission=source.get("mission"),
-        turn_timeout=source.get("turn_timeout"), fallback_models=None, remember_model=False,
+        turn_timeout=source.get("turn_timeout"), fallback_models=None, no_fallback=False, remember_model=False,
         stall_timeout=source.get("stall_timeout"), idle_ttl=source.get("idle_ttl"),
-        turn_grace=source.get("turn_grace"),
+        turn_grace=source.get("turn_grace"), tool_idle_timeout=source.get("tool_idle_timeout"),
+        verify_in_worktree=bool((source.get("acceptance_contract") or {}).get("verify_in_worktree")),
         fork_session_id=source_session_id, fork_session_dir=launch.get("session_dir"),
         forked_from=source_id,
         context_file=getattr(args, "context_file", []),
@@ -1924,8 +2460,8 @@ def warn_dirty_worktree(workspace, isolation):
     print(f"warning: the worktree starts from {base} and lacks {len(statuses)} uncommitted paths in {workspace} "
           f"(staged {staged}, unstaged {unstaged}, untracked {untracked}): "
           f"{', '.join(clean(path) for path in paths[:10])}", file=sys.stderr)
-    print(f"To include them, commit by path: git -C {shlex.quote(str(workspace))} commit -m MSG -- "
-          + " ".join(shlex.quote(path) for path in paths), file=sys.stderr)
+    print("To carry uncommitted edits into the isolated worktree without committing, "
+          "relaunch with --worktree --carry-dirty.", file=sys.stderr)
 
 
 def create_job(args):
@@ -1959,7 +2495,15 @@ def _create_job(args):
     idle_ttl = runtime_limits.seconds(getattr(args, "idle_ttl", None), "--idle-ttl",
                                      config.launch_setting("idle_ttl", 7200))
     turn_grace = runtime_limits.seconds(getattr(args, "turn_grace", None), "--turn-grace", 0)
+    tool_idle_timeout = runtime_limits.seconds(
+        getattr(args, "tool_idle_timeout", None),
+        "--tool-idle-timeout",
+        config.launch_setting("tool_idle_timeout", 0),
+    )
     cli_fallback_raw = getattr(args, "fallback_models", None)
+    no_fallback = bool(getattr(args, "no_fallback", False))
+    if no_fallback and cli_fallback_raw is not None:
+        raise ValueError("--no-fallback cannot be combined with --fallback-models")
     if args.action == "open" and args.no_session_log:
         raise ValueError("reusable workers require session logging to preserve follow-up history")
     if args.session_id and args.no_session_log:
@@ -1995,15 +2539,39 @@ def _create_job(args):
     engine = get_engine(engine_name)
     check_engine_policy(engine_name)
     policy = config.engine_policy(engine_name)
-    fallback_raw = cli_fallback_raw
-    if fallback_raw is None and (args.action != "open" or engine_name == "agy"):
-        fallback_raw = policy.get("fallback_models")
-    fallback_models = parse_fallback_models(fallback_raw)
-    if fallback_models and getattr(args, "enable_steering", False):
-        raise ValueError("steering cannot be combined with --fallback-models")
     session_id = engine.resolve_session_id(args.session_id, not args.no_session_log)
     requested_provider, requested_model = (split_pi_model(args.model, args.provider)
                                            if engine_name == "pi" else (args.provider, args.model))
+    if cli_fallback_raw is not None and getattr(args, "enable_steering", False):
+        if parse_fallback_models(cli_fallback_raw):
+            raise ValueError("steering cannot be combined with --fallback-models")
+    if no_fallback:
+        fallback_models = []
+    elif cli_fallback_raw is not None:
+        fallback_models = parse_fallback_models(cli_fallback_raw)
+    elif args.action != "open" or engine_name == "agy":
+        config_fallbacks = parse_fallback_models(policy.get("fallback_models"))
+        default_provider = config.pi_default_provider() if engine_name == "pi" else None
+        if config_fallbacks and getattr(args, "enable_steering", False):
+            fallback_models = []
+            print("claive: note: config fallback_models suppressed because --enable-steering is active",
+                  file=sys.stderr)
+        elif config_fallbacks and requested_provider and default_provider and requested_provider != default_provider:
+            same_provider = [
+                m for m in config_fallbacks
+                if "/" in m and m.split("/", 1)[0] == requested_provider
+            ]
+            fallback_models = same_provider
+            if len(same_provider) < len(config_fallbacks):
+                print(
+                    f"claive: note: config fallback_models suppressed because --provider {requested_provider} "
+                    f"overrides default_provider {default_provider}",
+                    file=sys.stderr,
+                )
+        else:
+            fallback_models = config_fallbacks
+    else:
+        fallback_models = []
     effective_model = (requested_model or (role_def.get("model") if role_def else None)
                        or policy.get("default_model") or getattr(engine, "default_model", None))
     effort = (args.reasoning_effort or (role_def.get("reasoning_effort") if role_def else None)
@@ -2026,6 +2594,11 @@ def _create_job(args):
     check_model_policy(effective_model)
     isolation = dict(mode="create" if args.worktree else "existing" if args.worktree_existing else "none",
                      base=args.worktree_base, existing_path=args.worktree_existing)
+    carry_dirty = bool(getattr(args, "carry_dirty", False))
+    if carry_dirty and isolation["mode"] != "create":
+        raise ValueError("--carry-dirty requires --worktree")
+    if carry_dirty:
+        isolation["carry_dirty"] = True
     worktree_setup = getattr(args, "worktree_setup", None)
     if worktree_setup is not None and isolation["mode"] != "create":
         raise ValueError("--worktree-setup requires --worktree")
@@ -2124,7 +2697,7 @@ def _create_job(args):
     if ownership is not None or check_manifest:
         if root().resolve().is_relative_to(Path(args.worktree_existing or str(workspace)).resolve()):
             raise ValueError("ownership/check contracts require CLAIVE_DIR outside the workspace")
-        acceptance.snapshot(args.worktree_existing or str(workspace))
+        acceptance.validate_workspace(args.worktree_existing or str(workspace))
     job_id = uuid.uuid4().hex[:12]
     path = root() / job_id
     path.mkdir(mode=0o700)
@@ -2134,7 +2707,7 @@ def _create_job(args):
             prompt = path / "prompt-input.md"
             prompt.write_text(prompt_text, encoding="utf-8")
         launch = engine.prepare_isolation(launch, str(workspace), str(path))
-        if isolation["mode"] == "create":
+        if isolation["mode"] == "create" and not carry_dirty:
             warn_dirty_worktree(workspace, launch["isolation"])
     except BaseException:
         discard_job(path, launch, _locked=True)
@@ -2174,12 +2747,16 @@ def _create_job(args):
             state["config_overrides"] = config.overrides()
         state["read_mode"] = launch["read_mode"]
         state["acceptance_contract"] = {"checks": check_manifest}
+        if getattr(args, "verify_in_worktree", False):
+            state["acceptance_contract"]["verify_in_worktree"] = True
         if getattr(args, "fit_checked", False):
             state["fit_checked"] = True
         if ownership is not None:
             state["acceptance_contract"]["owned_paths"] = ownership
         if turn_timeout is not None:
             state["turn_timeout"] = turn_timeout
+        if tool_idle_timeout > 0:
+            state["tool_idle_timeout"] = tool_idle_timeout
         state.update(stall_timeout=stall_timeout, idle_ttl=idle_ttl, turn_grace=turn_grace)
         if report_contract:
             state["report_contract"] = True
@@ -2223,7 +2800,7 @@ def discard_job(path, launch, _locked=False):
             except (OSError, ValueError, subprocess.SubprocessError) as failure:
                 error = str(failure)
             if error is None:
-                error = remove_worktree(isolation, force=False)
+                error = remove_worktree(isolation, force=bool(isolation.get("carried_dirty")))
         if error is not None:
             if not (path / "state.json").exists():
                 save(path / "state.json", dict(schema_version=SCHEMA_VERSION, id=path.name,
@@ -3152,8 +3729,12 @@ def parser():
         isolation = launch.add_mutually_exclusive_group()
         isolation.add_argument("--worktree", action="store_true")
         isolation.add_argument("--worktree-existing", help="resume a lane in its existing absolute worktree path")
+        launch.add_argument("--carry-dirty", action="store_true",
+                            help="copy uncommitted changes (staged, unstaged, untracked, deletions) into --worktree at HEAD")
         launch.add_argument("--worktree-base")
         launch.add_argument("--worktree-setup", help="shell command run once in a new worktree")
+        launch.add_argument("--verify-in-worktree", action="store_true",
+                            help="run verification checks directly in the worktree (fails on mutations)")
         launch.add_argument("--web", action="store_true", help="compatibility flag; web is always on for Claude, Codex and Muse; Pi refuses it")
         launch.add_argument("--model")
         launch.add_argument("--set", action="append", default=[], dest="overrides", metavar="YAML",
@@ -3169,11 +3750,15 @@ def parser():
         launch.add_argument("--mission", help="link the new worker to a mission")
         launch.add_argument("--turn-timeout", "--turn-budget",
                             help="fail a turn that runs longer than SECONDS (positive number)")
+        launch.add_argument("--tool-idle-timeout",
+                            help="kill silent active tool child processes after SECONDS without output (default 0; disables)")
         launch.add_argument("--stall-timeout", help="stream inactivity limit in seconds (default 180; 0 disables)")
         launch.add_argument("--turn-grace", help="extra wrap-up seconds after the turn budget (default 0)")
         launch.add_argument("--idle-ttl", help="close idle reusable supervisors after SECONDS (default 7200; 0 disables)")
         launch.add_argument("--fallback-models",
                             help="comma-separated fallback models for run/start, and reusable AGY open workers")
+        launch.add_argument("--no-fallback", action="store_true",
+                            help="disable configured fallback_models for this worker")
         if action == "open":
             launch.add_argument("--detach", action="store_true", help="run the reusable loop in the background")
     fork = commands.add_parser("fork", help="start an independent reusable worker from an idle session")
@@ -3292,6 +3877,16 @@ def parser():
     message.add_argument("--message-file")
     steer.add_argument("--wait", type=float, default=0, help="wait up to SECONDS for a provider acknowledgement")
     steer.add_argument("--json", action="store_true")
+    interrupt_tool = commands.add_parser("interrupt-tool", help="kill only active hung tool child processes of a running worker")
+    interrupt_tool.add_argument("id")
+    it_msg = interrupt_tool.add_mutually_exclusive_group()
+    it_msg.add_argument("-m", "--message")
+    it_msg.add_argument("--message-file")
+    it_wait = interrupt_tool.add_mutually_exclusive_group()
+    it_wait.add_argument("--wait", dest="wait", action="store_true", default=True)
+    it_wait.add_argument("--no-wait", dest="wait", action="store_false")
+    interrupt_tool.add_argument("--timeout", type=float, default=10.0)
+    interrupt_tool.add_argument("--json", action="store_true")
     handoff = commands.add_parser("handoff", help="ask a running Claude budget worker for a handoff and a fresh session now")
     handoff.add_argument("id")
     handoff.add_argument("--note", help="text the worker must keep in the handoff")
@@ -3300,12 +3895,17 @@ def parser():
     runtime_cmd = commands.add_parser("runtime", help="report runtime provenance, drift and installed smoke checks")
     runtime_cmd.add_argument("--source-dir", help="source checkout to compare against this runtime")
     runtime_cmd.add_argument("--json", action="store_true")
+    mcp_cmd = commands.add_parser("mcp", help="run or check the flat-schema MCP stdio server")
+    mcp_cmd.add_argument("--check", action="store_true", help="validate flat tool schemas and print registered tools")
+    mcp_cmd.add_argument("--json", action="store_true")
     verifying = commands.add_parser("verify", help="independently verify a settled turn in scratch storage")
     verifying.add_argument("id")
     verifying.add_argument("--check")
     verifying.add_argument("--status", choices=sorted(acceptance.OUTCOMES))
     verifying.add_argument("--reason")
     verifying.add_argument("--environment")
+    verifying.add_argument("--verify-in-worktree", dest="in_worktree", action="store_true", default=None,
+                           help="run checks directly in the worktree (fails on mutations)")
     decision = commands.add_parser("accept", help="record parent acceptance; never implied by worker completion")
     decision.add_argument("id")
     decision.add_argument("--reject", action="store_true")
@@ -3328,6 +3928,11 @@ def parser():
     worktree_clean.add_argument("--dry-run", action="store_true")
     worktree_clean.add_argument("--discard-changed", action="store_true")
     worktree_clean.add_argument("--json", action="store_true")
+    worktree_apply = worktree_sub.add_parser("apply", help="apply settled worker edits from its worktree back into source")
+    worktree_apply.add_argument("id")
+    worktree_apply.add_argument("--dry-run", action="store_true")
+    worktree_apply.add_argument("--force", action="store_true")
+    worktree_apply.add_argument("--json", action="store_true")
     prune = commands.add_parser("prune", help="remove old interrupted workers")
     prune_mode = prune.add_mutually_exclusive_group(required=True)
     prune_mode.add_argument("--interrupted", action="store_true")
@@ -3544,8 +4149,10 @@ def main(launcher=None):
         args.id = job_path(args.id).name
     # Resolve once per command so a concurrent rebind cannot redirect later reads
     # or writes in the same operation. Persisted links and output keep canonical IDs.
-    worker_actions = {"show", "logs", "cancel", "close", "usage", "followup", "effort", "answer", "verify", "accept", "scope", "steer", "send", "peek", "ask", "schedule", "fork", "handoff"}
+    worker_actions = {"show", "logs", "cancel", "close", "usage", "followup", "effort", "answer", "verify", "accept", "scope", "steer", "interrupt-tool", "send", "peek", "ask", "schedule", "fork", "handoff"}
     if args.action in worker_actions and args.id and (args.id.startswith("@") or not re.fullmatch(r"[0-9a-f]{12}", args.id)):
+        args.id = job_path(args.id).name
+    elif args.action == "worktree" and getattr(args, "worktree_action", None) == "apply" and args.id:
         args.id = job_path(args.id).name
     elif args.action == "wait":
         args.id = [job_path(value).name if value.startswith("@") or not re.fullmatch(r"[0-9a-f]{12}", value)
@@ -3669,7 +4276,8 @@ def main(launcher=None):
         return 0
     elif args.action == "worktree":
         return worktree_command(args.worktree_action, getattr(args, "older_than", "24h"),
-                                getattr(args, "dry_run", False), getattr(args, "discard_changed", False), args.json)
+                                getattr(args, "dry_run", False), getattr(args, "discard_changed", False), args.json,
+                                job_id=getattr(args, "id", None), force=getattr(args, "force", False))
     elif args.action == "prune":
         if args.idle_older_than:
             from claivelib import idle_sessions
@@ -3750,6 +4358,57 @@ def main(launcher=None):
         if not 0 <= args.wait <= 3600:
             raise ValueError("--wait must be between 0 and 3600 seconds")
         return _report_steer(path, steering.submit(path, message), args)
+    elif args.action == "interrupt-tool":
+        check_nested()
+        path = job_path(args.id)
+        state = load(path)
+        if state["status"] != "running" or state.get("terminal") or not state.get("worker_pid"):
+            raise ValueError("interrupt-tool requires an actively running worker")
+        if args.message_file:
+            filename = Path(args.message_file)
+            if not filename.is_absolute() or not filename.is_file():
+                raise ValueError("--message-file must be an existing absolute file")
+            message = filename.read_text(encoding="utf-8")
+        else:
+            message = args.message
+        if message is not None and not launch_config(state).get("steering"):
+            raise ValueError("worker was not launched with --enable-steering; --message requires steering")
+        if not 0 <= args.timeout <= 3600:
+            raise ValueError("--timeout must be between 0 and 3600 seconds")
+        req_id = uuid.uuid4().hex
+        req_dir = path / "interrupt-tool" / "requests"
+        req_dir.mkdir(parents=True, exist_ok=True)
+        save(req_dir / f"{time.time_ns():020}-{req_id}.json",
+             {"id": req_id, "message": message, "requested_at": time.time()})
+        receipt_path = path / "interrupt-tool" / "receipts" / f"{req_id}.json"
+        receipt = None
+        if args.wait:
+            deadline = time.monotonic() + args.timeout
+            while time.monotonic() < deadline:
+                if receipt_path.is_file():
+                    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                    break
+                cur = load(path)
+                if cur["status"] != "running" or cur.get("terminal"):
+                    break
+                time.sleep(0.05)
+        payload = receipt if receipt is not None else {
+            "id": req_id,
+            "status": "pending" if args.wait else "queued",
+            "killed_pids": [],
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        elif receipt is not None:
+            killed = receipt.get("killed_pids") or []
+            print(f"Interrupted tool children for {args.id}: {killed or 'none active'}"
+                  + (" (steered)" if receipt.get("steered") else ""))
+        else:
+            print(f"interrupt-tool request {req_id} {payload['status']} for {args.id}")
+        return 0
+    elif args.action == "mcp":
+        from claivelib import mcp_server
+        return mcp_server.main_from_args(check=args.check, json_output=args.json)
     elif args.action == "handoff":
         check_nested()
         path = job_path(args.id)
@@ -3870,7 +4529,8 @@ def main(launcher=None):
         path = job_path(args.id)
         state = load(path)
         if args.action == "verify":
-            value = acceptance.verify(path, state, args.check, args.status, args.reason, args.environment)
+            value = acceptance.verify(path, state, args.check, args.status, args.reason, args.environment,
+                                      in_worktree=args.in_worktree)
             print(json.dumps(value, indent=2))
             return 0 if value["status"] == "passed" else 2
         if args.action == "scope":
@@ -3896,8 +4556,10 @@ def main(launcher=None):
             print(f"Session usage: {len(usage['aggregates'])} attempt aggregates | model calls unknown | "
                   f"{total.get('input_tokens', 'unknown')} input | {total.get('output_tokens', 'unknown')} output")
             turn = usage["turn"]
+            cache_suffix = (f" | {turn['native_cache_read_tokens']} cache_read"
+                            if "native_cache_read_tokens" in turn else "")
             print(f"Turn {turn['index']}: {turn.get('input_tokens', 'unknown')} input | "
-                  f"{turn.get('output_tokens', 'unknown')} output | "
+                  f"{turn.get('output_tokens', 'unknown')} output{cache_suffix} | "
                   f"{'complete' if turn['complete'] else 'incomplete'} usage; cache ratio unknown")
             if not usage["usage_complete"]:
                 print("Session totals are incomplete; missing usage is unknown.")
@@ -4026,7 +4688,7 @@ def main(launcher=None):
         if state["status"] == "interrupted":
             worker = state.get("worker_pid")
             if worker and identity(worker) == state.get("worker_identity"):
-                os.killpg(worker, signal.SIGKILL)
+                procgroup.terminate_tree(worker, grace=0.2, cgroup_dir=state.get("worker_cgroup"))
                 state.update(status="cancelled", ended_at=time.time(), phase="cancelled",
                              error="orphaned worker stopped after supervisor interruption")
                 save(path / "state.json", state)
@@ -4060,6 +4722,7 @@ def main(launcher=None):
                     break
         if not pid or identity(pid) != state.get("supervisor_identity"):
             raise ValueError("no matching live supervisor; no signal sent")
+        save(path / "cancel.request", {"requested_at": time.time()})
         os.kill(pid, signal.SIGTERM)
         print(f"Cancellation requested for {args.id}. Check with claive wait {args.id}.")
     elif args.action == "engines":

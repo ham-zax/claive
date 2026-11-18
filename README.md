@@ -1,12 +1,12 @@
 # claive
 
-Harness-neutral coding-worker orchestration for Claude Code, Codex, and shell parents. The worker core handles supervision, reusable turns, state, cancellation, logs, and the terminal dashboard. Engine adapters support AGY, Pi, Codex, Claude, and Muse, subject to host policy. Run `claive engines` to see available engines, models, and efforts. Engine availability and defaults come from each host configuration. Commands: `claive` (worker manager), `claive-worker` (reusable-worker launcher), `claive-orch` (arbiter), and `claive-codex` (Codex with a worker dashboard).
+**What `claive` is:** a harness-neutral outer cloth that wraps existing coding harnesses (`pi`, `claude`, `codex`, `agy`, `muse`) and ties them together with a shared rope so **any parent harness can drive, steer, question, and connect any other harness as a subagent**—and let separate subagents talk to each other (`conversation`, `channel`, `send`). Each engine adapter (`bin/claivelib/engines/`) acts as a thin **hook** tailored to that harness's native CLI/protocol, while `claive` core supplies the shared **rope** across process lifecycles (`systemd-run --user --scope` + subreaper tree containment), isolated Git worktrees (`--worktree`, `--carry-dirty`, `worktree apply`), atomic zero-shell `<job>/status.json` snapshots, verification/acceptance contracts, and the flat-schema `claive-mcp` (`claive mcp`) stdio server.
 
-AGY is available with `--engine agy`. It defaults to `gemini-3.8-flash-high`.
-Select `gemini-3.8-flash-medium` or `gemini-3.8-flash-low` for another effort.
-The model suffix fixes the effort. Use `open --detach` and `followup` to resume.
-AGY supports managed worktrees and reports usage as attempt aggregates, with
-unknown model-call counts and cache ratios. Read-only requests use soft read.
+**What `claive` is not:** it is not a replacement runtime, nor does it strip tools, neuter permissions, or force harnesses into a lowest-common-denominator sandbox. Every harness runs with its full native tools, MCP servers, prompt caching, Skillshare skills, and instruction files (`GEMINI.md`, `CLAUDE.md`, `AGENTS.md`). Where harnesses differ in native capabilities (for example `--output-schema`, enforced read-only, or mid-turn `steer`), `claive` keeps each adapter faithful to its harness and adapts the hook rather than removing native power. Commands: `claive` (worker manager), `claive-mcp` (`claive mcp`, flat-schema MCP stdio server), `claive-worker` (reusable-worker launcher), `claive-orch` (arbiter), `claive-memcap` (memory/lock guard), and `claive-codex` (Codex with a worker dashboard).
+
+AGY is available with `--engine agy`. It defaults to `gemini-3.8-flash-high` and supports the AGY 1.5.10 catalog (`gemini-3.8-flash-{high,medium,low}`, `gemini-4-carbon-{high,medium,low}`, `gemini-4-argon-{high,medium,low}`, `gemini-4-hydrogen-{xhigh,high,medium,low}`, `gemini-pro-orchestrator`, `gemini-pro-orchestrator-argon`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking`, `gpt-oss-120b-medium`).
+Each model maps to its native effort. Use `open --detach` and `followup` to resume.
+AGY loads `~/.gemini/GEMINI.md`, hierarchical workspace `GEMINI.md` / `AGENTS.md` / `.agents/`, and Skillshare's `~/.agents/skills`, supports managed worktrees (`--worktree`, `--carry-dirty`), and reports usage as attempt aggregates alongside per-turn `native_cache_read_tokens`. Read-only requests use soft read.
 Use `--require-read-only` when native write prevention is required.
 See [AGY setup and limits](docs/agy-engine.md).
 
@@ -352,6 +352,8 @@ On an explicit Muse subscription-quota exhaustion, the manager records the failu
 | Path | Purpose |
 | --- | --- |
 | `bin/claive` | Thin Python launcher for the worker manager |
+| `bin/claive-mcp` | Flat-schema MCP stdio server (`claive mcp`) for zero-shell orchestration |
+| `bin/claive-memcap` | Resident-memory cap, subreaper/tree containment, and named lock (`--lock heavy`) |
 | `bin/claivelib/` | Generic worker core, compatibility layer, and engine adapters |
 | `bin/claive-worker` | Reusable worker launcher in a managed terminal |
 | `bin/claive-codex` | Codex with the tmux worker view |
@@ -475,3 +477,8 @@ shellcheck install.sh bin/claive-worker bin/claive-codex
 CI (`.github/workflows/test.yml`) runs the same checks on every push to main and every pull request.
 
 Checks cover pinned Muse defaults, structured/legacy state compatibility, the engine-neutral fixture lifecycle, reusable follow-ups, dynamic effort, closure/cancellation, cache-usage accounting, subscription-quota notices, terminal-event validation, malformed and failed results, process-group cancellation, concurrent jobs, stale process identities, installer isolation, private state files, and tmux with nondefault pane indices. A real Muse echo check characterizes linked-worktree creation and cleanup when Muse is installed; the tmux check requires tmux. These checks do not test live model authentication or model availability. Test workers and the temporary tmux server are stopped during cleanup.
+
+## Future improvements (deferred)
+
+- **AGY 1.5.10 hook upgrades:** wire AGY's native `--json-schema` (`--output-schema`) and `--input-format stream-json` live steering transport in `bin/claivelib/engines/agy.py`, and characterize whether `--sandbox` provides enforced workspace read-only mode so AGY reaches closer parity with Claude/Codex hooks.
+- **Zero hardcoded tool-name lists in `claive` core:** replace the heuristic `MUTATING_FILE_TOOLS` preview filter used for in-flight `status.json` `touched_files` with pure adapter-declared write hints or lightweight Git dirty-status checks, keeping `bin/claivelib/cli.py` 100% agnostic to engine tool names.

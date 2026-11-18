@@ -340,14 +340,20 @@ class PiEngine(WorkerEngine):
             tool_id = event.get("toolCallId")
             if isinstance(tool_id, str):
                 self._tool_calls[tool_id] = (event.get("toolName", "tool"), dict(args))
-            return [{"type": "tool_started", "native_kind": kind, "tool": event.get("toolName", "tool"),
-                     "tool_id": tool_id, "command": args.get("command")}]
+            out = {"type": "tool_started", "native_kind": kind, "tool": event.get("toolName", "tool"),
+                   "tool_id": tool_id, "command": args.get("command")}
+            if isinstance(args.get("path"), str) and args["path"]:
+                out["path"] = args["path"]
+            return [out]
         elif kind == "tool_execution_end":
             tool_id = event.get("toolCallId")
             tool, args = self._tool_calls.pop(tool_id, ("tool", {})) if isinstance(tool_id, str) else ("tool", {})
             end_args = event.get("args") if isinstance(event.get("args"), dict) else {}
             metadata = {"native_kind": kind, "tool": event.get("toolName", tool),
                         "tool_id": tool_id, "command": end_args.get("command", args.get("command"))}
+            path = end_args.get("path", args.get("path"))
+            if isinstance(path, str) and path:
+                metadata["path"] = path
             if event.get("isError"):
                 result = event.get("result") if isinstance(event.get("result"), dict) else {}
                 content = result.get("content")

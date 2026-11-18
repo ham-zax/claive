@@ -7,7 +7,11 @@ LARGE_BRIEF_BYTES = 4000
 
 
 def launch_notes(state, prompt_bytes=0):
+    from claivelib import runtime
     notes = []
+    drift_note = runtime.quick_drift_note()
+    if drift_note:
+        notes.append(drift_note)
     if not state.get("fit_checked") and not (state.get("acceptance_contract") or {}).get("checks"):
         notes.append("Fit: no --checks-file. Delegate when an executable check exists and a wrong first "
                      "attempt is costly; small or tightly coupled work is faster inline.")

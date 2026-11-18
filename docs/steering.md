@@ -85,9 +85,14 @@ or withdraw a sent instruction. Rejected, not_delivered, and unconfirmed receipt
 Existing retained launches keep their recorded transport. New Pi writers use RPC
 by default; `--disable-steering` selects JSON print mode. Pi readers can opt in with
 `--enable-steering`. `followup` still queues a separate turn; `cancel`
-still stops the worker process group. Steering and single-turn model fallbacks
-cannot be combined: configured fallbacks disable automatic steering, and an explicit
-`--enable-steering` with fallbacks is rejected. All other launch policy (model, tools, read-only settings,
+stops the entire worker process tree and cgroup scope. When a running worker is
+stuck inside a silent `bash` or test subprocess, `claive interrupt-tool ID [--message ...]`
+(or `--tool-idle-timeout SECONDS` at launch) kills only the transient tool child
+processes while keeping the worker and MCP/bridge helpers alive so the model can
+recover and emit its `claive-report`. Steering and explicit single-turn `--fallback-models`
+cannot be combined, whereas configured `engines.<name>.fallback_models` are
+automatically suppressed with a stderr note when `--enable-steering` or a
+non-default `--provider` is passed (or disable fallbacks explicitly with `--no-fallback`). All other launch policy (model, tools, read-only settings,
 extensions, provider overlays, session retention) is preserved.
 
 The current Muse `exec` adapter explicitly rejects

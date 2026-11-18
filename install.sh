@@ -35,11 +35,11 @@ fi
 
 sources=("$source_dir/bin/claive" "$source_dir/bin/claive-worker"
          "$source_dir/bin/claive-codex" "$source_dir/bin/claive-orch"
-         "$source_dir/bin/claive-memcap")
+         "$source_dir/bin/claive-memcap" "$source_dir/bin/claive-mcp")
 targets=("$bin_dir/claive" "$bin_dir/claive-worker"
          "$bin_dir/claive-codex" "$bin_dir/claive-orch"
-         "$bin_dir/claive-memcap")
-modes=(755 755 755 755 755)
+         "$bin_dir/claive-memcap" "$bin_dir/claive-mcp")
+modes=(755 755 755 755 755 755)
 # --runtime-only syncs the package, launchers, and provenance, and skips every
 # skill check and write: Skillshare owns skill destinations, so a divergent or
 # broken managed skill link must not block a runtime repair.
@@ -64,10 +64,10 @@ for skill in "${shared_skills[@]}"; do
 done
 fi
 
-# Migrate only links to this checkout's own five launchers. Preserve unrelated
+# Migrate only links to this checkout's own six launchers. Preserve unrelated
 # links and all Skillshare-owned skill links; never install through a symlink.
 project_launcher_link() {
-  [[ $1 -lt 5 && -L $3 ]] &&
+  [[ $1 -lt 6 && -L $3 ]] &&
     [[ "$(readlink -f -- "$3")" == "$(readlink -f -- "$2")" ]]
 }
 

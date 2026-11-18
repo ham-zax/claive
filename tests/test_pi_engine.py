@@ -436,6 +436,60 @@ class PiChecks(unittest.TestCase):
         self.assertIsNone(cli.identity(state["worker_pid"]))
         self.assertIsNone(cli.identity(child))
 
+    def test_fallback_suppression_with_no_fallback_steering_and_provider(self):
+        override = json.dumps({
+            "engines": {
+                "pi": {
+                    "default_provider": "opencode2api",
+                    "fallback_models": ["opencode2api/deepseek-v4.1-flash-free", "mistral/devstral"],
+                    "providers": {
+                        "opencode2api": {"enabled": True},
+                        "mistral": {"enabled": True},
+                        "kimi": {"enabled": True},
+                    },
+                }
+            }
+        })
+        # 1. --no-fallback suppresses config fallback_models.
+        res_nf = self.command(
+            "run", "--engine", "pi", "--workspace", str(self.workspace),
+            "--prompt-file", str(self.prompt), "--set", override, "--no-fallback",
+        )
+        self.assertEqual(res_nf.returncode, 0, res_nf.stderr)
+        job_nf = re.search(r"Worker ([0-9a-f]{12})", res_nf.stdout).group(1)
+        self.assertEqual(self.state(job_nf)["fallback_models"], [])
+
+        # 2. --enable-steering auto-suppresses config fallback_models instead of failing.
+        res_st = self.command(
+            "run", "--engine", "pi", "--workspace", str(self.workspace),
+            "--prompt-file", str(self.prompt), "--set", override, "--enable-steering",
+        )
+        self.assertEqual(res_st.returncode, 0, res_st.stderr)
+        self.assertIn("config fallback_models suppressed because --enable-steering is active", res_st.stderr)
+        job_st = re.search(r"Worker ([0-9a-f]{12})", res_st.stdout).group(1)
+        self.assertEqual(self.state(job_st)["fallback_models"], [])
+
+        # 3. --provider overriding default_provider filters/suppresses cross-provider config fallbacks.
+        res_pv = self.command(
+            "run", "--engine", "pi", "--workspace", str(self.workspace),
+            "--prompt-file", str(self.prompt), "--set", override,
+            "--provider", "kimi", "--model", "kimi-k2", "--allow-model", "kimi-k2",
+        )
+        self.assertEqual(res_pv.returncode, 0, res_pv.stderr)
+        self.assertIn("overrides default_provider opencode2api", res_pv.stderr)
+        job_pv = re.search(r"Worker ([0-9a-f]{12})", res_pv.stdout).group(1)
+        self.assertEqual(self.state(job_pv)["fallback_models"], [])
+
+        # 4. Explicit --fallback-models + --enable-steering is still rejected.
+        res_bad = self.command(
+            "run", "--engine", "pi", "--workspace", str(self.workspace),
+            "--prompt-file", str(self.prompt),
+            "--fallback-models", "opencode2api/deepseek-v4.1-flash-free",
+            "--enable-steering",
+        )
+        self.assertNotEqual(res_bad.returncode, 0)
+        self.assertIn("steering cannot be combined with --fallback-models", res_bad.stderr)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

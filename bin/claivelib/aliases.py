@@ -40,11 +40,28 @@ def resolve(reference):
     return worker
 
 
+def _refresh_worker_status(worker_id):
+    if not worker_id:
+        return
+    try:
+        import json
+        from claivelib import cli, status_file
+        job_dir = cli.root() / worker_id
+        state_path = job_dir / "state.json"
+        if state_path.is_file():
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            if isinstance(state, dict) and "id" in state and "status" in state:
+                status_file.write(job_dir, state)
+    except Exception:
+        pass
+
+
 def update(name, worker=None, replace=False, output=None):
     from claivelib import cli
     validate_name(name)
     # Resolve before taking the lock, and store only a canonical worker ID.
     target = cli.job_path(worker).name if worker is not None else None
+    previous = None
     path = cli.root() / "aliases.json"
     fd = os.open(path.with_suffix(".lock"), os.O_WRONLY | os.O_CREAT, 0o600)
     with os.fdopen(fd, "w") as lock:
@@ -55,13 +72,16 @@ def update(name, worker=None, replace=False, output=None):
         if target is None:
             if name not in data:
                 raise ValueError(f"unknown worker alias: @{name}")
-            del data[name]
+            previous = data.pop(name)
         else:
             existing = data.get(name)
             if existing and existing != target and not replace:
                 raise ValueError(f"@{name} already names worker {existing}; use --replace to rebind it")
+            previous = existing if existing != target else None
             data[name] = target
         cli.save(path, data)
+    _refresh_worker_status(previous)
+    _refresh_worker_status(target)
     print(f"@{name} -> {target}" if target else f"Removed worker alias @{name}", file=output or sys.stdout)
     return 0
 
@@ -105,8 +125,10 @@ def assign(base, worker, suffix=True):
         while name in data:
             number += 1
             name = f"{base}-{number}"
-        data[name] = cli.job_path(worker).name
+        target_id = cli.job_path(worker).name
+        data[name] = target_id
         cli.save(path, data)
+    _refresh_worker_status(target_id)
     return name
 
 

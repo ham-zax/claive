@@ -374,21 +374,36 @@ exit code, environment, and `passed`, `failed`, or `blocked` outcomes.
 For pytest checks, add `"pytest":{"min_passed":1,"max_skipped":0}` to require
 a real passing summary and reject silent skips even when pytest exits zero.
 Verifier scratch copies omit dependency/cache/build directories, reject symlinks
-that escape the copy, and capture bounded output tails. Checks requiring Git
-metadata must use an explicit external verification environment, since scratch
-copies do not include `.git`. The initial
+that escape the copy, and capture bounded output tails. For Node/TS/pnpm or
+Git-dependent checks (`node_modules`, `dist`, `.venv`, `.git`), pass
+`--verify-in-worktree` (at launch, on `claive verify ID --verify-in-worktree`, or
+`"in_worktree": true` per check in a manifest): claive snapshots the worktree
+before and after running the check in place, cleans transient tool caches
+(`__pycache__`, `.pytest_cache`, `.vitest`, `.turbo`), and fails the check if
+tracked or untracked workspace files were mutated. The initial
 state and checks not executed are `not_run`. The Git workspace snapshot includes
 tracked files, deletions, and all untracked files, including ignored build output.
 It compares content against the dirty baseline rather than trusting a file list
 in the worker's report. Ownership validation is retrospective; use isolated
-worktrees for writers. Muse and Codex provide native read-only restrictions.
+worktrees for writers. When the parent checkout already has uncommitted edits,
+pass `--worktree --carry-dirty` to mirror staged, unstaged, untracked, and deleted
+paths into the new worktree at `HEAD` without committing, then integrate finished
+worker edits selectively with `claive worktree apply ID [--dry-run] [--force] [--json]`
+(pre-flight conflict-checked against concurrent parent edits). Muse and Codex provide native read-only restrictions.
 Pi requests read-only behavior from the model and supplies no enforcement.
 Concurrent writers with declared ownership must use separate worktrees.
 Managed worktrees with a verification/ownership contract are retained for the
 parent to verify and integrate; cleanup skips them while acceptance is pending.
-All engines accept `--worktree` and `--worktree-setup`. The latter runs once
-under the heavy lock. Use `claive worktree list` and `claive worktree clean
---dry-run` to inspect logged trees. Use `claive prune --interrupted` to remove
+All engines accept `--worktree`, `--carry-dirty`, and `--worktree-setup`. The latter runs once
+under the heavy lock. Each worker executes inside its own transient systemd user
+scope (`systemd-run --user --scope`, when available) plus subreaper process-tree
+tracking so `claive cancel` and `--turn-timeout` terminate detached grandchildren
+and release `claive-memcap --lock heavy` cleanly. Every job directory also writes an
+atomic `<job>/status.json` projection for zero-shell `read_file` inspection, and
+`claive-mcp` (`claive mcp`) exposes flat-schema MCP stdio tools (`claive_start`,
+`claive_peek`, `claive_steer`, `claive_wait`, `claive_cancel`, `claive_verify`,
+`claive_list`). Use `claive worktree list`, `claive worktree apply ID`, and `claive worktree clean
+--dry-run` to inspect or integrate logged trees. Use `claive prune --interrupted` to remove
 old interrupted jobs after their worktrees are cleared.
 
 ```sh

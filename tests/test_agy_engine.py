@@ -434,5 +434,54 @@ class AgyChecks(unittest.TestCase):
         self.assertEqual(list(self.registry.glob("*/state.json")), [])
 
 
+    def test_agy_1_5_10_catalog_tool_metadata_and_cache_display(self):
+        for model, expected_effort in (
+            ("gemini-4-carbon-high", "high"),
+            ("gemini-4-carbon-medium", "medium"),
+            ("gemini-4-argon-high", "high"),
+            ("gemini-4-hydrogen-xhigh", "xhigh"),
+            ("gemini-pro-orchestrator", "high"),
+            ("claude-sonnet-4-6", "high"),
+            ("gpt-oss-120b-medium", "medium"),
+        ):
+            self.assertEqual(self.engine.default_effort_for(model), expected_effort)
+            cmd = self.engine.build_command(self.request(model=model, reasoning_effort=expected_effort))
+            self.assertEqual(cmd[cmd.index("--model") + 1], model)
+
+        read_ev = self.engine.normalize_event({
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": "c1", "step_index": 2, "state": "ACTIVE",
+                "step_type": "tool", "tool_name": "read_file",
+                "tool_info": {"name": "read_file", "parameters": {"Path": "/repo/a.py"}},
+            },
+        })
+        write_ev = self.engine.normalize_event({
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": "c1", "step_index": 3, "state": "ACTIVE",
+                "step_type": "tool", "tool_name": "write_file",
+                "tool_info": {"name": "write_file", "parameters": {"Path": "/repo/b.py"}},
+            },
+        })
+        state = dict(id="abcdef012345", status="running", workspace="/repo", steps=0, turn=1)
+        cli.event_update(state, read_ev[0])
+        cli.event_update(state, read_ev[1])
+        self.assertEqual(state["last_tool"], {"tool": "read_file", "detail": "/repo/a.py", "status": "running"})
+        self.assertEqual(state.get("touched_files", []), [])
+        cli.event_update(state, write_ev[1])
+        self.assertEqual(state.get("touched_files"), ["b.py"])
+
+        record_cumulative(
+            state,
+            {"conversation_id": "c1", "usage": {
+                "input_tokens": 19302, "output_tokens": 22, "thinking_tokens": 0,
+                "cache_read_tokens": 8124, "total_tokens": 19324,
+            }},
+        )
+        usage = aggregate_usage(state)
+        self.assertEqual(usage["turn"]["native_cache_read_tokens"], 8124)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

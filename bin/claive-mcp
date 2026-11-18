@@ -1,0 +1,10 @@
+#!/usr/bin/python3
+"""Launch the flat-schema claive MCP stdio server from its installed package."""
+from pathlib import Path
+import sys
+
+from claivelib.mcp_server import entrypoint
+
+
+if __name__ == "__main__":
+    sys.exit(entrypoint(Path(__file__).resolve()))

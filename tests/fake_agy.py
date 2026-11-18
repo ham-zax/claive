@@ -79,6 +79,7 @@ def main():
     parser.add_argument("--output-format", choices=("json", "stream-json"), default="stream-json")
     parser.add_argument("--conversation")
     parser.add_argument("--model")
+    parser.add_argument("--json-schema")
     parser.add_argument("--dangerously-skip-permissions", action="store_true")
     parser.add_argument("-p", "--print", dest="prompt")
     parser.add_argument("command", nargs="?", choices=("models",))

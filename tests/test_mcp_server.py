@@ -60,7 +60,8 @@ class McpServerTests(unittest.TestCase):
         self.assertEqual(
             names,
             ["claive_start", "claive_peek", "claive_steer", "claive_wait",
-             "claive_cancel", "claive_verify", "claive_list"],
+             "claive_cancel", "claive_verify", "claive_list",
+             "claive_followup", "claive_apply", "claive_close"],
         )
         serialized = json.dumps(mcp_server.TOOL_DEFINITIONS)
         for forbidden in mcp_server.FORBIDDEN_SCHEMA_KEYS:
@@ -126,7 +127,7 @@ class McpServerTests(unittest.TestCase):
             proc.stdin.flush()
 
             tools_resp = send_lsp({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-            self.assertEqual(len(tools_resp["result"]["tools"]), 7)
+            self.assertEqual(len(tools_resp["result"]["tools"]), 10)
 
             start_resp = send_ndjson({
                 "jsonrpc": "2.0",

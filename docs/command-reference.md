@@ -1491,6 +1491,62 @@ Exit codes: 0 on success. Common errors apply.
 
 Example: `claive answer @backend --message 'Use design B.'`.
 
+## `park`
+
+Mark or unmark a worker as intentionally parked (exempt from `Stop`-hook orphan blocking and eligible for `on: ["parked"]` notification sinks).
+
+```text
+claive park [--unpark] [--reason REASON] [--json] id
+```
+
+| Option | Meaning |
+|---|---|
+| `--unpark` | Clear parked flag |
+| `--reason` | Optional reason note |
+| `--json` | Print JSON |
+
+Exit codes: 0 on success. Common errors apply.
+
+Example: `claive park @overnight-build --reason 'Handing off to user'`.
+
+## `hook`
+
+Zero-LLM lifecycle hooks for parent harnesses (`pre-turn`, `post-tool`, `stop`, `status`).
+
+```text
+claive hook (pre-turn | post-tool | stop | status) [--session SESSION] [--harness generic|claude|agy|codex|pi|opencode] [--mode block|warn] [--peek] [--all-sessions] [--json]
+```
+
+| Option | Meaning |
+|---|---|
+| `--session`, `--parent-session` | Parent session token (auto-detected from harness env or hook stdin JSON when omitted) |
+| `--harness` | Parent harness kind (auto-detected when omitted) |
+| `--mode` | `block` (exit 2) or `warn` (exit 0) for `stop` hook |
+| `--peek` | Do not advance inbox cursor on `pre-turn` / `post-tool` |
+| `--all-sessions` | Inspect active workers across all parent sessions |
+| `--json` | Print JSON |
+
+Exit codes: 0 on approve/ok, 2 when `stop` blocks in `block` mode.
+
+Example: `claive hook stop --harness agy`.
+
+## `notifications`
+
+Inspect recent push notification delivery receipts (`$CLAIVE_DIR/notifications/receipts.jsonl`).
+
+```text
+claive notifications [--limit LIMIT] [--json]
+```
+
+| Option | Meaning |
+|---|---|
+| `--limit` | Maximum newest receipts to return (default 50) |
+| `--json` | Print JSON |
+
+Exit codes: 0 on success.
+
+Example: `claive notifications --limit 20 --json`.
+
 ## `tmux`
 
 Open Codex above a worker pane in a separate tmux session.

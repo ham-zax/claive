@@ -136,9 +136,13 @@ def _finish(path, state, status, code, error=None):
     cli.save(path / "state.json", state)
     from claivelib import inbox
     try:
-        inbox.append(dict(type="conversation", seq=time.time_ns(), at=inbox._now_iso(),
-                          id=state["id"], label="agent conversation", status=status,
-                          code=code, needs_parent=state.get("needs_parent")))
+        ev = dict(type="conversation", seq=0, at=inbox._now_iso(),
+                  id=state["id"], label="agent conversation", status=status,
+                  code=code, needs_parent=state.get("needs_parent"),
+                  mission=state.get("mission"))
+        if state.get("parent_session"):
+            ev["parent_session"] = state["parent_session"]
+        inbox.append(ev)
     except Exception:
         pass
 
@@ -172,6 +176,10 @@ def _run(references, message, rounds, timeout, json_output, mission_id, claims):
                  participants=participants, rounds=rounds, timeout=timeout,
                  created_at=time.time(), runner_pid=os.getpid(), runner_identity=cli.identity(os.getpid()),
                  transcript=[], pending_request=None)
+    from claivelib import inbox as inbox_mod
+    parent_session = inbox_mod.resolve_parent_session()
+    if parent_session:
+        state["parent_session"] = parent_session
     if mission_id:
         state["mission"] = mission_id
     cli.save(path / "state.json", state)

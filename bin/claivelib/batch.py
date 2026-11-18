@@ -67,7 +67,8 @@ def _fail_batch(batch_id, state, error):
     save_state(batch_id, state)
     from claivelib import inbox as inbox_mod
     try:
-        inbox_mod.append(inbox_mod.batch_event(batch_id, state["label"], "failed", 1, state.get("mission")))
+        inbox_mod.append(inbox_mod.batch_event(batch_id, state["label"], "failed", 1,
+                                               state.get("mission"), parent_session=state.get("parent_session")))
     except Exception:
         pass
 
@@ -251,6 +252,8 @@ def _launch_stage(batch_id, lane_key, stage_key, resolved, workspace, prompt_fil
     state["batch_stage"] = f"{lane_key}.{stage_key}"
     if batch.get("mission"):
         state["mission"] = batch["mission"]
+    if batch.get("parent_session"):
+        state["parent_session"] = batch["parent_session"]
     isolation = dict(state.get("launch", {}).get("isolation") or {})
     if retain_worktree and isolation.get("owner") == "claive" and isolation.get("existing_path"):
         # The batch owns this worktree: later stages reuse it and the parent reviews it, so the
@@ -346,10 +349,11 @@ def cmd_validate(plan_path):
 def cmd_start(plan_path, json_output=False):
     cli_mod.check_nested()
     plan, _lanes, _stages = validate_plan(plan_path)
-    from claivelib import mission as mission_mod
+    from claivelib import inbox as inbox_mod, mission as mission_mod
     mission_id = plan.get("mission") or mission_mod.resolve_mission()
     if mission_id:
         mission_mod.require_open(mission_id)
+    parent_session = inbox_mod.resolve_parent_session()
     batch_id = uuid.uuid4().hex[:12]
     path = batches_dir() / batch_id
     path.mkdir(mode=0o700)
@@ -364,6 +368,8 @@ def cmd_start(plan_path, json_output=False):
                                           worker=None, code=None)
                                      for stage in lane["stages"]])
                         for lane in plan["lanes"]])
+    if parent_session:
+        state["parent_session"] = parent_session
     cli_mod.save(path / "state.json", state)
     if mission_id:
         mission_mod.link_auto(mission_id, "batch", batch_id)
@@ -496,7 +502,8 @@ def _finalize(batch_id, state, cancelled):
     from claivelib import inbox as inbox_mod
     try:
         inbox_mod.append(inbox_mod.batch_event(batch_id, state["label"], state["status"],
-                                               state["code"], state.get("mission")))
+                                               state["code"], state.get("mission"),
+                                               parent_session=state.get("parent_session")))
     except Exception:
         pass
     return state["code"]

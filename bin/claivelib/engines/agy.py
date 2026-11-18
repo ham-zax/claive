@@ -1,4 +1,5 @@
 """Antigravity print-mode adapter. Conversation state belongs to the supervisor."""
+import json
 import os
 from pathlib import Path
 import shutil
@@ -9,6 +10,33 @@ from claivelib.usage import aggregate_usage
 
 
 AGY_MODEL = "gemini-3.8-flash-high"
+AGY_MODEL_FAMILIES = {
+    "gemini-3.8-flash": {"high": "gemini-3.8-flash-high", "medium": "gemini-3.8-flash-medium", "low": "gemini-3.8-flash-low"},
+    "gemini-4-carbon": {"high": "gemini-4-carbon-high", "medium": "gemini-4-carbon-medium", "low": "gemini-4-carbon-low"},
+    "gemini-4-argon": {"high": "gemini-4-argon-high", "medium": "gemini-4-argon-medium", "low": "gemini-4-argon-low"},
+    "gemini-4-hydrogen": {"xhigh": "gemini-4-hydrogen-xhigh", "high": "gemini-4-hydrogen-high", "medium": "gemini-4-hydrogen-medium", "low": "gemini-4-hydrogen-low"},
+}
+AGY_FAMILY_DEFAULTS = {
+    "gemini-3.8-flash": "high",
+    "gemini-4-carbon": "high",
+    "gemini-4-argon": "high",
+    "gemini-4-hydrogen": "high",
+}
+
+
+def resolve_agy_model(model: str | None, reasoning_effort: str | None = None) -> str:
+    if model is None:
+        if reasoning_effort and reasoning_effort in AGY_MODEL_FAMILIES["gemini-3.8-flash"]:
+            return AGY_MODEL_FAMILIES["gemini-3.8-flash"][reasoning_effort]
+        return AGY_MODEL
+    if model in AGY_MODEL_FAMILIES:
+        eff = reasoning_effort or AGY_FAMILY_DEFAULTS[model]
+        if eff not in AGY_MODEL_FAMILIES[model]:
+            raise ValueError(
+                f"AGY model family {model} supports efforts {', '.join(AGY_MODEL_FAMILIES[model])}, not {eff}"
+            )
+        return AGY_MODEL_FAMILIES[model][eff]
+    return model
 AGY_MODELS = {
     "gemini-3.8-flash-high": ("high",),
     "gemini-3.8-flash-medium": ("medium",),
@@ -53,6 +81,8 @@ class AgyEngine(WorkerEngine):
     def default_effort_for(self, model):
         if model is None:
             model = AGY_MODEL
+        elif model in AGY_MODEL_FAMILIES:
+            model = resolve_agy_model(model)
         catalog = config.supported_models(self.name, self) or {}
         if model not in catalog:
             raise ValueError(f"unsupported AGY model: {model}; choose {', '.join(catalog)}")
@@ -70,9 +100,10 @@ class AgyEngine(WorkerEngine):
 
     def resolve_launch(self, **options):
         self.resolve_session_id(options.get("session_id"), options.get("session_logging", True))
+        model = resolve_agy_model(options.get("model") or None, options.get("reasoning_effort"))
         return dict(binary=config.engine_setting(self.name, "binary", default_binary()),
                     provider=options.get("provider") or config.engine_setting(self.name, "provider", "antigravity"),
-                    model=options.get("model") or AGY_MODEL,
+                    model=model,
                     read_only=bool(options.get("read_only")), web=bool(options.get("web")),
                     output_schema=options.get("output_schema"),
                     session_logging=options.get("session_logging", True),
@@ -84,13 +115,28 @@ class AgyEngine(WorkerEngine):
         if not binary.is_absolute() or not binary.is_file() or not os.access(binary, os.X_OK):
             raise ValueError("AGY binary must be an absolute executable file")
         self.default_effort_for(launch.get("model"))
+        if launch.get("output_schema"):
+            self._validate_schema(launch["output_schema"])
         self._unsupported(launch)
         self.validate_isolation(launch)
 
     @staticmethod
+    def _validate_schema(path):
+        schema = Path(str(path))
+        if not schema.is_absolute() or not schema.is_file():
+            raise ValueError("--output-schema must be an existing absolute file")
+        try:
+            loaded = json.loads(schema.read_text(encoding="utf-8"))
+        except ValueError as error:
+            raise ValueError(f"--output-schema must hold a JSON Schema object: {error}") from error
+        if not isinstance(loaded, dict):
+            raise ValueError("--output-schema must hold a JSON Schema object")
+        return str(schema)
+
+    @staticmethod
     def _unsupported(options):
-        for key, flag in (("web", "--web"), ("output_schema", "--output-schema"),
-                          ("steering", "--enable-steering"), ("max_model_steps", "--max-model-steps"),
+        for key, flag in (("web", "--web"), ("steering", "--enable-steering"),
+                          ("max_model_steps", "--max-model-steps"),
                           ("fork_session_id", "fork"), ("budget", "budget")):
             if options.get(key) is not None and options.get(key) is not False:
                 raise ValueError(f"AGY does not support {flag}")
@@ -100,9 +146,15 @@ class AgyEngine(WorkerEngine):
             raise ValueError("AGY does not support provider selection")
 
     def validate_turn(self, request):
-        effort = self.default_effort_for(request.model)
+        catalog = config.supported_models(self.name, self) or {}
+        model = AGY_MODEL if request.model is None else request.model
+        if model not in catalog:
+            raise ValueError(f"unsupported AGY model: {model}; choose {', '.join(catalog)}")
+        effort = catalog[model][0]
         if request.reasoning_effort is not None and request.reasoning_effort != effort:
             raise ValueError(f"AGY model {request.model} requires effort {effort}, not {request.reasoning_effort}")
+        if request.output_schema:
+            self._validate_schema(request.output_schema)
         self._unsupported(vars(request))
 
     def build_command(self, request):
@@ -114,6 +166,8 @@ class AgyEngine(WorkerEngine):
         command = [request.binary, "--output-format", "stream-json", "--model", request.model]
         if os.environ.get("CLAIVE_AGY_YOLO", "").lower() not in {"0", "false", "no", "off"}:
             command.append("--dangerously-skip-permissions")
+        if request.output_schema:
+            command += ["--json-schema", self._validate_schema(request.output_schema)]
         if request.session_id:
             command += ["--conversation", request.session_id]
         return command + ["-p", prompt]

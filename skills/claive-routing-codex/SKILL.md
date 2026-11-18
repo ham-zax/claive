@@ -20,7 +20,7 @@ Select an engine deliberately and follow the parent's current authorization poli
 
 | Engine | Runtime contract |
 | --- | --- |
-| `agy` | `--engine agy`; default `gemini-3.8-flash-high`, plus Gemini 4 Carbon/Argon/Hydrogen, Orchestrator, Claude 4.6, and GPT-OSS 120B (`claive models agy`). Soft read is not enforced. Loads `~/.gemini/GEMINI.md`, workspace `GEMINI.md`/`AGENTS.md`, and `~/.agents/skills`. Resume through followup (`native_cache_read_tokens` tracked per turn). No steering, fork, web, schema or step cap |
+| `agy` | `--engine agy`; default `gemini-3.8-flash-high`, plus Gemini 4 Carbon/Argon/Hydrogen, Orchestrator, Claude 4.6, and GPT-OSS 120B (`claive models agy`; accepts family stem + `--effort`, e.g. `--model gemini-4-hydrogen --effort high`). Soft read is not enforced. Loads `~/.gemini/GEMINI.md`, workspace `GEMINI.md`/`AGENTS.md`, and `~/.agents/skills`. Resume through followup (`native_cache_read_tokens` tracked per turn). No steering, fork, web, schema or step cap |
 | `muse` | Disabled on this host for now. When enabled, pinned to `muse-spark-1.3-contributor` |
 | `pi` | `--engine pi`; provider and model come from the config (`claive engines` shows both); models selected explicitly or inherited; managed worktrees supported; no `--web` or model-step cap |
 | `claude` | `--engine claude`; default `claude-haiku-5-5`; managed worktrees supported; no model-step cap; output schema and steering supported |
@@ -132,9 +132,9 @@ exec claive-worker \
   --reasoning-effort xhigh
 ```
 
-All engines support opt-in `--worktree`; `--worktree-base` selects a base commit, default `HEAD`. Uncommitted parent edits are not included. Claive creates `$CLAIVE_DIR/<id>/worktree`, detached for read-only workers and on branch `claive/<id>` for writers. `--worktree-setup CMD` runs once under the heavy lock. Changed worktrees and those awaiting acceptance are kept. Use `claive worktree list`, `claive worktree clean --dry-run`, and `claive prune --interrupted` for housekeeping. For an existing worktree, pass `--worktree-existing /absolute/worktree`.
+All engines support opt-in `--worktree` (plus `--link-deps` to symlink existing `.venv`/`node_modules` and `--carry-dirty` to carry uncommitted edits at `HEAD`); `--worktree-base` selects a base commit, default `HEAD`. Claive creates `$CLAIVE_DIR/<id>/worktree`, detached for read-only workers and on branch `claive/<id>` for writers. `--worktree-setup CMD` runs once under the heavy lock. Changed worktrees and those awaiting acceptance are kept. Use `claive worktree apply ID [--dry-run]`, `claive worktree list`, `claive worktree clean --dry-run`, and `claive prune --interrupted` for housekeeping. For an existing worktree, pass `--worktree-existing /absolute/worktree`.
 
-Use repeatable `--check 'NAME=COMMAND'` to declare checks, or supply `--checks-file`.
+Use repeatable `--check 'NAME=COMMAND'` (shell operators/`cd` supported) or `--checks-file` (`[...]` or `{"checks": [...]}` with `"command"` or `"shell"`). `--verify-in-worktree` ignores newly created gitignored build outputs (`dist/`). Use `--reuse-alias` when safely rebinding a settled worker's `@alias`.
 Use `--fit-checked` after assessing delegation fit. If a supervisor remains alive
 but start is not confirmed, inspect `claive show ID` before relaunching.
 

@@ -11,6 +11,8 @@ TOOL_IDLE_WRAP_UP = ("[claive] Active tool command was killed after {seconds:g}s
                      "Do not re-run the hanging command without a bounded timeout; recover and "
                      "emit your final claive-report.")
 TOOL_INTERRUPTED_NOTE = "[claive] Active tool command was interrupted by the parent.{extra}"
+STREAM_FINISH_GRACE_SECONDS = 20.0
+STREAM_ACTIVE_WINDOW_SECONDS = 15.0
 
 
 def seconds(value, name, default=0):
@@ -26,8 +28,11 @@ def seconds(value, name, default=0):
 
 
 def turn_action(elapsed, inactive, active_tools, budget, stall, grace=0, wrapped=False,
-                tool_idle=0, tool_inactive=0):
-    if budget is not None and elapsed >= budget + grace:
+                tool_idle=0, tool_inactive=0, streaming_final=False):
+    effective_grace = grace
+    if streaming_final and not active_tools and inactive < STREAM_ACTIVE_WINDOW_SECONDS:
+        effective_grace = max(grace, STREAM_FINISH_GRACE_SECONDS)
+    if budget is not None and elapsed >= budget + effective_grace:
         return "timeout"
     if tool_idle and active_tools and tool_inactive >= tool_idle:
         return "tool_idle_timeout"

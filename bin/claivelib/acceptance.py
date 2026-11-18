@@ -8,6 +8,7 @@ import json
 import os
 import re
 from pathlib import Path, PurePosixPath
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -16,12 +17,62 @@ import time
 from claivelib import config, procgroup
 
 OUTCOMES = {"passed", "failed", "blocked", "not_run"}
-VERIFIER_BYPRODUCT_DIRS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".vitest", ".turbo"}
+VERIFIER_BYPRODUCT_DIRS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".vitest", ".turbo", ".tox", ".nox"}
+NOISE_DIR_NAMES = VERIFIER_BYPRODUCT_DIRS | {"node_modules", ".venv", "venv", ".git"}
+NOISE_FILENAMES = {"launch.lock"}
 
 
 def _is_verifier_byproduct(rel_path):
     parts = PurePosixPath(rel_path).parts
     return bool(VERIFIER_BYPRODUCT_DIRS.intersection(parts)) or rel_path.endswith((".pyc", ".pyo"))
+
+
+def _linked_dep_prefixes(workspace=None, job_dir=None) -> set[str]:
+    candidates = []
+    if job_dir:
+        candidates.append(Path(job_dir) / "linked-deps.json")
+    if workspace:
+        ws = Path(workspace)
+        if ws.name == "worktree":
+            candidates.append(ws.parent / "linked-deps.json")
+    prefixes: set[str] = set()
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            loaded = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(loaded, dict):
+            linked = loaded.get("linked")
+            if isinstance(linked, (list, tuple)):
+                for p in linked:
+                    if isinstance(p, str) and p.strip("/"):
+                        prefixes.add(p.strip("/"))
+    return prefixes
+
+
+def is_noise_path(rel_path: str, linked_deps: set[str] | frozenset[str] = frozenset()) -> bool:
+    """Return True if rel_path is a verifier/runtime byproduct or linked-deps symlink."""
+    rel = str(rel_path or "").strip().strip("/")
+    if not rel:
+        return True
+    parts = PurePosixPath(rel).parts
+    if not parts:
+        return True
+    if _is_verifier_byproduct(rel):
+        return True
+    if bool(set(parts) & NOISE_DIR_NAMES):
+        return True
+    if parts[-1].endswith((".pyc", ".pyo")) or parts[-1] in NOISE_FILENAMES:
+        return True
+    return any(rel == dep or rel.startswith(dep + "/") for dep in linked_deps)
+
+
+def filter_noise_paths(paths, workspace=None, job_dir=None) -> list[str]:
+    """Filter verifier/runtime byproducts and linked-deps symlinks from workspace-relative paths."""
+    linked = _linked_dep_prefixes(workspace=workspace, job_dir=job_dir)
+    return [p for p in (paths or ()) if isinstance(p, str) and not is_noise_path(p, linked)]
 
 
 def _refresh_status(path, state):
@@ -61,19 +112,67 @@ def manifest(filename):
     return validate_manifest(value)
 
 
+SHELL_META_RE = re.compile(r"(?:&&|\|\||[;|<>`\n$()])|\A\s*cd\s+")
+MANIFEST_EXAMPLE = (
+    'Example: [{"name": "test", "shell": "cd web && npm test"}] '
+    'or {"checks": [{"name": "test", "command": ["pytest", "-q"]}]}'
+)
+
+
+def parse_inline_check_command(command_str: str) -> list[str]:
+    if not isinstance(command_str, str):
+        raise ValueError(f"check command must be a string. {MANIFEST_EXAMPLE}")
+    stripped = command_str.strip()
+    if not stripped:
+        raise ValueError(f"check command cannot be empty. {MANIFEST_EXAMPLE}")
+    if SHELL_META_RE.search(stripped):
+        return ["bash", "-lc", stripped]
+    parts = shlex.split(stripped)
+    if not parts or any(not part for part in parts):
+        raise ValueError(f"check command cannot be empty. {MANIFEST_EXAMPLE}")
+    return parts
+
+
 def validate_manifest(value):
-    if not isinstance(value, list):
-        raise ValueError("checks manifest must be a list")
+    if isinstance(value, dict):
+        if set(value) - {"checks"}:
+            raise ValueError(f"checks manifest object may only contain 'checks'. {MANIFEST_EXAMPLE}")
+        if "checks" not in value or not isinstance(value["checks"], list):
+            raise ValueError(f"checks manifest must be a list or {{'checks': [...]}}. {MANIFEST_EXAMPLE}")
+        raw_checks = value["checks"]
+    elif isinstance(value, list):
+        raw_checks = value
+    else:
+        raise ValueError(f"checks manifest must be a list or {{'checks': [...]}}. {MANIFEST_EXAMPLE}")
+
     names = set()
-    for check in value:
+    normalized_checks = []
+    for check in raw_checks:
         if not isinstance(check, dict) or not isinstance(check.get("name"), str) or not check["name"]:
-            raise ValueError("each check needs a nonempty name")
+            raise ValueError(f"each check needs a nonempty name. {MANIFEST_EXAMPLE}")
         if check["name"] in names:
             raise ValueError("duplicate check name")
         names.add(check["name"])
-        command = check.get("command")
-        if not isinstance(command, list) or not command or any(not isinstance(x, str) or not x for x in command):
-            raise ValueError("check command must be a nonempty argv list")
+        if "command" in check and "shell" in check:
+            raise ValueError(f"check {check['name']!r} cannot set both 'command' and 'shell'. {MANIFEST_EXAMPLE}")
+        if "shell" in check:
+            shell_cmd = check["shell"]
+            if not isinstance(shell_cmd, str) or not shell_cmd.strip():
+                raise ValueError(f"check shell must be a nonempty string. {MANIFEST_EXAMPLE}")
+            norm_command = ["bash", "-lc", shell_cmd.strip()]
+        elif "command" in check:
+            command = check["command"]
+            if isinstance(command, str):
+                norm_command = parse_inline_check_command(command)
+            elif isinstance(command, list):
+                if not command or any(not isinstance(x, str) or not x for x in command):
+                    raise ValueError(f"check command must be a nonempty argv list. {MANIFEST_EXAMPLE}")
+                norm_command = list(command)
+            else:
+                raise ValueError(f"check command must be a nonempty argv list. {MANIFEST_EXAMPLE}")
+        else:
+            raise ValueError(f"check {check['name']!r} requires 'command' or 'shell'. {MANIFEST_EXAMPLE}")
+
         if not isinstance(check.get("required", True), bool):
             raise ValueError("check required must be boolean")
         pytest = check.get("pytest")
@@ -89,7 +188,10 @@ def validate_manifest(value):
         in_worktree = check.get("in_worktree")
         if in_worktree is not None and not isinstance(in_worktree, bool):
             raise ValueError("check in_worktree must be boolean")
-    return value
+        normalized = {key: val for key, val in check.items() if key != "shell"}
+        normalized["command"] = norm_command
+        normalized_checks.append(normalized)
+    return normalized_checks
 
 
 def validate_workspace(workspace):
@@ -220,7 +322,8 @@ def finish(path, state):
         try:
             after = snapshot(workspace, target / ".stat-cache.json")
             atomic(target / "after.json", after)
-            paths = changed(json.loads(before_file.read_text()), after)
+            raw_paths = changed(json.loads(before_file.read_text()), after)
+            paths = filter_noise_paths(raw_paths, workspace=workspace, job_dir=path)
             record.update(changed_paths=paths, ownership_validation="passed",
                           ownership_violations=violations(paths, state["acceptance_contract"]["owned_paths"])
                           if state["acceptance_contract"].get("owned_paths") is not None else [])
@@ -271,6 +374,57 @@ def workspace_delta(workspace):
     return result
 
 
+def gitignored_paths(workspace) -> set[str]:
+    """Return workspace-relative untracked paths ignored by Git or recorded in linked-deps.json."""
+    workspace_path = Path(workspace)
+    timeout = config.launch_setting("git_timeout", 30)
+    ignored = set()
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(workspace_path), "ls-files", "-z", "--others", "-i", "--exclude-standard"],
+            capture_output=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ValueError(
+            f"git ls-files timed out after {timeout} s in {workspace_path} "
+            f"(load {os.getloadavg()[0]:.2f}); raise launch.git_timeout in the claive config"
+        ) from error
+    if result.returncode == 0:
+        for raw in result.stdout.split(b"\0"):
+            if raw:
+                rel = os.fsdecode(raw).rstrip("/")
+                if rel:
+                    ignored.add(rel)
+    linked_file = workspace_path.parent / "linked-deps.json"
+    if linked_file.is_file():
+        try:
+            loaded = json.loads(linked_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            loaded = {}
+        if isinstance(loaded, dict):
+            for rel in loaded.get("linked") or ():
+                if isinstance(rel, str) and rel.strip("/"):
+                    ignored.add(rel.strip("/"))
+    return ignored
+
+
+def _is_ignored_path(rel_path: str, ignored: set[str]) -> bool:
+    if rel_path in ignored:
+        return True
+    parts = PurePosixPath(rel_path).parts
+    return any("/".join(parts[:idx]) in ignored for idx in range(1, len(parts)))
+
+
+def _non_ignored_changes(workspace, expected_snap, actual_snap) -> list[str]:
+    if expected_snap.get("head") != actual_snap.get("head"):
+        return ["HEAD"]
+    diffs = changed(expected_snap, actual_snap)
+    if not diffs:
+        return []
+    ignored = gitignored_paths(workspace)
+    return [rel for rel in diffs if not _is_ignored_path(rel, ignored)]
+
+
 def check_freshness(path, state, evidence=None):
     """Explicit on-demand freshness check; never hash the workspace for watch/list."""
     data = evidence if evidence is not None else view(path, state)
@@ -279,10 +433,12 @@ def check_freshness(path, state, evidence=None):
     if not after.exists():
         return {"status": "unknown", "reason": "no workspace snapshot was retained"}
     try:
+        ws = execution.get("workspace") or state.get("actual_workspace") or state["workspace"]
         expected = json.loads(after.read_text())
-        actual = snapshot(execution.get("workspace") or state.get("actual_workspace") or state["workspace"])
-        return {"status": "fresh" if actual == expected else "stale",
-                "reason": "workspace matches completed turn" if actual == expected else "workspace changed since completion"}
+        actual = snapshot(ws)
+        stale = bool(_non_ignored_changes(ws, expected, actual))
+        return {"status": "stale" if stale else "fresh",
+                "reason": "workspace changed since completion" if stale else "workspace matches completed turn"}
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         return {"status": "unknown", "reason": str(error)}
 
@@ -410,7 +566,8 @@ def verify(path, state, name=None, status=None, reason=None, environment=None, i
     workspace = state.get("actual_workspace") or state["workspace"]
     stat_cache = target / ".stat-cache.json"
     after_file = target / "after.json"
-    if after_file.exists() and snapshot(workspace, stat_cache) != json.loads(after_file.read_text()):
+    after_snap = json.loads(after_file.read_text()) if after_file.exists() else None
+    if after_snap is not None and _non_ignored_changes(workspace, after_snap, snapshot(workspace, stat_cache)):
         raise ValueError("workspace changed since execution; verification requires a fresh turn")
     check_mutated = False
     if name:
@@ -436,7 +593,12 @@ def verify(path, state, name=None, status=None, reason=None, environment=None, i
                     post_snap = snapshot(workspace, stat_cache)
                     _cleanup_byproducts(workspace, pre_snap["files"], post_snap["files"])
                     clean_snap = snapshot(workspace, stat_cache)
-                    mutated = changed(pre_snap, clean_snap)
+                    raw_mutated = changed(pre_snap, clean_snap)
+                    if raw_mutated:
+                        ignored = gitignored_paths(workspace)
+                        mutated = [rel for rel in raw_mutated if not _is_ignored_path(rel, ignored)]
+                    else:
+                        mutated = []
                     if mutated:
                         check_mutated = True
                         record.update(status="failed", exit_code=code, stdout=output, stderr=errors,
@@ -474,7 +636,7 @@ def verify(path, state, name=None, status=None, reason=None, environment=None, i
             except (OSError, ValueError, subprocess.TimeoutExpired) as error:
                 record.update(status="blocked", reason=str(error), environment=record.get("environment", {"workspace": workspace}))
             records[check["name"]] = record
-    if not check_mutated and after_file.exists() and snapshot(workspace, stat_cache) != json.loads(after_file.read_text()):
+    if not check_mutated and after_snap is not None and _non_ignored_changes(workspace, after_snap, snapshot(workspace, stat_cache)):
         raise ValueError("workspace changed during verification; results are stale")
     evidence = {"checks": list(records.values()), "status": aggregate(list(records.values()), required)}
     atomic(target / "verification.json", evidence)
@@ -514,7 +676,7 @@ def decide(path, state, reject=False, reason=None, exception=None):
             raise ValueError("ownership/evidence snapshot missing; acceptance remains pending")
         if (target / "after.json").exists():
             after = json.loads((target / "after.json").read_text())
-            if snapshot(execution["workspace"], target / ".stat-cache.json") != after:
+            if _non_ignored_changes(execution["workspace"], after, snapshot(execution["workspace"], target / ".stat-cache.json")):
                 raise ValueError("workspace changed since execution; verification evidence is stale")
             allowlist = data.get("scope", {}).get("owned_paths", contract.get("owned_paths"))
             outside = violations(execution.get("changed_paths", []), allowlist) if allowlist is not None else []

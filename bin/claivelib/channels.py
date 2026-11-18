@@ -74,8 +74,11 @@ def _close_locked(directory, record, reason, now=None):
     _write(directory, record)
     atomic(directory / "summary.json", summary)
     from claivelib import inbox
-    inbox.append(dict(type="channel_closed", kind="channel_closed", id=record["name"], channel=record["name"],
-                      at=_timestamp(now), status="closed", summary=summary))
+    ev = dict(type="channel_closed", kind="channel_closed", id=record["name"], channel=record["name"],
+              at=_timestamp(now), status="closed", summary=summary)
+    if record.get("parent_session"):
+        ev["parent_session"] = record["parent_session"]
+    inbox.append(ev)
     return record, summary, True
 
 
@@ -119,12 +122,16 @@ def open_channel(name, members, max_messages=20, max_per_pair=6, timeout=900):
             if existing.get("status") == "open":
                 raise ValueError(f"channel {name} is already open")
             raise ValueError(f"channel {name} already exists and is closed")
+        from claivelib import inbox as inbox_mod
+        parent_session = inbox_mod.resolve_parent_session()
         now = time.time()
         record = dict(name=name, members=ids,
                       limits={"max_messages": max_messages, "max_per_pair": max_per_pair,
                               "timeout": timeout},
                       opened_at=now, deadline=now + timeout, status="open", close_reason=None,
                       counts={"total": 0, "per_pair": {}})
+        if parent_session:
+            record["parent_session"] = parent_session
         _write(directory, record)
     return record
 

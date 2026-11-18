@@ -49,14 +49,19 @@ TOOL_DEFINITIONS = [
                 "read_only": {"type": "boolean", "description": "Run in read-only mode."},
                 "worktree": {"type": "boolean", "description": "Run inside an isolated managed Git worktree."},
                 "carry_dirty": {"type": "boolean", "description": "Copy uncommitted parent edits into --worktree at HEAD."},
+                "link_deps": {"type": "boolean", "description": "Symlink existing .venv and node_modules into --worktree."},
+                "reuse_alias": {"type": "boolean", "description": "Automatically rebind @alias when prior worker is settled and accepted."},
+                "parent_session": {"type": "string", "description": "Optional parent session token for scoped inbox and watcher tracking."},
+                "park": {"type": "boolean", "description": "Mark worker as intentionally parked (exempt from Stop-hook orphan block)."},
+                "notify_worker": {"type": "string", "description": "Optional reusable @worker address to wake when this worker settles."},
                 "enable_steering": {"type": "boolean", "description": "Enable live mid-turn steering transport."},
                 "report": {"type": "boolean", "description": "Require a structured claive-report block."},
                 "no_fallback": {"type": "boolean", "description": "Disable configured fallback_models for this worker."},
                 "verify_in_worktree": {"type": "boolean", "description": "Run verification checks directly in the worktree."},
                 "turn_timeout": {"type": "number", "description": "Wall-clock turn timeout in seconds."},
                 "tool_idle_timeout": {"type": "number", "description": "Kill silent active tool children after N seconds."},
-                "check": {"type": "string", "description": "Optional required check in NAME=COMMAND form."},
-                "owned_path": {"type": "string", "description": "Optional workspace-relative owned path or glob."},
+                "check": {"type": "string", "description": "Optional required check(s) as NAME=COMMAND (newline-separated for multiple checks)."},
+                "owned_path": {"type": "string", "description": "Optional workspace-relative owned path(s), comma- or newline-separated."},
                 "fit_checked": {"type": "boolean", "description": "Skip delegation-fit reminder notes when true."},
             },
             "required": ["workspace", "prompt"],
@@ -97,8 +102,11 @@ TOOL_DEFINITIONS = [
             "properties": {
                 "id": {"type": "string", "description": "Worker ID, @alias, or space/comma-separated worker IDs."},
                 "any_worker": {"type": "boolean", "description": "Return as soon as any listed worker settles."},
+                "all_workers": {"type": "boolean", "description": "Wait until every listed worker settles (short-circuiting early on ASK or failure)."},
                 "timeout": {"type": "number", "description": "Maximum seconds to wait (default 60, capped at 300)."},
                 "inbox_consumer": {"type": "string", "description": "Optional inbox consumer name to wake on."},
+                "parent_session": {"type": "string", "description": "Optional parent session token to scope wake events."},
+                "since_seq": {"type": "integer", "description": "Optional monotonic sequence cursor; wakes immediately on seq > since_seq."},
             },
             "required": [],
         },
@@ -139,9 +147,51 @@ TOOL_DEFINITIONS = [
                 "limit": {"type": "integer", "description": "Maximum number of workers to return (default 20)."},
                 "active_only": {"type": "boolean", "description": "Only include active/idle workers."},
                 "inbox_consumer": {"type": "string", "description": "Optional inbox consumer cursor to read."},
+                "parent_session": {"type": "string", "description": "Optional parent session token to filter workers and inbox."},
+                "since_seq": {"type": "integer", "description": "Optional monotonic sequence cursor to read events after."},
                 "peek_inbox": {"type": "boolean", "description": "Read inbox without advancing cursor when true."},
+                "include_watch_status": {"type": "boolean", "description": "Include watcher and unwatched worker summary."},
             },
             "required": [],
+        },
+    },
+    {
+        "name": "claive_followup",
+        "description": "Queue a follow-up prompt turn on an open reusable worker.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Worker ID or @alias."},
+                "prompt": {"type": "string", "description": "Follow-up prompt text for the worker."},
+                "label": {"type": "string", "description": "Optional short label for this follow-up turn."},
+                "reasoning_effort": {"type": "string", "description": "Optional reasoning effort override for this turn."},
+            },
+            "required": ["id", "prompt"],
+        },
+    },
+    {
+        "name": "claive_apply",
+        "description": "Apply a settled worker's isolated worktree edits back into its source workspace, optionally closing the worker.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Worker ID or @alias."},
+                "dry_run": {"type": "boolean", "description": "Preview files that would be applied or deleted without modifying the source workspace."},
+                "force": {"type": "boolean", "description": "Overwrite conflicting files in the source workspace."},
+                "close": {"type": "boolean", "description": "Close an open reusable worker after applying edits."},
+            },
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "claive_close",
+        "description": "Gracefully close an idle reusable worker supervisor (retaining history).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Worker ID or @alias."},
+            },
+            "required": ["id"],
         },
     },
 ]
@@ -224,16 +274,32 @@ def _tool_start(arguments):
         ("--model", "model"),
         ("--provider", "provider"),
         ("--reasoning-effort", "reasoning_effort"),
-        ("--check", "check"),
-        ("--owned-path", "owned_path"),
+        ("--session", "parent_session"),
+        ("--notify-worker", "notify_worker"),
     ):
         val = arguments.get(key)
         if isinstance(val, str) and val.strip():
             cmd.extend([flag, val.strip()])
+    explicit_session = arguments.get("parent_session")
+    if not (isinstance(explicit_session, str) and explicit_session.strip()):
+        resolved_session = inbox.resolve_parent_session(workspace=workspace)
+        if resolved_session:
+            cmd.extend(["--session", resolved_session])
+    check_raw = arguments.get("check")
+    if isinstance(check_raw, str) and check_raw.strip():
+        for ln in [item.strip() for item in check_raw.splitlines() if item.strip()]:
+            cmd.extend(["--check", ln])
+    owned_raw = arguments.get("owned_path")
+    if isinstance(owned_raw, str) and owned_raw.strip():
+        for path_item in [tok.strip() for tok in re.split(r"[,\n]+", owned_raw) if tok.strip()]:
+            cmd.extend(["--owned-path", path_item])
     for flag, key in (
         ("--read-only", "read_only"),
         ("--worktree", "worktree"),
         ("--carry-dirty", "carry_dirty"),
+        ("--link-deps", "link_deps"),
+        ("--reuse-alias", "reuse_alias"),
+        ("--park", "park"),
         ("--report", "report"),
         ("--no-fallback", "no_fallback"),
         ("--verify-in-worktree", "verify_in_worktree"),
@@ -321,17 +387,26 @@ def _tool_wait(arguments):
     raw_ids = str(arguments.get("id") or "").strip()
     ids = [tok for tok in re.split(r"[\s,]+", raw_ids) if tok] if raw_ids else []
     inbox_consumer = str(arguments.get("inbox_consumer") or "").strip()
-    if not ids and not inbox_consumer:
-        raise ValueError("provide id or inbox_consumer")
+    parent_session = str(arguments.get("parent_session") or "").strip()
+    since_seq = arguments.get("since_seq")
+    has_since_seq = isinstance(since_seq, int) and not isinstance(since_seq, bool) and since_seq >= 0
+    if not ids and not inbox_consumer and not parent_session and not has_since_seq:
+        raise ValueError("provide id, inbox_consumer, parent_session, or since_seq")
     timeout = arguments.get("timeout", 60.0)
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
         timeout = 60.0
     timeout = min(float(timeout), 300.0)
     cmd = ["wait", *ids, "--timeout", str(timeout), "--json"]
-    if arguments.get("any_worker") is True:
+    if arguments.get("all_workers") is True:
+        cmd.append("--all")
+    elif arguments.get("any_worker") is True:
         cmd.append("--any")
     if inbox_consumer:
         cmd.extend(["--inbox", inbox_consumer])
+    if parent_session:
+        cmd.extend(["--session", parent_session])
+    if has_since_seq:
+        cmd.extend(["--since-seq", str(since_seq)])
     code, stdout, stderr = _run_cli(cmd, timeout=timeout + 15.0)
     if not stdout.strip():
         raise ValueError((stderr or "").strip() or f"claive wait exited with {code}")
@@ -395,20 +470,122 @@ def _tool_list(arguments):
         limit = 20
     limit = min(limit, 100)
     active_only = arguments.get("active_only") is True
-    records = cli.jobs(limit=None if active_only else limit)
+    parent_session = str(arguments.get("parent_session") or "").strip() or None
+    if parent_session is not None:
+        inbox.check_consumer(parent_session, label="session")
+    records = cli.jobs(limit=None if (active_only or parent_session) else limit)
+    if parent_session is not None:
+        records = [item for item in records if item.get("parent_session") == parent_session]
     if active_only:
-        records = [item for item in records if item.get("status") in cli.ACTIVE][:limit]
+        records = [item for item in records if item.get("status") in cli.ACTIVE]
+    records = records[:limit]
     workers = []
     for state in records:
         worker_id = state.get("id")
         if not worker_id:
             continue
         workers.append(status_file.read_or_build(cli.root() / worker_id, state))
-    payload = {"workers": workers}
+    payload = {"workers": workers, "latest_seq": inbox.current_seq()}
     consumer = str(arguments.get("inbox_consumer") or "").strip()
-    if consumer:
-        payload["inbox_events"] = inbox.read_new(consumer, peek=arguments.get("peek_inbox") is True)
+    since_seq = arguments.get("since_seq")
+    has_since_seq = isinstance(since_seq, int) and not isinstance(since_seq, bool) and since_seq >= 0
+    if has_since_seq and not consumer:
+        payload["inbox_events"] = inbox.read_since(since_seq, parent_session=parent_session, wake_only=True)
+    elif consumer or parent_session:
+        eff_consumer = consumer or inbox.session_consumer(parent_session)
+        payload["inbox_events"] = inbox.read_new(
+            eff_consumer,
+            peek=arguments.get("peek_inbox") is True,
+            parent_session=parent_session,
+            since_seq=since_seq if has_since_seq else None,
+        )
+    if arguments.get("include_watch_status") is True:
+        from claivelib import watchers
+        payload["watch_status"] = watchers.watch_status(parent_session=parent_session, consumer=consumer or None)
     return payload
+
+
+def _tool_followup(arguments):
+    _check_not_nested()
+    raw_id = str(arguments.get("id") or "").strip()
+    if not raw_id:
+        raise ValueError("id is required")
+    prompt_text = str(arguments.get("prompt") or "")
+    if not prompt_text.strip():
+        raise ValueError("prompt must not be empty")
+    prompts_dir = cli.root() / "mcp-prompts"
+    prompts_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    prompt_file = prompts_dir / f"{uuid.uuid4().hex}.md"
+    prompt_file.write_text(prompt_text, encoding="utf-8")
+
+    cmd = ["followup", raw_id, "--prompt-file", str(prompt_file)]
+    for flag, key in (("--label", "label"), ("--reasoning-effort", "reasoning_effort")):
+        val = arguments.get(key)
+        if isinstance(val, str) and val.strip():
+            cmd.extend([flag, val.strip()])
+
+    code, stdout, stderr = _run_cli(cmd, timeout=30.0)
+    if code != 0:
+        raise ValueError((stderr or stdout).strip() or f"claive followup exited with {code}")
+    job_dir = cli.job_path(raw_id)
+    return {
+        "queued": True,
+        "worker": status_file.read_or_build(job_dir, cli.load(job_dir)),
+    }
+
+
+def _tool_apply(arguments):
+    _check_not_nested()
+    raw_id = str(arguments.get("id") or "").strip()
+    if not raw_id:
+        raise ValueError("id is required")
+    dry_run = arguments.get("dry_run") is True
+    force = arguments.get("force") is True
+    close = arguments.get("close") is True
+    flags = []
+    if dry_run:
+        flags.append("--dry-run")
+    if force:
+        flags.append("--force")
+
+    top_cmd = ["apply", raw_id, *flags, *(["--close"] if close else []), "--json"]
+    used_fallback = False
+    code, stdout, stderr = _run_cli(top_cmd, timeout=60.0)
+    if code == 2 and "invalid choice" in (stderr or "") and not stdout.strip():
+        used_fallback = True
+        code, stdout, stderr = _run_cli(["worktree", "apply", raw_id, *flags, "--json"], timeout=60.0)
+
+    if not stdout.strip():
+        raise ValueError((stderr or stdout).strip() or f"claive apply exited with {code}")
+    result = json.loads(stdout)
+    if code != 0 and result.get("status") != "conflict":
+        raise ValueError((stderr or stdout).strip() or f"claive apply exited with {code}")
+
+    if used_fallback and close and not dry_run and code == 0:
+        c_code, c_stdout, c_stderr = _run_cli(["close", raw_id], timeout=30.0)
+        if c_code != 0:
+            raise ValueError((c_stderr or c_stdout).strip() or f"claive close exited with {c_code}")
+        result["closed"] = True
+
+    job_dir = cli.job_path(raw_id)
+    result["worker"] = status_file.read_or_build(job_dir, cli.load(job_dir))
+    return result
+
+
+def _tool_close(arguments):
+    _check_not_nested()
+    raw_id = str(arguments.get("id") or "").strip()
+    if not raw_id:
+        raise ValueError("id is required")
+    code, stdout, stderr = _run_cli(["close", raw_id], timeout=30.0)
+    if code != 0:
+        raise ValueError((stderr or stdout).strip() or f"claive close exited with {code}")
+    job_dir = cli.job_path(raw_id)
+    return {
+        "closed": True,
+        "message": stdout.strip(),
+        "worker": status_file.read_or_build(job_dir, cli.load(job_dir)),
+    }
 
 
 HANDLERS = {
@@ -419,6 +596,9 @@ HANDLERS = {
     "claive_cancel": _tool_cancel,
     "claive_verify": _tool_verify,
     "claive_list": _tool_list,
+    "claive_followup": _tool_followup,
+    "claive_apply": _tool_apply,
+    "claive_close": _tool_close,
 }
 
 

@@ -41,25 +41,19 @@ Every launch returns at once except `run` and a foreground `open`. No `&`,
 
 ## Learn when work finishes
 
-Pick whichever your host supports; all three read the same events.
+Pick whichever your host supports; all mechanisms read the same monotonic wake events (`seq = 1, 2, 3, ...`) with `<= 200`-token actionable digests (`alias`, `exit_code`, `files_touched`, `checks_summary`, `report_headline`, `ask_question`). Automatic mid-turn progress (`wake: false`, such as intermediate Claude `budget_handoff` continuations) stays silent so parent context is never woken unnecessarily.
 
-1. **Bounded wait** (works everywhere):
-   `claive wait ID1 ID2 ... --any --timeout 300`. This returns the first worker that
-   settles, printing its report and exiting with its code. Exit 124 means nothing
-   finished yet. Do other work, then wait again. Keep the timeout below your host's
-   command time limit. Add `--inbox CONSUMER` to also return on new inbox events for that
-   consumer (advancing its cursor, exit 3 if an event needs the parent), and `--json` for
-   one object with the event that ended the wait.
-2. **Inbox** (poll at natural pauses, or after a context reset):
-   `claive inbox --consumer <your-harness-name> --json`. This returns every turn,
-   batch and goal event since that consumer's last read. Use one consumer name per
-   parent (for example `claude`, `codex`, `pi-main`) so parents do not steal each
-   other's events. `--peek` reads without advancing.
-3. **Push hook** (optional): set `CLAIVE_NOTIFY_CMD` before launching. It runs
-   via `/bin/sh -c` for each event, with the event JSON on stdin and
-   `CLAIVE_EVENT_ID`, `CLAIVE_EVENT_STATUS` and `CLAIVE_EVENT_CODE` in its
-   environment. Use it for a desktop notification, a file your host watches, a
-   chat webhook, and so on. Its failures are ignored.
+1. **Session-scoped wait & monotonic `--since-seq`** (works everywhere):
+   `claive wait ID1 ID2 ... --any --timeout 300` or `claive wait --session <S> [--since-seq N]`.
+   Uses Linux `inotify` (`<5ms` wakeup) and registers a live watcher PID in `$CLAIVE_DIR/watchers/` while running.
+   Exit 124 means nothing finished yet. Add `--json` for one JSON object with the event that ended the wait.
+2. **Scoped Inbox** (poll at natural pauses, or after a context reset):
+   `claive inbox --session <S> --json` (or `--since-seq N --json`). Isolates cursors per parent session (`$CLAIVE_PARENT_SESSION` or auto-detected `$CLAUDE_SESSION_ID`, `$CODEX_THREAD_ID`, `$ANTIGRAVITY_CONVERSATION_ID`, `$PI_SESSION_ID`) so concurrent windows never steal each other's events. `--peek` reads without advancing.
+3. **Zero-LLM Lifecycle Hooks** (`claive hook`):
+   - `claive hook pre-turn [--session S] [--harness claude|agy|codex|pi] [--json]`: silent `<5ms` `stat()` fast path when idle; injects unread completions and open `ASK` questions automatically when present.
+   - `claive hook stop [--session S] [--harness claude|agy|codex|pi] [--mode block|warn]`: prevents premature turn-end if unread events exist or active non-parked workers lack a live `claive wait` watcher (or any active non-parked worker on non-reactive `codex`). Use `claive park ID` (or `start/open --park`) when intentionally handing off long background work to the user.
+4. **Durable Push Router** (`notifications` config, `--notify-worker`, `--notify-cmd`, `CLAIVE_NOTIFY_CMD`):
+   Configure `notifications.sinks` in `~/.config/claive/config.yaml` (`command`, `url`, or `worker: "@coordinator"` using `--mode wake`) with triggers (`on: [all, turn, ask, failed, completed, parked, unwatched]`). Inspect delivery receipts with `claive notifications [--json]`. Full design: [designs/background-notifications.md](designs/background-notifications.md).
 
 ## Answer questions
 

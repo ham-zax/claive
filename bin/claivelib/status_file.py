@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import time
 
-from claivelib import redaction
+from claivelib import acceptance, redaction
 
 
 def _read_json(path):
@@ -32,8 +32,8 @@ def _evidence_summary(job_dir, state):
     ev_dir = Path(job_dir) / "evidence" / f"turn-{turn:04}"
     execution = _read_json(ev_dir / "execution.json") or {}
     verification = _read_json(ev_dir / "verification.json") or {}
-    acceptance = _read_json(ev_dir / "acceptance.json") or {}
-    return execution, verification, acceptance
+    acceptance_data = _read_json(ev_dir / "acceptance.json") or {}
+    return execution, verification, acceptance_data
 
 
 def build(job_dir, state, now=None):
@@ -42,7 +42,7 @@ def build(job_dir, state, now=None):
     now = time.time() if now is None else now
     worker_id = state.get("id") or job_dir.name
     launch = state.get("launch") if isinstance(state.get("launch"), dict) else {}
-    execution, verification, acceptance = _evidence_summary(job_dir, state)
+    execution, verification, acceptance_doc = _evidence_summary(job_dir, state)
     started_at = state.get("started_at")
     ended_at = state.get("ended_at")
     end_ref = ended_at if isinstance(ended_at, (int, float)) else now
@@ -65,6 +65,11 @@ def build(job_dir, state, now=None):
         changed_files = list(report["changed_files"])
     else:
         changed_files = list(state.get("touched_files") or [])
+    changed_files = acceptance.filter_noise_paths(
+        changed_files,
+        workspace=state.get("actual_workspace") or state.get("workspace"),
+        job_dir=job_dir,
+    )
 
     turn_usage = state.get("turn_usage") if isinstance(state.get("turn_usage"), dict) else {}
     native_cache_read = turn_usage.get("native_cache_read_tokens")
@@ -81,6 +86,8 @@ def build(job_dir, state, now=None):
         "actual_workspace": state.get("actual_workspace"),
         "retained_worktree": state.get("retained_worktree"),
         "reusable": bool(state.get("reusable")),
+        "parent_session": state.get("parent_session"),
+        "parked": bool(state.get("parked")),
         "turn": state.get("turn", 1),
         "status": state.get("status"),
         "phase": state.get("phase"),
@@ -100,7 +107,7 @@ def build(job_dir, state, now=None):
         "exit_code": state.get("exit_code"),
         "changed_files": changed_files,
         "verification_status": verification.get("status", "not_run"),
-        "acceptance_status": acceptance.get("status", "pending"),
+        "acceptance_status": acceptance_doc.get("status", "pending"),
         "report_state": state.get("report_state"),
         "report": report,
         "status_file": str(job_dir / "status.json"),

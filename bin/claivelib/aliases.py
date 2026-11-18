@@ -2,6 +2,7 @@
 import fcntl
 import json
 import os
+from pathlib import Path
 import re
 import sys
 
@@ -56,7 +57,27 @@ def _refresh_worker_status(worker_id):
         pass
 
 
-def update(name, worker=None, replace=False, output=None):
+def can_reuse_worker(worker_id: str) -> tuple[bool, str | None]:
+    from claivelib import cli
+
+    job_dir = cli.root() / worker_id
+    if not (job_dir / "state.json").is_file():
+        return (True, None)
+    state = cli.load(job_dir)
+    if state.get("status") in cli.ACTIVE:
+        return (False, f"worker {worker_id} is still {state['status']}; close or cancel it first, or pass --replace")
+    if state.get("needs_parent"):
+        return (False, f"worker {worker_id} has an unanswered question (needs_parent); answer it or pass --replace")
+    if state.get("retained_worktree") and Path(state["retained_worktree"]).exists():
+        if (state.get("evidence") or {}).get("acceptance", {}).get("status") == "pending":
+            return (
+                False,
+                f"worker {worker_id} has an unaccepted worktree ({state['retained_worktree']}); accept/apply it or pass --replace",
+            )
+    return (True, None)
+
+
+def update(name, worker=None, replace=False, output=None, reuse_completed=False):
     from claivelib import cli
     validate_name(name)
     # Resolve before taking the lock, and store only a canonical worker ID.
@@ -76,7 +97,12 @@ def update(name, worker=None, replace=False, output=None):
         else:
             existing = data.get(name)
             if existing and existing != target and not replace:
-                raise ValueError(f"@{name} already names worker {existing}; use --replace to rebind it")
+                if reuse_completed:
+                    ok, reason = can_reuse_worker(existing)
+                    if not ok:
+                        raise ValueError(f"@{name} cannot be auto-rebound: {reason}")
+                else:
+                    raise ValueError(f"@{name} already names worker {existing}; use --replace to rebind it")
             previous = existing if existing != target else None
             data[name] = target
         cli.save(path, data)

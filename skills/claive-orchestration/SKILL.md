@@ -149,7 +149,7 @@ Workers use the engine's default tools. Claive supplies no restricted tool list.
 | AGY | Soft-read instruction, no enforcement | Refused | Refused | Refused | Refused | Yes |
 
 Steering needs `--enable-steering` (Claude budget mode turns it on by default).
-AGY defaults to `gemini-3.8-flash-high`; medium and low model suffixes select effort.
+AGY defaults to `gemini-3.8-flash-high`; pass either a full slug (`gemini-4-hydrogen-high`) or family stem + `--effort` (`--engine agy --model gemini-4-hydrogen --effort high|medium|low|xhigh`).
 Read requests on AGY, Pi and Claude use soft instructions, not enforced write prevention.
 Use `--require-read-only` for a hard requirement. Soft read cannot bypass workspace
 write policy or ownership conflicts. AGY usage aggregates are not model calls.
@@ -228,26 +228,12 @@ See `docs/command-reference.md` for command-specific codes.
 
 - **Launch without blocking:** `claive start ...` (one turn),
   `claive open --detach ...` (reusable; returns at once),
-  `claive batch start PLAN.json` (parallel lanes of stages). Never use `&`,
+  `claive batch start PLAN.json` (parallel lanes of stages). Pass `--prompt-file /abs/task.md`, `--prompt-file -` (stdin heredoc), or inline `--prompt "..."` (same on `followup`). Never use `&`,
   `nohup`, or `sleep` polling loops. If start is not confirmed but the supervisor
   is alive, inspect `claive show ID` before any relaunch.
-- **Name every worker you launch:** pass `--alias NAME` at launch, or pass a
-  `--label` and the launch derives a name from the label. The launch prints
-  `Alias: @NAME`. A taken `--alias` fails the launch. A taken derived name
-  gets suffix `-2`, `-3`. A launch with no alias and no label binds no name.
-  Then use `@NAME` for `show`, `wait`, `send`, `steer` and `cancel`. Use a session
-  prefix so you never touch another session's workers. Names persist after the
-  worker ends: `claive alias remove NAME` when the effort is done. Use
-  `claive alias set NAME ID` only to name a worker the launch left unnamed.
-- **Wait:** `claive wait ID [ID ...] --any --timeout S` returns the first worker
-  to settle (with its report and code); on 124 do other work and wait again.
-  Several IDs need `--any`: without it the wait exits 1 at once and waits for nothing.
-  `--inbox CONSUMER` (IDs optional) also returns on new inbox events for that consumer.
-  To check whether a worker still runs, read `claive show ID --json` status, not a
-  `pgrep` pattern (your own shell's command line contains the pattern).
-- **After a context reset or between turns:** `claive inbox --consumer <host>`
-  lists every finished turn since your last read (`ASK` lines carry the
-  question). Use one consumer name per parent.
+- **Name every worker you launch:** pass `--alias NAME` at launch (add `--reuse-alias` to safely rebind `@NAME` when the prior worker is settled, has no open `ASK`, and has no unaccepted dirty worktree), or pass `--label` to derive a name. The launch prints `Alias: @NAME`. Use `@NAME` for `show`, `wait`, `send`, `steer` and `cancel`. Use a session prefix so you never touch another session's workers, or `claive alias remove NAME` when done.
+- **Session-scoped wait (`--any` or `--all`) & monotonic `--since-seq`:** launches auto-tag `parent_session` from harness env (`$CLAUDE_CODE_SESSION_ID`, `$CODEX_THREAD_ID`, `$ANTIGRAVITY_CONVERSATION_ID`, `$PI_SESSION_ID`), `--session S`, or workspace fallback `ws-<hash>`. `claive wait ID1 ID2 ... --all --timeout S` waits for the whole parallel wave to settle (short-circuiting early on `exit 3` `ASK` or failure; `--any` returns on the first worker to settle), or `claive wait --session S [--since-seq N]`. Uses Linux `inotify` (`<5ms` wakeup) and registers a live watcher PID in `$CLAIVE_DIR/watchers/`. Every wake event carries monotonic `seq` (`1, 2, 3, ...`) and a `<= 200`-token `digest`; silent mid-turn progress (`wake: false`) never wakes the parent.
+- **After a context reset, between turns, or via hooks:** run `claive inbox --session <S>` (or `--since-seq N`), or wire `claive hook pre-turn|post-tool|stop|status`. Use `claive park ID` (or `start/open --park`) when intentionally handing off long background work without keeping a live `claive wait` watcher. Push notifications and peer coordinator wakes (`--notify-worker @coord`, `--notify-cmd`, `notifications.sinks` in config) log receipts inspectable via `claive notifications`.
 - **Long tasks:** `claive mission new --title T --goal-file F`, then
   `export CLAIVE_MISSION=<id>` (or `--mission`) so launches link themselves;
   `mission note` decisions; `claive mission show ID` prints `Next:`; close it with
@@ -262,22 +248,22 @@ See `docs/command-reference.md` for command-specific codes.
   It cannot use `--role`. `--project-file` replaces the team's project context.
   Repeated `--context-file` adds up to ten bounded UTF-8 layers to the first turn.
   `--report` requests it without a role. `--output-schema /abs/schema.json` (Muse,
-  Claude) makes the result schema-shaped JSON.
-- **Checks and worktrees:** add required checks with repeatable `--check NAME=CMD`
-  or `--checks-file` (add `--verify-in-worktree` when checks need `.git`, `node_modules`, `dist`, or `.venv`).
+  Claude, AGY) makes the result schema-shaped JSON.
+- **Checks and worktrees:** add required checks with repeatable `--check NAME=CMD` (shell pipelines and `cd` auto-wrap in `bash -lc`)
+  or `--checks-file` (accepts `[...]` or `{"checks": [...]}` with `"command": [...]` or `"shell": "..."`; add `--verify-in-worktree` when checks need `.git`, `node_modules`, `dist`, or `.venv` — newly created gitignored build artifacts such as `dist/` do not fail mutation checks).
   Use `--fit-checked` after assessing delegation fit. Every
-  engine supports opt-in `--worktree`, `--worktree --carry-dirty` (carries uncommitted
-  parent edits into the isolated worktree without `git commit`), `claive worktree apply ID [--dry-run] [--force] [--json]`
-  (conflict-checked progressive integration back to the parent checkout), and one-time `--worktree-setup CMD`.
+  engine supports opt-in `--worktree`, `--worktree --link-deps` (auto-symlinks existing `.venv`, `venv`, `node_modules`, and monorepo `*/node_modules` from source), `--worktree --carry-dirty` (carries uncommitted
+  parent edits into the isolated worktree without `git commit`), `claive apply ID [--close] [--dry-run] [--force] [--json]`
+  (verified, ownership-gated atomic integration back into `--workspace` with optional worker closure; `claive worktree apply` remains available for raw un-gated apply), and one-time `--worktree-setup CMD`.
   Inspect logged trees with `claive worktree list` and `claive worktree clean --dry-run`.
   Clean skips trees used by active workers, missing job state, and pending acceptance.
   It keeps ignored dependency directories unless `--discard-changed` is passed.
   Use `claive prune --interrupted`
   for old interrupted jobs after their worktrees are cleared.
 - **Zero-shell inspection, hung-tool rescue, and MCP:** every job maintains an atomic
-  `<job>/status.json` file (readable directly with `read_file` without shell calls),
-  and `claive-mcp` (`claive mcp`) provides flat-schema MCP tools (`claive_start`,
-  `claive_peek`, `claive_steer`, `claive_wait`, `claive_cancel`, `claive_verify`, `claive_list`).
+  `<job>/status.json` file (readable directly with `read_file` without shell calls; byproduct/cache/linked-dep paths are stripped automatically),
+  and `claive-mcp` (`claive mcp`) provides 10 flat-schema MCP tools (`claive_start`,
+  `claive_peek`, `claive_steer`, `claive_wait`, `claive_cancel`, `claive_verify`, `claive_list`, `claive_followup`, `claive_apply`, `claive_close` — `owned_path` accepts comma/newline lists and `check` accepts newline-separated `NAME=CMD` lines).
   Pass `--tool-idle-timeout SECONDS` or run `claive interrupt-tool ID [--message ...]` to kill
   only a hung silent tool child so the worker recovers and emits its `claive-report`.
   Pass `--no-fallback` to disable configured fallbacks (`--enable-steering` and non-default

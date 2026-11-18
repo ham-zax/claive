@@ -73,6 +73,45 @@ class TurnRequest:
     allowed_models: Tuple[str, ...] = ()
 
 
+def link_workspace_deps(workspace, target, job_dir) -> list[str]:
+    """Symlink untracked workspace dependency directories into a new worktree."""
+    from claivelib import acceptance
+
+    ws_root = Path(workspace)
+    wt_root = Path(target)
+    skip_dirs = {".git", ".venv", "venv", "node_modules"}
+    candidates = [".venv", "venv", "node_modules"]
+
+    def iter_subdirs(parent: Path):
+        try:
+            entries = sorted(parent.iterdir(), key=lambda p: p.name)
+        except OSError:
+            return []
+        return [
+            entry for entry in entries
+            if entry.name not in skip_dirs and entry.is_dir() and not entry.is_symlink()
+        ]
+
+    for child in iter_subdirs(ws_root):
+        for dep in (".venv", "venv", "node_modules"):
+            candidates.append(f"{child.name}/{dep}")
+        for grandchild in iter_subdirs(child):
+            for dep in ("node_modules", ".venv"):
+                candidates.append(f"{child.name}/{grandchild.name}/{dep}")
+
+    linked_rel_paths = []
+    for rel in candidates:
+        src = ws_root / rel
+        dst = wt_root / rel
+        if src.is_dir() and not os.path.lexists(dst):
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.symlink_to(src.resolve())
+            linked_rel_paths.append(rel)
+
+    acceptance.atomic(Path(job_dir) / "linked-deps.json", {"linked": linked_rel_paths})
+    return linked_rel_paths
+
+
 class WorkerEngine:
     name = ""
     cwd_is_worktree = True
@@ -268,6 +307,8 @@ class WorkerEngine:
             if carry_dirty:
                 carried_count = self._carry_dirty_changes(workspace, target, job_dir, base_commit)
                 new_isolation["carried_dirty"] = carried_count
+            if isolation.get("link_deps"):
+                new_isolation["linked_deps"] = link_workspace_deps(workspace, target, job_dir)
             worktrees.record_isolation("created", Path(job_dir).name, new_isolation)
         except BaseException:
             subprocess.run(["git", "-C", workspace, "worktree", "remove", "--force", str(target)],

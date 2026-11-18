@@ -264,10 +264,12 @@ def _write_turn_event(state):
         event = inbox_mod.turn_event(state["id"], state.get("label", ""), state.get("turn", 1),
                                      status, outcome_code(state), state.get("failure_kind"),
                                      state.get("needs_parent"), _report_status(state),
-                                     state.get("batch"), state.get("mission"))
+                                     state.get("batch"), state.get("mission"),
+                                     parent_session=state.get("parent_session"))
         evidence = acceptance.view(job_path(state["id"]), state)
         event.update(verification=evidence["verification"]["status"],
                      acceptance=evidence["acceptance"]["status"], turn_task_failures=state.get("turn_task_failures"))
+        event["digest"] = inbox_mod.build_digest(event, state=state)
         inbox_mod.append(event)
     except Exception:
         pass
@@ -484,6 +486,8 @@ def load(path, check_alive=True):
         except (OSError, ValueError, AttributeError):
             pending_instructions.append(dict(request_id=item.stem, status="unreadable"))
     state["pending_instructions"] = pending_instructions
+    if (path / "parked.json").is_file():
+        state["parked"] = True
     state["evidence"] = acceptance.view(path, state)
     state["steering"] = steering.summary(path, state)
     state["budget"] = None
@@ -1331,6 +1335,7 @@ def supervise(job_id, control=None):
                             turn_timeout, state.get("stall_timeout", 180), state.get("turn_grace", 0),
                             bool(state.get("time_wrap_up_attempted") or state.get("time_wrap_up_sent")),
                             tool_idle=tool_idle_timeout, tool_inactive=now - tool_last_activity,
+                            streaming_final=bool(not state.get("active_tools") and state.get("steps", 0) > 0),
                         )
                         if action == "wrap_up" and not timed_out and not stopping and not state.get("terminal"):
                             state["time_wrap_up_attempted"] = True
@@ -1507,7 +1512,8 @@ def supervise(job_id, control=None):
                     if state["handoffs"] > previous_handoffs:
                         inbox_mod.append(inbox_mod.budget_event(
                             job_id, state.get("label", ""), state["turn"], state["turn_handoffs"],
-                            state["handoffs"], state["context_tokens"], state["session_id"], budget.next_step(final_text)))
+                            state["handoffs"], state["context_tokens"], state["session_id"],
+                            budget.next_step(final_text), parent_session=state.get("parent_session")))
                     if outcome == "paused":
                         break
                     attempt += 1
@@ -1599,6 +1605,17 @@ def supervise(job_id, control=None):
     from claivelib import turns
     turns.complete(path, state)
     save(path / "state.json", state)
+    if (not stopping and state.get("status") in {"failed", "idle"}
+            and state.get("failure_kind") in {"timeout", "stall", "tool_idle_timeout"}):
+        iso = launch_config(state).get("isolation") or {}
+        contract = state.get("acceptance_contract") or {}
+        if iso.get("owner") == "claive" and contract.get("verify_in_worktree") and contract.get("checks"):
+            try:
+                exec_ev = acceptance.view(path, state)["execution"]
+                if exec_ev.get("changed_paths") and not exec_ev.get("ownership_violations"):
+                    acceptance.verify(path, state, in_worktree=True)
+            except Exception:
+                pass
     _write_turn_event(state)
     return outcome_code(state)
 
@@ -1660,6 +1677,32 @@ def _normalized_entry(entry):
     return tuple(entry[:2])
 
 
+def _read_linked_deps(target, job_dir=None):
+    candidate_dirs = []
+    if job_dir is not None:
+        candidate_dirs.append(Path(job_dir))
+    target_path = Path(target)
+    if target_path.name == "worktree":
+        candidate_dirs.append(target_path.parent)
+    for directory in candidate_dirs:
+        deps_file = directory / "linked-deps.json"
+        if deps_file.is_file():
+            try:
+                loaded = json.loads(deps_file.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict) and isinstance(loaded.get("linked"), list):
+                    return {str(item).strip("/") for item in loaded["linked"] if isinstance(item, str) and item.strip("/")}
+            except (OSError, ValueError):
+                return set()
+    return set()
+
+
+def _is_linked_dep_relpath(rel_path, linked_deps):
+    if not linked_deps or not rel_path:
+        return False
+    clean_rel = rel_path.strip('"').strip("/")
+    return any(clean_rel == dep or clean_rel.startswith(dep + "/") for dep in linked_deps)
+
+
 def _is_byproduct_relpath(rel_path):
     from claivelib.orchestration import BYPRODUCT_DIRS
     clean_rel = rel_path.strip('"').rstrip("/")
@@ -1693,11 +1736,14 @@ def _worktree_changes(target, base_commit, branch=None, job_dir=None):
     subtracted so untouched `--carry-dirty` worktrees clean up cleanly.
     """
     baseline = _read_carried_baseline(target, job_dir)
+    linked_deps = _read_linked_deps(target, job_dir)
     if baseline is None:
         items = _git_status_z(target, "--untracked-files=all", "--ignored")
         if items is None:
             return "git status failed"
         for code, rel, _extra in items:
+            if code in {"!!", "??"} and _is_linked_dep_relpath(rel, linked_deps):
+                continue
             if code == "!!" and _is_byproduct_relpath(rel):
                 continue
             return "has changes"
@@ -1717,6 +1763,8 @@ def _worktree_changes(target, base_commit, branch=None, job_dir=None):
     dirty_files = baseline["dirty_files"]
     status_paths = set()
     for code, rel, extra in items:
+        if code in {"!!", "??"} and _is_linked_dep_relpath(rel, linked_deps):
+            continue
         if code == "!!" and _is_byproduct_relpath(rel):
             continue
         if rel:
@@ -1725,7 +1773,7 @@ def _worktree_changes(target, base_commit, branch=None, job_dir=None):
             status_paths.add(extra)
     target_root = Path(target)
     for rel in sorted(set(dirty_files) | status_paths):
-        if _is_byproduct_relpath(rel):
+        if _is_byproduct_relpath(rel) or _is_linked_dep_relpath(rel, linked_deps):
             continue
         if _normalized_entry(entry_for_path(target_root / rel)) != _normalized_entry(dirty_files.get(rel)):
             return "has changes"
@@ -1846,7 +1894,8 @@ def _copy_worktree_entry(src, dst):
         os.chmod(dst, preserved_mode)
 
 
-def worktree_apply_command(job_id, dry_run=False, force=False, json_output=False):
+def worktree_apply_command(job_id, dry_run=False, force=False, json_output=False,
+                           enforce_gates=False, close_after=False):
     """Apply a settled worker's managed worktree edits back into its source repository."""
     from claivelib import worktrees
     job_dir = job_path(job_id)
@@ -1867,6 +1916,23 @@ def worktree_apply_command(job_id, dry_run=False, force=False, json_output=False
         if not source.is_dir():
             raise ValueError(f"source workspace does not exist: {source}")
 
+        contract = state.get("acceptance_contract") or {}
+        owned_paths = contract.get("owned_paths")
+        evidence = acceptance.view(job_dir, state)
+        if enforce_gates and not force and not dry_run:
+            violations = evidence.get("execution", {}).get("ownership_violations") or []
+            if violations:
+                raise ValueError(
+                    f"worker {state['id']} has ownership violations ({', '.join(violations[:5])}); "
+                    "adjust with claive scope or pass --force"
+                )
+            if contract.get("checks") and evidence.get("verification", {}).get("status") != "passed":
+                ver_status = evidence.get("verification", {}).get("status", "not_run")
+                raise ValueError(
+                    f"worker {state['id']} verification status is '{ver_status}'; "
+                    f"run 'claive verify {state['id']}' first or pass --force"
+                )
+
         candidates = set()
         if base_commit:
             diff_res = subprocess.run(
@@ -1885,6 +1951,7 @@ def worktree_apply_command(job_id, dry_run=False, force=False, json_output=False
         candidates.update(os.fsdecode(raw) for raw in untracked_res.stdout.split(b"\0") if raw)
 
         baseline = _read_carried_baseline(target, job_dir)
+        linked_deps = _read_linked_deps(target, job_dir)
         dirty_files = baseline["dirty_files"] if baseline else {}
         candidates.update(dirty_files.keys())
 
@@ -1902,7 +1969,11 @@ def worktree_apply_command(job_id, dry_run=False, force=False, json_output=False
         to_delete = []
         conflicts = []
         for rel in sorted(candidates):
-            if not rel or _is_byproduct_relpath(rel):
+            if not rel or _is_byproduct_relpath(rel) or _is_linked_dep_relpath(rel, linked_deps):
+                continue
+            if acceptance.is_noise_path(rel, linked_deps):
+                continue
+            if enforce_gates and owned_paths is not None and not force and acceptance.violations([rel], owned_paths):
                 continue
             _safe_relpath(rel)
             initial_entry = (dirty_files[rel] if rel in dirty_files
@@ -1921,6 +1992,7 @@ def worktree_apply_command(job_id, dry_run=False, force=False, json_output=False
                 to_apply.append(rel)
 
         blocked = bool(conflicts and not force)
+        closed_worker = False
         if not dry_run and not blocked:
             for rel in to_apply:
                 _copy_worktree_entry(target / rel, source / rel)
@@ -1937,6 +2009,23 @@ def worktree_apply_command(job_id, dry_run=False, force=False, json_output=False
                     except OSError:
                         break
                     parent = parent.parent
+            if enforce_gates and evidence.get("acceptance", {}).get("status") == "pending":
+                try:
+                    acceptance.decide(job_dir, state, False, "applied via claive apply", None)
+                except ValueError:
+                    pass
+            if close_after:
+                if state.get("reusable") and state["status"] in ACTIVE:
+                    save(job_dir / "close.request", {"requested_at": time.time()})
+                    closed_worker = True
+                elif state["status"] not in ACTIVE:
+                    removed_err = remove_worktree(isolation, force=True)
+                    if removed_err is None:
+                        worktrees.record_isolation("removed", job_dir.name, isolation, reason="closed after apply")
+                        stored = json.loads((job_dir / "state.json").read_text(encoding="utf-8"))
+                        stored.pop("retained_worktree", None)
+                        save(job_dir / "state.json", stored)
+                    closed_worker = True
 
         payload = {
             "id": state["id"],
@@ -1947,6 +2036,7 @@ def worktree_apply_command(job_id, dry_run=False, force=False, json_output=False
             "conflicts": conflicts,
             "dry_run": dry_run,
             "forced": bool(force and conflicts),
+            "closed": closed_worker,
             "status": "conflict" if blocked else "dry_run" if dry_run else "applied",
         }
         if json_output:
@@ -2479,6 +2569,12 @@ def _create_job(args):
     if not workspace.is_absolute() or not workspace.is_dir():
         raise ValueError("--workspace must be an existing absolute directory")
     prompt_text = getattr(args, "prompt_text", None)
+    if prompt_text is None and getattr(args, "prompt", None) is not None:
+        prompt_text = args.prompt
+    if prompt_text is None and getattr(args, "prompt_file", None) == "-":
+        prompt_text = sys.stdin.read()
+        if not prompt_text.strip():
+            raise ValueError("--prompt-file - received empty stdin; pipe nonblank UTF-8 prompt text")
     if prompt_text is None:
         prompt = Path(args.prompt_file)
         if not prompt.is_absolute() or not prompt.is_file() or not prompt.stat().st_size:
@@ -2574,6 +2670,11 @@ def _create_job(args):
         fallback_models = []
     effective_model = (requested_model or (role_def.get("model") if role_def else None)
                        or policy.get("default_model") or getattr(engine, "default_model", None))
+    if engine_name == "agy" and effective_model:
+        from claivelib.engines.agy import AGY_MODEL_FAMILIES, resolve_agy_model
+        if effective_model in AGY_MODEL_FAMILIES:
+            requested_eff = args.reasoning_effort or (role_def.get("reasoning_effort") if role_def else None)
+            effective_model = resolve_agy_model(effective_model, requested_eff)
     effort = (args.reasoning_effort or (role_def.get("reasoning_effort") if role_def else None)
               or (policy.get("default_model_efforts") or {}).get(effective_model)
               or engine.default_effort_for(effective_model))
@@ -2599,6 +2700,11 @@ def _create_job(args):
         raise ValueError("--carry-dirty requires --worktree")
     if carry_dirty:
         isolation["carry_dirty"] = True
+    link_deps = bool(getattr(args, "link_deps", False))
+    if link_deps and isolation["mode"] != "create":
+        raise ValueError("--link-deps requires --worktree")
+    if link_deps:
+        isolation["link_deps"] = True
     worktree_setup = getattr(args, "worktree_setup", None)
     if worktree_setup is not None and isolation["mode"] != "create":
         raise ValueError("--worktree-setup requires --worktree")
@@ -2621,7 +2727,8 @@ def _create_job(args):
         if getattr(args, "steering_disabled", False):
             budget_options = dict(budget=None, budget_off_reason="steering disabled")
     launch = engine.resolve_launch(
-        provider=requested_provider, model=effective_model, read_only=read_only, web=args.web,
+        provider=requested_provider, model=effective_model, reasoning_effort=effort,
+        read_only=read_only, web=args.web,
         output_schema=args.output_schema, session_logging=not args.no_session_log,
         isolation=isolation, session_id=session_id, session_root=str(root() / "sessions"),
         steering=bool(requested_steering if requested_steering is not None else default_steering),
@@ -2633,6 +2740,16 @@ def _create_job(args):
     launch["allowed_models"] = list(getattr(args, "allow_model", None) or [])
     if worktree_setup is not None:
         launch["worktree_setup"] = worktree_setup
+    notify_cmd = getattr(args, "notify_cmd", None)
+    if notify_cmd is not None:
+        if not str(notify_cmd).strip():
+            raise ValueError("--notify-cmd must not be empty")
+        launch["notify_cmd"] = str(notify_cmd)
+    notify_worker = getattr(args, "notify_worker", None)
+    if notify_worker is not None:
+        if not str(notify_worker).strip():
+            raise ValueError("--notify-worker must not be empty")
+        launch["notify_worker"] = str(notify_worker).strip()
     check_model_policy(launch.get("model"))
     if getattr(args, "enable_steering", False) and not engine.steering_capability().supported:
         raise ValueError(engine.steering_capability().reason)
@@ -2655,6 +2772,9 @@ def _create_job(args):
             reasoning_effort=engine.fallback_effort_for(fallback_model, effort)))
     engine.validate_prompt(composed_prompt if has_prompt_layers else prompt_text if prompt is None
                            else prompt.read_text(encoding="utf-8"), read_only)
+    from claivelib import inbox as inbox_mod
+    parent_session = inbox_mod.resolve_parent_session(getattr(args, "parent_session", None), workspace=str(workspace))
+    parent_harness = inbox_mod.infer_parent_harness()
     mission_id = getattr(args, "mission", None) or os.environ.get("CLAIVE_MISSION") or None
     if mission_id:
         from claivelib import mission as mission_mod
@@ -2664,7 +2784,7 @@ def _create_job(args):
         name, separator, command = inline.partition("=")
         if not separator or not name.strip() or not command.strip():
             raise ValueError("--check must be NAME=COMMAND with a nonempty name and command")
-        check_manifest.append({"name": name.strip(), "command": shlex.split(command), "required": True})
+        check_manifest.append({"name": name.strip(), "command": acceptance.parse_inline_check_command(command), "required": True})
     check_manifest = acceptance.validate_manifest(check_manifest)
     ownership = getattr(args, "owned_path", None)
     if ownership is not None:
@@ -2773,6 +2893,13 @@ def _create_job(args):
             state["actual_workspace"] = launch["isolation"]["existing_path"]
         if mission_id:
             state["mission"] = mission_id
+        if parent_session:
+            state["parent_session"] = parent_session
+        if parent_harness:
+            state["parent_harness"] = parent_harness
+        if getattr(args, "park", False):
+            state["parked"] = True
+            save(path / "parked.json", {"parked": True, "at": time.time()})
         save(path / "state.json", state)
         if mission_id:
             from claivelib import mission as mission_mod
@@ -3701,12 +3828,16 @@ def parser():
                         "open": "keep a worker available for related follow-up turns"}
         launch = commands.add_parser(action, help=descriptions[action])
         launch.add_argument("--workspace", required=True)
-        launch.add_argument("--prompt-file", required=True)
+        launch_prompt = launch.add_mutually_exclusive_group(required=True)
+        launch_prompt.add_argument("--prompt-file", help="existing absolute prompt file, or '-' to read from stdin")
+        launch_prompt.add_argument("--prompt", "-p", help="inline UTF-8 prompt text")
         launch.add_argument("--context-file", action="append", default=[],
                             help="add a bounded UTF-8 context layer to the first prompt (repeatable)")
         launch.add_argument("--label")
-        launch.add_argument("--alias", help="bind @NAME to the new worker (must be unused); "
+        launch.add_argument("--alias", help="bind @NAME to the new worker (must be unused unless --reuse-alias); "
                             "default: a name derived from --label")
+        launch.add_argument("--reuse-alias", "--replace-completed-alias", action="store_true", dest="reuse_alias",
+                            help="rebind --alias automatically when the prior worker is settled, has no open ASK, and has no unaccepted dirty worktree")
         launch.add_argument("--engine", default=None)
         launch.add_argument("--role")
         launch.add_argument("--team")
@@ -3731,6 +3862,8 @@ def parser():
         isolation.add_argument("--worktree-existing", help="resume a lane in its existing absolute worktree path")
         launch.add_argument("--carry-dirty", action="store_true",
                             help="copy uncommitted changes (staged, unstaged, untracked, deletions) into --worktree at HEAD")
+        launch.add_argument("--link-deps", action="store_true",
+                            help="symlink existing .venv and node_modules directories into --worktree")
         launch.add_argument("--worktree-base")
         launch.add_argument("--worktree-setup", help="shell command run once in a new worktree")
         launch.add_argument("--verify-in-worktree", action="store_true",
@@ -3748,6 +3881,12 @@ def parser():
         launch.add_argument("--no-session-log", action="store_true")
         launch.add_argument("--provider")
         launch.add_argument("--mission", help="link the new worker to a mission")
+        launch.add_argument("--session", "--parent-session", dest="parent_session",
+                            help="parent session token for scoped inbox and watcher tracking")
+        launch.add_argument("--park", action="store_true",
+                            help="mark worker as intentionally parked (exempt from Stop-hook orphan block)")
+        launch.add_argument("--notify-cmd", help="shell command run when worker events enter the inbox")
+        launch.add_argument("--notify-worker", help="reusable @worker or ID woken when this worker settles")
         launch.add_argument("--turn-timeout", "--turn-budget",
                             help="fail a turn that runs longer than SECONDS (positive number)")
         launch.add_argument("--tool-idle-timeout",
@@ -3933,6 +4072,12 @@ def parser():
     worktree_apply.add_argument("--dry-run", action="store_true")
     worktree_apply.add_argument("--force", action="store_true")
     worktree_apply.add_argument("--json", action="store_true")
+    apply_cmd = commands.add_parser("apply", help="apply a settled worker's verified worktree edits back into workspace")
+    apply_cmd.add_argument("id")
+    apply_cmd.add_argument("--dry-run", action="store_true")
+    apply_cmd.add_argument("--force", action="store_true")
+    apply_cmd.add_argument("--close", action="store_true", help="close reusable worker or remove settled worktree after clean apply")
+    apply_cmd.add_argument("--json", action="store_true")
     prune = commands.add_parser("prune", help="remove old interrupted workers")
     prune_mode = prune.add_mutually_exclusive_group(required=True)
     prune_mode.add_argument("--interrupted", action="store_true")
@@ -3950,6 +4095,8 @@ def parser():
     alias_set.add_argument("name")
     alias_set.add_argument("id")
     alias_set.add_argument("--replace", action="store_true", help="explicitly replace an existing binding")
+    alias_set.add_argument("--reuse-alias", "--replace-completed-alias", action="store_true", dest="reuse_alias",
+                           help="rebind safely only when prior worker is settled and accepted")
     alias_list = alias_sub.add_parser("list", help="show bindings and current worker status")
     alias_list.add_argument("--json", action="store_true")
     alias_sub.add_parser("remove", help="remove a binding; keep its worker and history").add_argument("name")
@@ -3993,15 +4140,51 @@ def parser():
     peek.add_argument("--json", action="store_true")
     waiting = commands.add_parser("wait")
     waiting.add_argument("id", nargs="*")
-    waiting.add_argument("--any", action="store_true")
+    wait_mode = waiting.add_mutually_exclusive_group()
+    wait_mode.add_argument("--any", action="store_true", help="return as soon as any listed worker settles")
+    wait_mode.add_argument("--all", action="store_true", dest="all_workers",
+                           help="wait until every listed worker settles (short-circuits early on ASK or failure)")
+    waiting.add_argument("--no-fail-fast", action="store_true",
+                         help="with --all, wait for remaining workers even after a worker fails")
     waiting.add_argument("--timeout", type=float)
     waiting.add_argument("--inbox", metavar="CONSUMER", help="also return on new inbox events for CONSUMER")
+    waiting.add_argument("--session", "--parent-session", dest="parent_session", metavar="SESSION",
+                         help="return on new wake events scoped to parent SESSION")
+    waiting.add_argument("--since-seq", type=int, metavar="SEQ",
+                         help="return on wake events with monotonic seq > SEQ")
     waiting.add_argument("--json", action="store_true", help="print one JSON object with the event that ended the wait")
     waiting.set_defaults(wait_parser=waiting)
     inbox_cmd = commands.add_parser("inbox", help="show turn and batch events since the consumer cursor")
-    inbox_cmd.add_argument("--consumer", default="default")
+    inbox_cmd.add_argument("--consumer", default=None)
+    inbox_cmd.add_argument("--session", "--parent-session", dest="parent_session", metavar="SESSION",
+                           help="read unread events scoped to parent SESSION")
+    inbox_cmd.add_argument("--mission", help="filter events by mission ID")
+    inbox_cmd.add_argument("--since-seq", type=int, metavar="SEQ",
+                           help="stateless read of events with monotonic seq > SEQ")
+    inbox_cmd.add_argument("--wake-only", action="store_true",
+                           help="exclude silent progress events such as automatic budget handoffs")
     inbox_cmd.add_argument("--peek", action="store_true")
     inbox_cmd.add_argument("--json", action="store_true")
+    park_cmd = commands.add_parser("park", help="mark or unmark a worker as intentionally parked")
+    park_cmd.add_argument("id")
+    park_cmd.add_argument("--unpark", action="store_true", help="clear parked flag")
+    park_cmd.add_argument("--reason", help="optional reason note")
+    park_cmd.add_argument("--json", action="store_true")
+    hook_cmd = commands.add_parser("hook", help="zero-LLM lifecycle hooks for parent harnesses")
+    hook_cmd.add_argument("hook_event", choices=("pre-turn", "post-tool", "stop", "status"))
+    hook_cmd.add_argument("--session", "--parent-session", dest="parent_session",
+                          help="parent session token (auto-detected from harness env when omitted)")
+    hook_cmd.add_argument("--harness", choices=("generic", "claude", "agy", "codex", "pi", "opencode"),
+                          help="parent harness kind (auto-detected when omitted)")
+    hook_cmd.add_argument("--mode", choices=("block", "warn"), default="block",
+                          help="stop-hook enforcement mode (default: block)")
+    hook_cmd.add_argument("--peek", action="store_true", help="do not advance inbox cursor on pre-turn/post-tool")
+    hook_cmd.add_argument("--all-sessions", action="store_true", help="inspect workers across all parent sessions")
+    hook_cmd.add_argument("--agy-hook", action="store_true", help="emit Antigravity PreInvocation injectSteps JSON envelope")
+    hook_cmd.add_argument("--json", action="store_true")
+    notif_cmd = commands.add_parser("notifications", help="list recent push notification delivery receipts")
+    notif_cmd.add_argument("--limit", type=int, default=50)
+    notif_cmd.add_argument("--json", action="store_true")
     batch_cmd = commands.add_parser("batch", help="run multi-worker plans")
     batch_sub = batch_cmd.add_subparsers(dest="batch_action", required=True)
     batch_validate = batch_sub.add_parser("validate")
@@ -4078,7 +4261,9 @@ def parser():
     serve_cmd.add_argument("--max-parallel", type=int, default=1, help="goals run at once (default 1)")
     followup = commands.add_parser("followup", help="submit related work to an existing reusable worker")
     followup.add_argument("id")
-    followup.add_argument("--prompt-file", required=True)
+    followup_prompt = followup.add_mutually_exclusive_group(required=True)
+    followup_prompt.add_argument("--prompt-file", help="existing absolute prompt file, or '-' to read from stdin")
+    followup_prompt.add_argument("--prompt", "-p", help="inline UTF-8 prompt text")
     followup.add_argument("--label")
     followup.add_argument("--reasoning-effort", "--effort", help="override this turn; otherwise use worker policy")
     followup.add_argument("--max-model-steps", type=int, help="override this turn's step cap")
@@ -4167,25 +4352,38 @@ def main(launcher=None):
     if args.action in {"run", "start", "open"}:
         check_nested()
         from claivelib import aliases
+        reuse_alias = bool(getattr(args, "reuse_alias", False))
         if args.alias:
             aliases.validate_name(args.alias)
-            if aliases.binding(args.alias):
-                raise ValueError(f"@{args.alias} already names a worker; pick another --alias")
+            existing_binding = aliases.binding(args.alias)
+            if existing_binding:
+                if reuse_alias:
+                    ok, reason = aliases.can_reuse_worker(existing_binding["id"])
+                    if not ok:
+                        raise ValueError(f"@{args.alias} cannot be auto-rebound: {reason}")
+                else:
+                    raise ValueError(f"@{args.alias} already names a worker; pick another --alias or pass --reuse-alias")
         path, state = create_job(args)
         if state.get("team"):
             from claivelib import teams
             teams.bind_worker(state["team"], state["id"])
         print(f"Worker {state['id']} | {clean(state['label'])} | {path}", flush=True)
         try:
-            base = args.alias or aliases.slug(args.label)
-            bound = aliases.assign(base, state["id"], suffix=not args.alias) if base else None
+            if args.alias and reuse_alias:
+                import io
+                aliases.update(args.alias, state["id"], reuse_completed=True, output=io.StringIO())
+                bound = args.alias
+            else:
+                base = args.alias or aliases.slug(args.label)
+                bound = aliases.assign(base, state["id"], suffix=not args.alias) if base else None
         except ValueError as error:
             print(f"warning: no alias set: {error}", file=sys.stderr, flush=True)
         else:
             if bound:
                 print(f"Alias: @{bound}", flush=True)
         from claivelib import advice
-        for note in advice.launch_notes(state, Path(args.prompt_file).stat().st_size):
+        prompt_size = Path(state["prompt_file"]).stat().st_size if Path(state["prompt_file"]).is_file() else 0
+        for note in advice.launch_notes(state, prompt_size):
             print(note, file=sys.stderr, flush=True)
         if args.action == "open" and getattr(args, "detach", False):
             spawn_supervisor(path, state, "_reusable")
@@ -4278,6 +4476,10 @@ def main(launcher=None):
         return worktree_command(args.worktree_action, getattr(args, "older_than", "24h"),
                                 getattr(args, "dry_run", False), getattr(args, "discard_changed", False), args.json,
                                 job_id=getattr(args, "id", None), force=getattr(args, "force", False))
+    elif args.action == "apply":
+        check_nested()
+        return worktree_apply_command(args.id, dry_run=args.dry_run, force=args.force,
+                                      json_output=args.json, enforce_gates=True, close_after=args.close)
     elif args.action == "prune":
         if args.idle_older_than:
             from claivelib import idle_sessions
@@ -4289,7 +4491,7 @@ def main(launcher=None):
     elif args.action == "alias":
         from claivelib import aliases
         if args.alias_action == "set":
-            return aliases.update(args.name, args.id, args.replace)
+            return aliases.update(args.name, args.id, args.replace, reuse_completed=getattr(args, "reuse_alias", False))
         if args.alias_action == "remove":
             return aliases.update(args.name)
         return aliases.listing(args.json)
@@ -4597,55 +4799,154 @@ def main(launcher=None):
                     sys.stdout.write(strip_controls(line) if args.stderr else line)
     elif args.action == "wait":
         ids = args.id
-        if not ids and args.inbox is None:
-            args.wait_parser.error("the following arguments are required: id")
-        if len(ids) > 1 and not args.any:
-            raise ValueError("use --any to wait for several workers")
+        from claivelib import inbox as inbox_mod, watchers
+        eff_session = inbox_mod.resolve_parent_session(args.parent_session) if args.parent_session is not None else None
+        eff_consumer = args.inbox
+        if eff_consumer is not None:
+            inbox_mod.check_consumer(eff_consumer)
+        elif eff_session is not None and args.since_seq is None:
+            eff_consumer = inbox_mod.session_consumer(eff_session)
+        if args.since_seq is not None and args.since_seq < 0:
+            raise ValueError("--since-seq must be >= 0")
+        if not ids and eff_consumer is None and args.since_seq is None:
+            args.wait_parser.error("the following arguments are required: id (or --inbox, --session, or --since-seq)")
+        if len(ids) > 1 and not args.any and not args.all_workers:
+            raise ValueError("use --any or --all to wait for several workers")
         if args.timeout is not None and args.timeout <= 0:
             raise ValueError("--timeout must be > 0")
-        from claivelib import inbox as inbox_mod
-        if args.inbox is not None:
-            inbox_mod.check_consumer(args.inbox)
         paths = [job_path(job_id) for job_id in ids]
+        canonical_ids = [p.name for p in paths]
+        watch_session = eff_session or inbox_mod.resolve_parent_session()
         start = time.monotonic()
-        while True:
-            for job_id, path in zip(ids, paths):
-                state = load(path)
-                if state["status"] not in ACTIVE or (state["status"] == "idle" and not list((path / "requests").glob("*.json"))):
-                    if args.json:
-                        # The human report goes to stderr so stdout stays one JSON object.
-                        with contextlib.redirect_stdout(sys.stderr):
-                            report(state)
-                        return _wait_result("worker", job_id, outcome_code(state))
-                    report(state)
-                    return outcome_code(state)
-            if args.inbox is not None and inbox_mod.has_unread(args.inbox):
-                events = inbox_mod.read_new(args.inbox)
-                if events:
-                    return _wait_inbox(events, args.json)
-            if args.timeout is not None and time.monotonic() - start >= args.timeout:
-                if args.json:
-                    return _wait_result("timeout", None, 124)
-                if ids:
-                    print(f"Timed out after {'%g' % args.timeout}s; still running: {' '.join(ids)}")
-                else:
-                    print(f"Timed out after {'%g' % args.timeout}s; no new inbox events for {args.inbox}")
-                from claivelib import advice
-                for job_id, path in zip(ids, paths):
-                    state = load(path)
-                    try:
-                        calls = get_engine(state.get("engine", DEFAULT_ENGINE)).session_usage(state).get("calls", [])
-                    except Exception:  # a reminder must never break the wait
-                        continue
-                    note = advice.heavy_call_note(calls)
-                    if note:
-                        print(f"{job_id}: {note}")
-                return 124
-            time.sleep(0.25)
+
+        def _is_settled_worker(st, p):
+            return st["status"] not in ACTIVE or (st["status"] == "idle" and not list((p / "requests").glob("*.json")))
+
+        with watchers.watching(worker_ids=canonical_ids, inbox_consumer=eff_consumer,
+                               parent_session=watch_session, timeout=args.timeout):
+            with watchers.FsWatcher([root(), root() / "inbox.jsonl", *paths]) as fs_watcher:
+                while True:
+                    if args.all_workers and ids:
+                        settled_rows = []
+                        pending_ids = []
+                        for job_id, path in zip(ids, paths):
+                            state = load(path)
+                            if _is_settled_worker(state, path):
+                                settled_rows.append((job_id, path, state, outcome_code(state)))
+                            else:
+                                pending_ids.append(job_id)
+                        early_ask = next((row for row in settled_rows if row[3] == 3), None)
+                        early_fail = None if args.no_fail_fast else next((row for row in settled_rows if row[3] not in (0, 3)), None)
+                        early = early_ask or early_fail
+                        if early is not None or not pending_ids:
+                            if early is not None:
+                                final_code = early[3]
+                                trigger_id = early[0]
+                            elif any(row[3] == 3 for row in settled_rows):
+                                final_code = 3
+                                trigger_id = next(row[0] for row in settled_rows if row[3] == 3)
+                            elif any(row[3] != 0 for row in settled_rows):
+                                final_row = next(row for row in settled_rows if row[3] != 0)
+                                final_code = final_row[3]
+                                trigger_id = final_row[0]
+                            else:
+                                final_code = 0
+                                trigger_id = settled_rows[-1][0]
+                            if args.json:
+                                with contextlib.redirect_stdout(sys.stderr):
+                                    for _jid, _p, st, _c in settled_rows:
+                                        report(st)
+                                workers_out = [
+                                    {
+                                        "id": st["id"],
+                                        "requested_id": jid,
+                                        "status": st.get("status"),
+                                        "code": c,
+                                        "digest": inbox_mod.build_digest(
+                                            {"id": st["id"], "status": st.get("status"), "code": c,
+                                             "needs_parent": st.get("needs_parent"), "label": st.get("label", "")},
+                                            state=st,
+                                        ),
+                                    }
+                                    for jid, _p, st, c in settled_rows
+                                ]
+                                print(json.dumps({
+                                    "event": "workers",
+                                    "worker": trigger_id,
+                                    "workers": workers_out,
+                                    "pending_workers": pending_ids,
+                                    "code": final_code,
+                                    "inbox_events": [],
+                                }, indent=2))
+                                return final_code
+                            for idx, (_jid, _p, st, _c) in enumerate(settled_rows):
+                                if idx > 0:
+                                    print("---")
+                                report(st)
+                            if pending_ids:
+                                print(f"Short-circuited early; still running: {' '.join(pending_ids)}")
+                            return final_code
+                    else:
+                        for job_id, path in zip(ids, paths):
+                            state = load(path)
+                            if _is_settled_worker(state, path):
+                                if args.json:
+                                    # The human report goes to stderr so stdout stays one JSON object.
+                                    with contextlib.redirect_stdout(sys.stderr):
+                                        report(state)
+                                    return _wait_result("worker", job_id, outcome_code(state))
+                                report(state)
+                                return outcome_code(state)
+                    if args.since_seq is not None and eff_consumer is None:
+                        if inbox_mod.has_since(args.since_seq, parent_session=eff_session, wake_only=True):
+                            events = inbox_mod.read_since(args.since_seq, parent_session=eff_session, wake_only=True)
+                            if events:
+                                return _wait_inbox(events, args.json)
+                    elif eff_consumer is not None and inbox_mod.has_unread(
+                            eff_consumer, parent_session=eff_session, since_seq=args.since_seq, wake_only=True):
+                        events = inbox_mod.read_new(
+                            eff_consumer, parent_session=eff_session, since_seq=args.since_seq, wake_only=True)
+                        if events:
+                            return _wait_inbox(events, args.json)
+                    elapsed = time.monotonic() - start
+                    if args.timeout is not None and elapsed >= args.timeout:
+                        if args.json:
+                            return _wait_result("timeout", None, 124)
+                        if ids:
+                            still_running = [
+                                job_id for job_id, p in zip(ids, paths)
+                                if not _is_settled_worker(load(p), p)
+                            ] or list(ids)
+                            print(f"Timed out after {'%g' % args.timeout}s; still running: {' '.join(still_running)}")
+                        elif args.since_seq is not None and eff_consumer is None:
+                            print(f"Timed out after {'%g' % args.timeout}s; no new inbox events since seq {args.since_seq}")
+                        else:
+                            print(f"Timed out after {'%g' % args.timeout}s; no new inbox events for {eff_consumer}")
+                        from claivelib import advice
+                        for job_id, path in zip(ids, paths):
+                            state = load(path)
+                            try:
+                                calls = get_engine(state.get("engine", DEFAULT_ENGINE)).session_usage(state).get("calls", [])
+                            except Exception:  # a reminder must never break the wait
+                                continue
+                            note = advice.heavy_call_note(calls)
+                            if note:
+                                print(f"{job_id}: {note}")
+                        return 124
+                    step_wait = 0.25 if args.timeout is None else min(0.25, max(0.01, args.timeout - elapsed))
+                    fs_watcher.wait(step_wait)
     elif args.action == "followup":
         path = job_path(args.id)
-        from claivelib import turns
-        _request_id, state = turns.queue(path, args.prompt_file, args.label,
+        from claivelib import messaging, turns
+        fu_prompt_file = args.prompt_file
+        if getattr(args, "prompt", None) is not None or fu_prompt_file == "-":
+            fu_text = args.prompt if getattr(args, "prompt", None) is not None else sys.stdin.read()
+            if not isinstance(fu_text, str) or not fu_text.strip():
+                raise ValueError("follow-up prompt must not be empty")
+            generated = path / f"followup-{time.time_ns()}.md"
+            messaging._write_text(generated, fu_text)
+            fu_prompt_file = str(generated)
+        _request_id, state = turns.queue(path, fu_prompt_file, args.label,
                                          args.reasoning_effort, args.max_model_steps)
         print(f"Follow-up queued for {args.id} in session {worker_session_id(state)}")
     elif args.action == "effort":
@@ -4775,8 +5076,91 @@ def main(launcher=None):
         return tmux_view(args.codex_args)
     elif args.action == "inbox":
         from claivelib import inbox as inbox_mod
-        events = inbox_mod.read_new(args.consumer, peek=args.peek)
+        eff_session = inbox_mod.resolve_parent_session(args.parent_session) if args.parent_session is not None else None
+        if args.since_seq is not None and args.consumer is None:
+            events = inbox_mod.read_since(
+                args.since_seq,
+                parent_session=eff_session,
+                mission=args.mission,
+                wake_only=bool(args.wake_only),
+            )
+        else:
+            consumer = args.consumer or (inbox_mod.session_consumer(eff_session) if eff_session else "default")
+            events = inbox_mod.read_new(
+                consumer,
+                peek=args.peek,
+                parent_session=eff_session,
+                mission=args.mission,
+                since_seq=args.since_seq,
+                wake_only=bool(args.wake_only),
+            )
         print(json.dumps(events, indent=2) if args.json else strip_controls(inbox_mod.format_text(events)))
+    elif args.action == "park":
+        from claivelib import status_file
+        path = job_path(args.id)
+        parked = not bool(args.unpark)
+        reason = str(args.reason).strip()[:300] if args.reason else None
+        if parked:
+            save(path / "parked.json", {"parked": True, "reason": reason, "at": time.time()})
+        else:
+            (path / "parked.json").unlink(missing_ok=True)
+        state = json.loads((path / "state.json").read_text(encoding="utf-8"))
+        state["parked"] = parked
+        if reason:
+            state["park_reason"] = reason
+        elif args.unpark:
+            state.pop("park_reason", None)
+        save(path / "state.json", state)
+        status_file.write(path, load(path))
+        if args.json:
+            print(json.dumps({"id": state["id"], "parked": parked, "reason": state.get("park_reason")}, indent=2))
+        else:
+            verb = "Parked" if parked else "Unparked"
+            print(f"{verb} worker {state['id']}")
+    elif args.action == "hook":
+        from claivelib import hooks as hooks_mod
+        stdin_text = None
+        if args.hook_event in {"pre-turn", "post-tool", "stop"} and not sys.stdin.isatty():
+            try:
+                import select as _select
+                if _select.select([sys.stdin], [], [], 0.02)[0]:
+                    stdin_text = sys.stdin.read(65536)
+            except Exception:
+                stdin_text = None
+        if args.hook_event == "pre-turn":
+            code, out = hooks_mod.run_pre_turn(session=args.parent_session, harness=args.harness,
+                                               peek=args.peek, as_json=args.json, stdin_payload=stdin_text,
+                                               agy_hook=args.agy_hook)
+        elif args.hook_event == "post-tool":
+            code, out = hooks_mod.run_post_tool(session=args.parent_session, harness=args.harness,
+                                                peek=args.peek, as_json=args.json, stdin_payload=stdin_text,
+                                                agy_hook=args.agy_hook)
+        elif args.hook_event == "stop":
+            code, out = hooks_mod.run_stop(session=args.parent_session, harness=args.harness,
+                                           mode=args.mode, as_json=args.json, all_sessions=args.all_sessions,
+                                           stdin_payload=stdin_text)
+        else:
+            code, out = hooks_mod.run_status(session=args.parent_session, harness=args.harness,
+                                             as_json=args.json, all_sessions=args.all_sessions)
+        if out:
+            # Plain-text exit 2 hooks in Claude Code / Codex feed stderr back to the model.
+            stream = sys.stderr if (code == 2 and not args.json) else sys.stdout
+            print(out, file=stream)
+        return code
+    elif args.action == "notifications":
+        from claivelib import notifications as notif_mod
+        if args.limit < 0:
+            raise ValueError("--limit must be >= 0")
+        receipts = notif_mod.list_receipts(limit=args.limit)
+        if args.json:
+            print(json.dumps(receipts, indent=2))
+        elif not receipts:
+            print("No notification receipts")
+        else:
+            for item in receipts:
+                err = f" ({item['error']})" if item.get("error") else ""
+                print(f"{item.get('at', '')} | {item.get('sink')} [{item.get('kind')}] | "
+                      f"{item.get('event_type')} {item.get('event_id')} -> {item.get('status')}{err}")
     elif args.action == "batch":
         from claivelib import batch as batch_mod
         if args.batch_action == "validate":

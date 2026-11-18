@@ -120,7 +120,14 @@ if yaml is not None:
 # Temporary --set overlay for this process; load() merges it over the file.
 _OVERRIDES = {}
 
-TOP_LEVEL_KEYS = {"default_engine", "roles", "providers", "workspaces", "engines", "teams", "launch"}
+TOP_LEVEL_KEYS = {"default_engine", "roles", "providers", "workspaces", "engines", "teams", "launch", "notifications"}
+NOTIFICATION_TRIGGERS = frozenset({
+    "all", "turn", "batch", "goal", "conversation", "channel_closed",
+    "budget_handoff", "completed", "failed", "ask", "parked", "unwatched",
+})
+NOTIFICATION_SINK_NAME = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+NOTIFICATION_SINK_KEYS = frozenset({"name", "on", "command", "worker", "url", "timeout", "enabled"})
+DEFAULT_NOTIFICATION_TIMEOUT = 5.0
 ENGINE_KEYS = {
     "enabled": bool, "reason": str, "default_model": str, "default_model_efforts": dict,
     "disabled_models": (list, dict), "disabled_model_efforts": dict, "models": dict,
@@ -147,7 +154,7 @@ OWNED_FLAGS = {
     "pi": {"--mode", "--print", "-p", "--provider", "--model", "--thinking", "--session", "--session-id",
            "--session-dir", "--no-session", "--fork", "--continue", "-c", "--resume", "-r"},
     "agy": {"-p", "--print", "--prompt", "--prompt-interactive", "-i", "--input-format", "--output-format",
-            "--model", "--effort", "--conversation", "--continue", "-c", "--print-timeout",
+            "--model", "--effort", "--conversation", "--continue", "-c", "--print-timeout", "--json-schema",
             "--dangerously-skip-permissions", "--mode", "--sandbox", "--json-schema", "--project",
             "--new-project", "--add-dir", "--settings"},
 }
@@ -468,7 +475,99 @@ def validate(data, path):
     if engine is not None and engines.get(engine, {}).get("enabled") is False:
         raise ValueError(f"invalid claive config {path}: default_engine {engine} is disabled in engines.{engine}")
     _validate_teams(data.get("teams", {}), path, set(BUILTIN_ROLES) | set(roles))
+    if "notifications" in data:
+        _validate_notifications(data["notifications"], path)
     return data
+
+
+def _validate_notifications(notifications, path):
+    """Validate the top-level notifications configuration block."""
+    if not isinstance(notifications, dict):
+        raise ValueError(f"invalid claive config {path}: notifications must be an object")
+    unknown = sorted(set(notifications) - {"enabled", "sinks"})
+    if unknown:
+        raise ValueError(f"invalid claive config {path}: notifications: unknown keys {', '.join(unknown)}")
+    if "enabled" in notifications and not isinstance(notifications["enabled"], bool):
+        raise ValueError(f"invalid claive config {path}: notifications.enabled must be true or false")
+    if "sinks" not in notifications:
+        return
+    sinks = notifications["sinks"]
+    if not isinstance(sinks, list):
+        raise ValueError(f"invalid claive config {path}: notifications.sinks must be a list")
+    seen_names = set()
+    for index, entry in enumerate(sinks):
+        where = f"invalid claive config {path}: notifications.sinks[{index}]"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{where} must be an object")
+        unknown = sorted(set(entry) - NOTIFICATION_SINK_KEYS)
+        if unknown:
+            raise ValueError(f"{where}: unknown keys {', '.join(unknown)}")
+        name = entry.get("name")
+        if not isinstance(name, str) or not NOTIFICATION_SINK_NAME.fullmatch(name):
+            raise ValueError(f"{where}.name must be a nonempty string matching [A-Za-z0-9_.-]{{1,64}}")
+        if name in seen_names:
+            raise ValueError(f"{where}: duplicate notification sink {name}")
+        seen_names.add(name)
+        if "enabled" in entry and not isinstance(entry["enabled"], bool):
+            raise ValueError(f"{where}.enabled must be true or false")
+        targets = [key for key in ("command", "worker", "url") if key in entry]
+        if len(targets) != 1:
+            raise ValueError(f"{where}: must specify exactly one of command, worker, or url")
+        target_key = targets[0]
+        target_val = entry[target_key]
+        if not isinstance(target_val, str) or not target_val.strip():
+            raise ValueError(f"{where}.{target_key} must be a nonempty string")
+        if target_key == "url" and not target_val.startswith(("http://", "https://")):
+            raise ValueError(f"{where}.url must start with http:// or https://")
+        if target_key == "worker":
+            if any(character.isspace() for character in target_val):
+                raise ValueError(f"{where}.worker must be a valid worker address without whitespace")
+            if target_val.startswith("@"):
+                from claivelib.aliases import validate_name as validate_alias_name
+                try:
+                    validate_alias_name(target_val[1:])
+                except ValueError as error:
+                    raise ValueError(f"{where}.worker {error}") from error
+        if "on" in entry:
+            triggers = entry["on"]
+            if not isinstance(triggers, list) or not triggers:
+                raise ValueError(f"{where}.on must be a nonempty list of trigger names")
+            for item in triggers:
+                if not isinstance(item, str) or item not in NOTIFICATION_TRIGGERS:
+                    raise ValueError(f"{where}.on contains unknown trigger {item!r}")
+        if "timeout" in entry:
+            timeout = entry["timeout"]
+            if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 120:
+                raise ValueError(f"{where}.timeout must be a number > 0 and <= 120")
+
+
+def notifications_config(cfg=None, *, safe=False):
+    """Return normalized {'enabled': bool, 'sinks': [...]} from config."""
+    if cfg is None:
+        if safe:
+            try:
+                cfg = load()
+            except (ValueError, OSError):
+                return {"enabled": True, "sinks": []}
+        else:
+            cfg = load()
+    raw = cfg.get("notifications") if isinstance(cfg, dict) else None
+    if not isinstance(raw, dict):
+        return {"enabled": True, "sinks": []}
+    sinks = []
+    for entry in raw.get("sinks") or []:
+        kind = next((key for key in ("command", "worker", "url") if key in entry), None)
+        if kind is None:
+            continue
+        sinks.append({
+            "name": entry["name"],
+            "kind": kind,
+            kind: entry[kind],
+            "on": list(entry.get("on") or ["all"]),
+            "timeout": float(entry["timeout"]) if "timeout" in entry else DEFAULT_NOTIFICATION_TIMEOUT,
+            "enabled": entry.get("enabled", True),
+        })
+    return {"enabled": raw.get("enabled", True), "sinks": sinks}
 
 
 def launch_setting(name, default):

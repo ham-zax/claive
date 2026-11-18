@@ -967,8 +967,12 @@ class WorkerChecks(unittest.TestCase):
                                                   "-v", "status-right"], text=True)
                 self.assertIn("claive status-line", right)
                 self.assertIn(str(self.registry), right)
-                time.sleep(0.3)
-                captured = subprocess.check_output(["tmux", "capture-pane", "-p", "-t", panes[1]], text=True)
+                captured = ""
+                for _ in range(25):
+                    captured = subprocess.check_output(["tmux", "capture-pane", "-p", "-t", panes[1]], text=True)
+                    if "Workers:" in captured:
+                        break
+                    time.sleep(0.1)
                 self.assertIn("Workers:", captured)
             finally:
                 subprocess.run(["tmux", "kill-server"], check=False, stderr=subprocess.DEVNULL)

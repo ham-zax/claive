@@ -342,6 +342,24 @@ Exact options and examples: [command reference](command-reference.md).
 - **Shell or CI**: `claive batch start plan.json && claive batch wait ID`, and
   branch on the exit code.
 
+### T3 Code local ACP provider
+
+Add **Local ACP command** under **Settings → Providers → Add provider → Show
+more**. Set the executable to the absolute path of `bin/claive-acp` in your
+checkout. Leave **Arguments** and **Variables** empty to discover the enabled
+engines and models reported by Claive. The picker labels models by engine and
+provider so you can choose the route for each delegate. Claive applies its
+configured reasoning defaults for the selected model. Refresh the provider in
+T3 to pick up catalog changes. An existing provider pinned with `--model`
+continues to offer that model.
+
+Choose this provider when creating a T3 delegate. T3 owns the delegate row and
+delivers the result to its parent. The bridge launches one Claive worker per
+text prompt and forwards cancellation. It requests approval through ACP and
+uses the selected engine's `--read-only` policy, which Pi treats as a prompt
+constraint. Each prompt is a fresh worker turn. Shell-launched workers remain
+visible through Claive's own status and inbox.
+
 ## Execution, verification, and parent acceptance
 
 A `completed` worker executed normally. Each new turn starts with verification

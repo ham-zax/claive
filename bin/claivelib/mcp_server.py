@@ -149,7 +149,7 @@ TOOL_DEFINITIONS = [
                 "inbox_consumer": {"type": "string", "description": "Optional inbox consumer cursor to read."},
                 "parent_session": {"type": "string", "description": "Optional parent session token to filter workers and inbox."},
                 "since_seq": {"type": "integer", "description": "Optional monotonic sequence cursor to read events after."},
-                "peek_inbox": {"type": "boolean", "description": "Read inbox without advancing cursor when true."},
+                "peek_inbox": {"type": "boolean", "description": "Read without advancing the cursor. Defaults to true for a session-only list and false for a named inbox_consumer."},
                 "include_watch_status": {"type": "boolean", "description": "Include watcher and unwatched worker summary."},
             },
             "required": [],
@@ -495,7 +495,7 @@ def _tool_list(arguments):
         eff_consumer = consumer or inbox.session_consumer(parent_session)
         payload["inbox_events"] = inbox.read_new(
             eff_consumer,
-            peek=arguments.get("peek_inbox") is True,
+            peek=arguments.get("peek_inbox", not consumer) is True,
             parent_session=parent_session,
             since_seq=since_seq if has_since_seq else None,
         )

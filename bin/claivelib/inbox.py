@@ -301,14 +301,27 @@ def _seed_seq_unlocked(inbox_path):
     return max(count, max_dense)
 
 
-def current_seq(root=None) -> int:
-    """Return latest monotonic inbox seq (0 when empty)."""
-    base = Path(root) if root is not None else _root()
+def _reserved_seq(base) -> int:
     seq_file = base / "inbox.seq"
     try:
         return int(seq_file.read_text(encoding="utf-8").strip() or 0)
     except (OSError, ValueError):
         return _seed_seq_unlocked(base / "inbox.jsonl")
+
+
+def current_seq(root=None) -> int:
+    """Return a checkpoint that cannot skip an in-flight append."""
+    base = Path(root) if root is not None else _root()
+    # Sample first so a writer starting after a missing-lock check cannot race us.
+    seq = _reserved_seq(base)
+    try:
+        lock = (base / ".inbox.lock").open("rb")
+    except FileNotFoundError:
+        return seq
+    with lock:
+        # A reserved number is safe to publish after its writer releases the lock.
+        fcntl.flock(lock, fcntl.LOCK_SH)
+    return seq
 
 
 def _next_seq_locked(base, inbox_path):
@@ -423,7 +436,7 @@ def read_since(since_seq, *, parent_session=None, mission=None, wake_only=True, 
     if not inbox.is_file():
         return []
     seq_file = base / "inbox.seq"
-    if seq_file.is_file() and current_seq(base) <= since_seq:
+    if seq_file.is_file() and _reserved_seq(base) <= since_seq:
         return []
     size = inbox.stat().st_size
     events, _ = _read_complete_lines(inbox, 0, size)
@@ -440,7 +453,7 @@ def has_since(since_seq, *, parent_session=None, mission=None, wake_only=True, r
         raise ValueError("--since-seq must be a nonnegative integer")
     base = Path(root) if root is not None else _root()
     seq_file = base / "inbox.seq"
-    if seq_file.is_file() and current_seq(base) <= since_seq:
+    if seq_file.is_file() and _reserved_seq(base) <= since_seq:
         return False
     return bool(read_since(since_seq, parent_session=parent_session, mission=mission,
                            wake_only=wake_only, root=base))

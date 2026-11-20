@@ -1,4 +1,5 @@
 """Flat-schema MCP server and zero-shell status.json tests."""
+from concurrent.futures import ThreadPoolExecutor
 import hermetic  # noqa: F401
 import json
 import os
@@ -6,11 +7,13 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from threading import Event
 import unittest
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "bin"))
-from claivelib import mcp_server
+from claivelib import hooks, inbox, mcp_server
 
 CLI_MCP = str(REPO / "bin/claive-mcp")
 
@@ -54,6 +57,79 @@ class McpServerTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def list_workers(self, **arguments):
+        result = mcp_server.dispatch_tool("claive_list", arguments)
+        self.assertFalse(result["isError"], result)
+        return json.loads(result["content"][0]["text"])
+
+    def test_session_list_preserves_hook_events_and_explicit_consumers(self):
+        session = "codex-test"
+        with mock.patch.dict(os.environ, {"CLAIVE_DIR": str(self.registry)}):
+            inbox.append({"type": "turn", "id": "worker", "parent_session": session})
+            first = self.list_workers(parent_session=session)
+            self.assertEqual([event["id"] for event in first["inbox_events"]], ["worker"])
+            self.assertEqual(self.list_workers(parent_session=session), first)
+            _, hook_output = hooks.run_pre_turn(session=session, harness="codex", as_json=True, env={})
+            self.assertEqual(json.loads(hook_output)["events"], first["inbox_events"])
+
+            inbox.append({"type": "turn", "id": "second", "parent_session": session})
+            second = self.list_workers(parent_session=session, peek_inbox=False)
+            self.assertEqual([event["id"] for event in second["inbox_events"]], ["second"])
+            self.assertEqual(self.list_workers(parent_session=session)["inbox_events"], [])
+
+            named = {"parent_session": session, "inbox_consumer": "observer"}
+            observed = self.list_workers(**named, peek_inbox=True)["inbox_events"]
+            self.assertEqual([event["id"] for event in observed], ["worker", "second"])
+            self.assertEqual(self.list_workers(**named)["inbox_events"], observed)
+            self.assertEqual(self.list_workers(**named)["inbox_events"], [])
+
+    def test_replay_checkpoint_cannot_skip_an_inflight_append(self):
+        session = "codex-test"
+        reserved = Event()
+        finish_append = Event()
+        allocate = inbox._next_seq_locked
+        flock = inbox.fcntl.flock
+
+        def pause_after_reservation(base, path):
+            seq = allocate(base, path)
+            reserved.set()
+            if not finish_append.wait(timeout=5):
+                raise TimeoutError("append was never released")
+            return seq
+
+        def release_on_checkpoint(fd, operation):
+            if operation == inbox.fcntl.LOCK_SH:
+                finish_append.set()
+            return flock(fd, operation)
+
+        with (
+            mock.patch.dict(os.environ, {"CLAIVE_DIR": str(self.registry)}),
+            mock.patch.object(inbox, "_next_seq_locked", side_effect=pause_after_reservation),
+            mock.patch.object(inbox.fcntl, "flock", side_effect=release_on_checkpoint),
+            ThreadPoolExecutor(max_workers=1) as executor,
+        ):
+            writer = executor.submit(inbox.append, {"type": "turn", "id": "worker", "parent_session": session})
+            try:
+                self.assertTrue(reserved.wait(timeout=5))
+                first = self.list_workers(parent_session=session, since_seq=0)
+            finally:
+                finish_append.set()
+            written = writer.result(timeout=5)
+            next_read = self.list_workers(parent_session=session, since_seq=first["latest_seq"])
+            self.assertEqual(first["inbox_events"] + next_read["inbox_events"], [written])
+
+    def test_replay_checkpoint_stays_in_sequence_range_with_legacy_history(self):
+        self.registry.mkdir()
+        legacy = {"id": "legacy", "type": "turn", "seq": 1_700_000_000_000_000_000}
+        (self.registry / "inbox.jsonl").write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"CLAIVE_DIR": str(self.registry)}):
+            first = self.list_workers(since_seq=0)
+            self.assertEqual(first["inbox_events"], [legacy])
+            self.assertEqual(first["latest_seq"], 1)
+            inbox.append({"type": "turn", "id": "worker"})
+            replay = self.list_workers(since_seq=first["latest_seq"])
+            self.assertIn("worker", [event["id"] for event in replay["inbox_events"]])
 
     def test_flat_schemas_have_zero_combinators_or_constraints(self):
         names = mcp_server.validate_flat_schemas()

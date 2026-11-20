@@ -136,6 +136,46 @@ def write(job_dir, state):
     return payload
 
 
+def format_preview(summary: dict) -> str:
+    """Format a compact 1-line progress preview for parent wait heartbeats."""
+    from claivelib.ansi import strip_controls
+
+    wid = summary.get("id") or "?"
+    alias = summary.get("alias")
+    name = f"{wid} (@{alias})" if alias else str(wid)
+    status = summary.get("status") or "unknown"
+    phase = strip_controls(str(summary.get("phase") or "running"))
+    elapsed = summary.get("turn_elapsed_s")
+    elapsed_str = f"{elapsed:.0f}s" if isinstance(elapsed, (int, float)) else "?s"
+    steps = summary.get("step_count", 0)
+    files = summary.get("changed_files") or []
+    parts = [f"{name} [{status} {elapsed_str}]", f"phase={phase}", f"steps={steps}", f"files={len(files)}"]
+    if files:
+        shown = ", ".join(strip_controls(str(f)) for f in files[:4])
+        if len(files) > 4:
+            shown += f", +{len(files) - 4} more"
+        parts.append(f"touched=[{shown}]")
+    active_tools = summary.get("active_tools") or {}
+    if active_tools:
+        active_desc = ", ".join(strip_controls(str(v.get("tool") or k)) if isinstance(v, dict) else strip_controls(str(v))
+                                for k, v in list(active_tools.items())[:2])
+        parts.append(f"active_tool={active_desc}")
+    elif isinstance(summary.get("last_tool"), dict):
+        lt = summary["last_tool"]
+        tname = strip_controls(str(lt.get("tool") or lt.get("name") or "tool"))
+        tstat = strip_controls(str(lt.get("status") or "done"))
+        detail = strip_controls(str(lt.get("detail") or "")).strip()
+        if detail:
+            detail = " ".join(detail.split())[:80]
+            parts.append(f"last_tool={tname}({tstat}: {detail})")
+        else:
+            parts.append(f"last_tool={tname}({tstat})")
+    failures = summary.get("task_failures") or 0
+    if failures:
+        parts.append(f"cmd_failures={failures}")
+    return " | ".join(parts)
+
+
 def read_or_build(job_dir, state):
     """Return a fresh compact status dict (without mutating disk if read-only)."""
     return build(job_dir, state)

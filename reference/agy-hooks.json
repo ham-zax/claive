@@ -1,0 +1,12 @@
+{
+  "claive-notifications": {
+    "enabled": true,
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "\"$HOME/.local/bin/claive\" hook pre-turn --harness agy --agy-hook",
+        "timeout": 5
+      }
+    ]
+  }
+}

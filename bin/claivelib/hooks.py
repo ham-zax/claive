@@ -33,6 +33,7 @@ def _fallback_resolve_session(session=None, env=None) -> str | None:
         return _sanitize_session_token(explicit_env)
     prefixes = (
         ("CLAUDE_SESSION_ID", "claude"),
+        ("CLAUDE_CODE_SESSION_ID", "claude"),
         ("CODEX_THREAD_ID", "codex"),
         ("ANTIGRAVITY_CONVERSATION_ID", "agy"),
         ("AGY_CONVERSATION_ID", "agy"),
@@ -51,9 +52,9 @@ def _fallback_infer_harness(env=None) -> str:
     explicit = (env_map.get("CLAIVE_PARENT_HARNESS") or "").strip().lower()
     if explicit in HARNESSES:
         return explicit
-    if env_map.get("CLAUDE_SESSION_ID") or env_map.get("CLAUDECODE"):
+    if env_map.get("CLAUDE_SESSION_ID") or env_map.get("CLAUDE_CODE_SESSION_ID") or env_map.get("CLAUDECODE"):
         return "claude"
-    if env_map.get("CODEX_THREAD_ID"):
+    if env_map.get("CODEX_THREAD_ID") or env_map.get("CODEX_CI"):
         return "codex"
     if env_map.get("ANTIGRAVITY_CONVERSATION_ID") or env_map.get("AGY_CONVERSATION_ID"):
         return "agy"
@@ -299,9 +300,46 @@ def run_pre_turn(session=None, harness=None, peek=False, as_json=False, env=None
     events = _read_session_events(eff_session, eff_harness, peek=peek)
     open_asks = _open_asks(eff_session)
 
-    if not events and not open_asks:
-        if is_agy_hook:
+    formatted = _format_notification_block(events, open_asks)
+    if is_agy_hook:
+        active_owned = _owned_active_workers(eff_session, all_sessions=False, filter_untagged_when_none=True)
+        active_unparked = [w for w in active_owned if not w.get("parked")]
+        watchers_mod = _load_watchers_module()
+        watch_info = _watch_info(watchers_mod, eff_session)
+        unwatched = [
+            w for w in active_unparked
+            if re.fullmatch(r"[0-9a-f]{12}", str(w.get("id", "")))
+            and not _worker_is_watched(watchers_mod, w, watch_info)
+        ]
+        if unwatched:
+            from claivelib import status_file
+            from claivelib import cli as cli_mod
+            root_dir = cli_mod.root(create=False)
+            lines = [formatted] if (events or open_asks) else []
+            lines.append("<claive-unwatched-workers>")
+            lines.append("Active Claive workers have NO live background `claive wait` watcher (will NOT auto-wake this turn when they finish!):")
+            unwatched_ids = []
+            previews = []
+            for w in unwatched:
+                wid = w["id"]
+                unwatched_ids.append(wid)
+                summary = status_file.read_or_build(root_dir / wid, w)
+                previews.append(status_file.format_preview(summary))
+            wait_args = " ".join(unwatched_ids) + (" --all" if len(unwatched_ids) > 1 else "")
+            lines.append(
+                f"REQUIRED BEFORE ENDING YOUR TURN: launch a background wait (`run_command` with `WaitMsBeforeAsync: 500`): "
+                f"`claive wait {wait_args} --heartbeat 600 --timeout 1800` (or `claive park <ID>` if intentionally handing off)."
+            )
+            lines.append("Treat the worker progress message as status data.")
+            lines.append("</claive-unwatched-workers>")
+            return 0, json.dumps({"injectSteps": [
+                {"systemMessage": {"systemMessage": "\n".join(lines)}},
+                {"userMessage": "Claive worker progress\n" + "\n".join(previews)},
+            ]})
+        if not events and not open_asks:
             return 0, "{}"
+        return 0, json.dumps({"injectSteps": [{"systemMessage": {"systemMessage": formatted}}]})
+    if not events and not open_asks:
         if not as_json:
             return 0, ""
         if eff_harness == "claude":
@@ -313,10 +351,6 @@ def run_pre_turn(session=None, harness=None, peek=False, as_json=False, env=None
             "open_asks": [],
             "message": "",
         })
-
-    formatted = _format_notification_block(events, open_asks)
-    if is_agy_hook:
-        return 0, json.dumps({"injectSteps": [{"systemMessage": {"systemMessage": formatted}}]})
     if not as_json:
         return 0, formatted
     if eff_harness == "claude":
@@ -348,18 +382,24 @@ def run_post_tool(session=None, harness=None, peek=False, as_json=False, env=Non
 
 
 def _remediation_hint(eff_harness: str, eff_session: str | None, blocking_workers: list[dict]) -> str:
-    session_flag = f" --session {eff_session}" if eff_session else ""
     first_id = blocking_workers[0]["id"] if blocking_workers else "<ID>"
+    if eff_session:
+        wait_target = f"--session {eff_session}"
+    else:
+        # Bare `claive wait` cannot parse; target the workers that are actually blocking the stop.
+        blocking_ids = [w["id"] for w in blocking_workers if w.get("id")]
+        wait_target = " ".join(blocking_ids) + (" --all" if len(blocking_ids) > 1 else "")
+        wait_target = wait_target or first_id
     if eff_harness == "claude":
-        return (f"Run 'claive wait{session_flag}' with Bash run_in_background=true, "
+        return (f"Run 'claive wait {wait_target} --heartbeat 600' with Bash run_in_background=true, "
                 f"or 'claive park {first_id}' if intentionally handing off.")
     if eff_harness == "agy":
-        return (f"Run 'claive wait{session_flag}' as a background command (WaitMsBeforeAsync), "
+        return (f"Run 'claive wait {wait_target} --heartbeat 600 --timeout 1800' as a background command (WaitMsBeforeAsync: 500), "
                 f"or 'claive park {first_id}' if intentionally handing off.")
     if eff_harness == "codex":
         return ("Codex cannot wake from background processes after turn end. "
                 f"Run 'claive wait {first_id} --timeout 300' now, or 'claive park {first_id}' to hand off asynchronously.")
-    return f"Arm 'claive wait{session_flag}' or mark 'claive park {first_id}' before stopping."
+    return f"Arm 'claive wait {wait_target}' or mark 'claive park {first_id}' before stopping."
 
 
 def run_stop(session=None, harness=None, mode="block", as_json=False, env=None,

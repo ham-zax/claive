@@ -250,6 +250,41 @@ class AgyHooksTests(unittest.TestCase):
         self.assertEqual(code3, 0)
         self.assertEqual(json.loads(out3), {})
 
+        # Unwatched active worker owned by agy-agy-100 triggers <claive-unwatched-workers> alert!
+        w_dir = self.state_dir / "deadbeef1234"
+        w_dir.mkdir(parents=True, exist_ok=True)
+        (w_dir / "state.json").write_text(
+            json.dumps({
+                "schema_version": 2,
+                "id": "deadbeef1234",
+                "label": "long-audit",
+                "engine": "pi",
+                "model": "gemini-4-hydrogen",
+                "workspace": str(self.workspace),
+                "status": "running",
+                "phase": "running tests",
+                "event_steps": 9,
+                "started_at": time.time() - 45,
+                "turn": 1,
+                "parent_session": "agy-agy-100",
+                "launch": {"engine": "pi", "read_only": True},
+            }),
+            encoding="utf-8",
+        )
+        code_unw, out_unw = hooks.run_pre_turn(env={}, stdin_payload=payload)
+        self.assertEqual(code_unw, 0)
+        unw_parsed = json.loads(out_unw)
+        self.assertIn("injectSteps", unw_parsed)
+        unw_msg = unw_parsed["injectSteps"][0]["systemMessage"]["systemMessage"]
+        self.assertIn("<claive-unwatched-workers>", unw_msg)
+        self.assertIn("deadbeef1234", unw_msg)
+        self.assertIn("--heartbeat 600", unw_msg)
+        self.assertNotIn("running tests", unw_msg)
+        self.assertIn("running tests", unw_parsed["injectSteps"][1]["userMessage"])
+        # Clean up dummy worker so legacy test below sees clean state.
+        import shutil
+        shutil.rmtree(w_dir)
+
         # Legacy harness="agy", as_json=True (without agy_hook/PreInvocation) keeps existing shape.
         code4, legacy_out = hooks.run_pre_turn(session="agy-agy-100", harness="agy", as_json=True, env={})
         self.assertEqual(code4, 0)
@@ -330,6 +365,60 @@ class McpLifecycleTests(unittest.TestCase):
             else:
                 os.environ[k] = v
         self.temp.cleanup()
+
+    def _start_slow_worker(self, name, sleep_seconds, session=None):
+        slow_bin = self.base / f"slow_{name}.py"
+        slow_bin.write_text(
+            "#!/usr/bin/python3\n"
+            "import json, time\n"
+            f"print(json.dumps({{'type': 'system', 'subtype': 'init', 'session_id': 'slow-{name}'}}), flush=True)\n"
+            f"time.sleep({sleep_seconds})\n"
+            "ans = 'Done.'\n"
+            "print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': ans}]}}), flush=True)\n"
+            "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': ans}), flush=True)\n",
+            encoding="utf-8",
+        )
+        slow_bin.chmod(0o755)
+        os.environ["CLAUDE_WORKER_BINARY"] = str(slow_bin)
+        prompt = self.base / f"p_slow_{name}.md"
+        prompt.write_text("SLOW\n", encoding="utf-8")
+        cmd = [
+            sys.executable,
+            cli.launcher_path(),
+            "start",
+            "--workspace",
+            str(self.workspace),
+            "--prompt-file",
+            str(prompt),
+            "--engine",
+            "claude",
+            "--fit-checked",
+        ]
+        if session is not None:
+            cmd.extend(["--session", session])
+        before = {state["id"] for state in cli.jobs(limit=None)}
+        started = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        self.assertEqual(started.returncode, 0, started.stderr)
+        new_ids = {state["id"] for state in cli.jobs(limit=None)} - before
+        self.assertEqual(len(new_ids), 1, new_ids)
+        return new_ids.pop()
+
+    def _wait_for_workers(self, worker_ids, timeout=20):
+        result = subprocess.run(
+            [sys.executable, cli.launcher_path(), "wait", *worker_ids, "--all", "--timeout", str(timeout)],
+            capture_output=True,
+            text=True,
+            timeout=timeout + 15,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def _run_wait(self, *args, timeout=15):
+        return subprocess.run(
+            [sys.executable, cli.launcher_path(), "wait", *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
 
     def test_flat_schemas_include_wave2_tools(self):
         names = mcp_server.validate_flat_schemas()
@@ -492,6 +581,193 @@ class McpLifecycleTests(unittest.TestCase):
             final_state = cli.load(cli.job_path(worker_id))
         self.assertEqual(final_state["status"], "completed")
         self.assertEqual(final_state.get("phase"), "session closed")
+
+    def test_wait_heartbeat_preview_wakes_early_with_live_progress(self):
+        slow_bin = self.base / "slow_claude.py"
+        slow_bin.write_text(
+            "#!/usr/bin/python3\n"
+            "import json, time\n"
+            "print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'slow1'}), flush=True)\n"
+            "time.sleep(4.0)\n"
+            "ans = 'Done.'\n"
+            "print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': ans}]}}), flush=True)\n"
+            "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': ans}), flush=True)\n",
+            encoding="utf-8",
+        )
+        slow_bin.chmod(0o755)
+        os.environ["CLAUDE_WORKER_BINARY"] = str(slow_bin)
+        prompt = self.base / "p_slow.md"
+        prompt.write_text("SLOW\n", encoding="utf-8")
+        started = subprocess.run(
+            [
+                sys.executable,
+                cli.launcher_path(),
+                "start",
+                "--workspace",
+                str(self.workspace),
+                "--prompt-file",
+                str(prompt),
+                "--engine",
+                "claude",
+                "--fit-checked",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(started.returncode, 0, started.stderr)
+        worker_id = cli.jobs(limit=1)[0]["id"]
+
+        # CLI wait with --heartbeat 0.3 returns exit 125 with live preview!
+        hb_cli = subprocess.run(
+            [sys.executable, cli.launcher_path(), "wait", worker_id, "--heartbeat", "0.3", "--timeout", "10"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(hb_cli.returncode, 125, hb_cli.stdout + hb_cli.stderr)
+        self.assertIn("Progress preview after 0.3s", hb_cli.stdout)
+        self.assertIn(worker_id, hb_cli.stdout)
+        self.assertIn("Re-arm wait:", hb_cli.stdout)
+
+        # MCP claive_wait with heartbeat=0.2 also returns event=heartbeat, exit_code=125, previews!
+        hb_mcp = mcp_server.dispatch_tool("claive_wait", {"id": worker_id, "heartbeat": 0.2, "timeout": 10})
+        self.assertFalse(hb_mcp["isError"], hb_mcp)
+        hb_data = json.loads(hb_mcp["content"][0]["text"])
+        self.assertEqual(hb_data["event"], "heartbeat")
+        self.assertEqual(hb_data["exit_code"], 125)
+        self.assertIn(worker_id, hb_data["still_running"])
+        self.assertEqual(len(hb_data["previews"]), 1)
+
+        # Final wait finishes exit 0.
+        done = mcp_server.dispatch_tool("claive_wait", {"id": worker_id, "timeout": 15})
+        self.assertFalse(done["isError"], done)
+        done_data = json.loads(done["content"][0]["text"])
+        self.assertEqual(done_data["event"], "worker")
+        self.assertEqual(done_data["worker"], worker_id)
+        self.assertEqual(done_data["exit_code"], 0)
+
+    def test_wait_heartbeat_without_running_workers_times_out_cleanly(self):
+        # Selectorless waits have no worker to preview; --heartbeat must not report 125 / "still running: none".
+        for selector in (("--inbox", "emptyconsumer"), ("--session", "emptysession")):
+            started = time.monotonic()
+            result = self._run_wait(*selector, "--heartbeat", "0.2", "--timeout", "0.8", "--json")
+            elapsed = time.monotonic() - started
+            self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+            data = json.loads(result.stdout)
+            self.assertEqual(data["event"], "timeout")
+            self.assertIsNone(data["worker"])
+            self.assertEqual(data["code"], 124)
+            self.assertEqual(data["inbox_events"], [])
+            self.assertNotIn("still_running", data)
+            self.assertGreaterEqual(elapsed, 0.8)
+
+    def test_wait_heartbeat_excludes_parked_worker_in_session_scope(self):
+        worker_id = self._start_slow_worker("parked", 2.0, session="parkedsession")
+        parked = subprocess.run(
+            [sys.executable, cli.launcher_path(), "park", worker_id],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(parked.returncode, 0, parked.stderr)
+
+        result = self._run_wait("--session", "parkedsession", "--heartbeat", "0.2", "--timeout", "0.8", "--json")
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["event"], "timeout")
+        self.assertNotIn(worker_id, data.get("still_running", []))
+        self.assertEqual(data.get("previews", []), [])
+        self._wait_for_workers([worker_id])
+
+    def test_wait_inbox_heartbeat_without_session_ignores_other_session_workers(self):
+        worker_id = self._start_slow_worker("othersession", 2.0, session="someothers")
+
+        result = self._run_wait("--inbox", "isolatedconsumer", "--heartbeat", "0.2", "--timeout", "0.8", "--json")
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["event"], "timeout")
+        self.assertNotIn(worker_id, data.get("still_running", []))
+        self.assertEqual(data.get("previews", []), [])
+        self._wait_for_workers([worker_id])
+
+    def test_wait_session_timeout_includes_live_previews(self):
+        worker_id = self._start_slow_worker("timeout", 3.0, session="waitsession")
+
+        as_json = self._run_wait("--session", "waitsession", "--timeout", "0.5", "--json")
+        self.assertEqual(as_json.returncode, 124, as_json.stdout + as_json.stderr)
+        data = json.loads(as_json.stdout)
+        self.assertEqual(data["event"], "timeout")
+        self.assertEqual(data["worker"], None)
+        self.assertEqual(data["code"], 124)
+        self.assertEqual(data["still_running"], [worker_id])
+        self.assertEqual([preview["id"] for preview in data["previews"]], [worker_id])
+
+        human = self._run_wait("--session", "waitsession", "--timeout", "0.4")
+        self.assertEqual(human.returncode, 124, human.stdout + human.stderr)
+        self.assertIn(f"Timed out after 0.4s; still running: {worker_id}", human.stdout)
+        self._wait_for_workers([worker_id])
+
+    def test_wait_rearm_hint_preserves_scope_flags(self):
+        scoped_id = self._start_slow_worker("rearm", 3.0, session="rearmsession")
+
+        scoped = self._run_wait(
+            "--session", "rearmsession", "--inbox", "rearmconsumer", "--since-seq", "999999",
+            "--heartbeat", "0.2", "--timeout", "10",
+        )
+        self.assertEqual(scoped.returncode, 125, scoped.stdout + scoped.stderr)
+        scoped_hint = next(line for line in scoped.stdout.splitlines() if line.startswith("Re-arm wait:"))
+        self.assertIn("--session rearmsession", scoped_hint)
+        self.assertIn("--inbox rearmconsumer", scoped_hint)
+        self.assertIn("--since-seq 999999", scoped_hint)
+        self.assertIn("--heartbeat 0.2", scoped_hint)
+        self.assertIn("--timeout 10", scoped_hint)
+        self.assertNotIn(scoped_id, scoped_hint)
+
+        first = self._start_slow_worker("rearm-a", 3.0)
+        second = self._start_slow_worker("rearm-b", 3.0)
+
+        all_res = self._run_wait(
+            first, second, "--all", "--no-fail-fast", "--heartbeat", "0.2", "--timeout", "10",
+        )
+        self.assertEqual(all_res.returncode, 125, all_res.stdout + all_res.stderr)
+        all_hint = next(line for line in all_res.stdout.splitlines() if line.startswith("Re-arm wait:"))
+        self.assertIn(first, all_hint)
+        self.assertIn(second, all_hint)
+        self.assertIn("--all", all_hint)
+        self.assertIn("--no-fail-fast", all_hint)
+        self.assertIn("--heartbeat 0.2", all_hint)
+        self.assertIn("--timeout 10", all_hint)
+
+        any_res = self._run_wait(first, second, "--any", "--heartbeat", "0.2", "--timeout", "10")
+        self.assertEqual(any_res.returncode, 125, any_res.stdout + any_res.stderr)
+        any_hint = next(line for line in any_res.stdout.splitlines() if line.startswith("Re-arm wait:"))
+        self.assertIn(first, any_hint)
+        self.assertIn(second, any_hint)
+        self.assertIn("--any", any_hint)
+        self.assertNotIn("--all", any_hint)
+        self.assertNotIn("--no-fail-fast", any_hint)
+        self._wait_for_workers([scoped_id, first, second])
+
+    def test_wait_rearm_keeps_failed_workers_and_combined_inbox_scope(self):
+        failed = "abcdeffedcba"
+        failed_dir = self.registry / failed
+        failed_dir.mkdir(parents=True)
+        cli.save(failed_dir / "state.json", {
+            "id": failed, "status": "failed", "exit_code": 1, "started_at": time.time(),
+        })
+        running = self._start_slow_worker("rearm-running", 2.0, session="rearmsession")
+        try:
+            result = self._run_wait(
+                failed, running, "--all", "--no-fail-fast", "--session", "rearmsession",
+                "--inbox", "rearmconsumer", "--since-seq", "999999", "--heartbeat", "0.2", "--timeout", "10",
+            )
+            self.assertEqual(result.returncode, 125, result.stdout + result.stderr)
+            hint = next(line for line in result.stdout.splitlines() if line.startswith("Re-arm wait:"))
+            self.assertIn(f"{failed} {running} --all --no-fail-fast", hint)
+            self.assertIn("--session rearmsession --inbox rearmconsumer --since-seq 999999", hint)
+        finally:
+            self._wait_for_workers([running])
 
 
 if __name__ == "__main__":

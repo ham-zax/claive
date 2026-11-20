@@ -1,414 +1,46 @@
 ---
 name: claive-orchestration
-description: Operate Claive workers across Claude Code, Codex, and shell parents. Use plain claive for bounded delegation or fan-out; use claive-orch for authorized, verifier-gated Muse/Pi refinement. Covers worker lifecycle, engine selection, evidence, and integration.
+description: Operate Claive workers across Pi, Codex, Claude Code, OpenCode, and Antigravity. Use plain claive for bounded delegation or fan-out; use claive-orch for verifier-gated refinement. Covers worker lifecycle, reuse, engines, waiting/notifications, and verification.
 ---
 
-# Claive orchestration — delegation and verified runs
+# Claive orchestration
 
-You are the **parent**: own the task scope, worker assignment, final verification, and integration.
-For a verifier-gated `claive-orch` run, its deterministic arbiter decides round progression,
-reverts, escalation, and candidate selection. Follow `claive-orch next RUN`.
-For plain `claive` delegation, these arbiter rules **do not apply**: the parent judges
-the evidence and makes authorized decisions. A worker report alone is not proof.
+You are the parent: you own scope, assignment, integration, and final verification. A worker's exit `0` or report is evidence, never acceptance.
 
-Source, tests and docs: the Claive checkout (`/home/hamza/repo/claive` on the laptop,
-`/home/ubuntu/repo/claive` on ARM). Paths below such as `docs/...` are relative to it.
-The TTC experiment is deferred and is not part of this workflow.
+Checkout and docs live at `/home/hamza/repo/claive` (laptop) or `/home/ubuntu/repo/claive` (ARM). Paths such as `docs/...` and `reference/...` resolve there; paths under `references/...` belong to this skill.
 
-## When to use it, and when not
+## When to delegate, and worker reuse
 
-- **Use** for a task with an executable check (tests, a type-check, a build, or a
-  script you can write) that is big enough that a wrong first attempt is likely or
-  costly.
-- **Do it yourself** when the task is small or tightly coupled to what you are
-  doing, or when delegation overhead exceeds the work.
-- **Fit gate.** Before any launch, state `existing output that already answers it |
-  executable check | cost of a wrong first attempt | why not inline`. Read the README of
-  the tool that produced the data before briefing a worker to analyse it. If a part is
-  missing, do the work inline and say so, even when the user asked to delegate.
-- **One scoped task per turn.** For multi-part work open one reusable worker
-  (`claive open --detach`) and send one small task with one checkable deliverable per
-  turn. Read its summary, check the artifact, then `claive followup` the next task.
-- **Bound every turn.** Pass `--turn-timeout`. Make the first wait short
-  (`claive wait ID --timeout 300`). If it prints `Reasoning-heavy` or no file or report
-  has appeared, ask the worker for a summary first. Cancel only if it cannot answer.
-- **No suitable authorized verifier?** Use direct work or plain `claive` delegation
-  with focused evidence review. Do not introduce tests, scripts, or extra scope solely
-  to force a task through the arbiter. A model review is not executable verification.
-- **Performance, profiling, debugging:** measure the baseline first; see the
-  measurement rules at the top of `docs/orchestration-ladder.md`.
-- Respect the host's rules on delegation. Hamza's Claude Code setup grants
-  standing permission for Codex and Pi workers; elsewhere, ask first if the host
-  requires it.
+- Respect your host's delegation rule (ask first if your `AGENTS.md` or `CLAUDE.md` requires it).
+- Delegate when isolated execution, parallel coverage, or an independent check clearly beats doing the work inline. Keep small, tightly coupled, or design-fluid work inline.
+- Before launching, verify the deliverable, the check that proves it, and why delegation beats inline work. When the user explicitly asks to delegate, do not refuse over ceremony; surface missing checks or risks and proceed.
+- **Reuse for context and prompt caching:** Reuse an active worker (`claive followup`, `send`) when its loaded context and prompt cache still serve the scope, especially across continuous work or short interruptions. Start fresh only when the repo or task shifts substantially, stale assumptions interfere, or heavy compaction clouds it.
+- Batch coherent slices into one brief with all target files, checks, and acceptance criteria instead of dripping micro-follow-ups. If a worker needs more than ~10 follow-ups, reassess the slice.
 
-## Engines and policy
+## Engines, models, and config
 
-`claive` runs ordinary bounded tasks on `--engine muse|pi|claude|codex|agy`. The runtime
-pins Muse to `muse-spark-1.3-contributor` and Codex to
-`gpt-6.1-terra` at `low` through `ultra` (default `xhigh`), `gpt-6-luna` at `medium` or `max` (default `max`), or `gpt-6.1-sol` at `low` through `xhigh` (default `medium`); Pi uses the configured default provider and its selected model (`claive engines` shows both).
-Claude defaults to `claude-haiku-5-5`; `engines.claude.models` in the claive config decides
-which Claude models are allowed. Claude context budget mode is on by default: at its stop limit
-claive denies the worker's tool calls (a PreToolUse hook; the denied tool error is expected), the
-worker writes a `[claive-handoff]` reply and claive continues the turn in a new session
-(inbox `budget_handoff`). After `max_handoffs` automatic continuations the next handoff exits 3
-(`budget_limit`): `claive answer` continues a reusable worker; for a one-shot worker, start a new
-worker from the saved context. Limits: `engines.claude.budget` (Haiku warn 90k/stop 100k, others 140k/150k;
-`budget: false` turns it off; `--output-schema` launches run without it). `claive show` prints a
-"Context budget:" line. `claive handoff ID [--note TEXT]` asks a running budget worker for a handoff now. Spec: `docs/design-budget-mode.md`. `claive-orch` uses only
-Muse/Pi for its implementer/critic ladder; its roster does not authorize Claude/Codex
-workers. Engine sandbox, settings and option limits: `README.md` and
-`docs/harness-integration.md`. Codex parents also follow `claive-routing-codex`.
+- Never rely on hardcoded model rosters. Run `claive engines --json`, `claive models NAME`, and `claive config check` for live enabled engines, defaults, per-model efforts (`default_model_efforts`, `disabled_model_efforts`), and `fallback_models`.
+- Config lives at `$CLAIVE_CONFIG`, else `config.yaml|yml|json` in `~/.config/claive/`. Do not edit the shared file while another agent runs: copy it and export `CLAIVE_CONFIG` for isolated parallel waves, or pass `--set '{...}'` for single-worker overrides.
+- Passing `--model` on Pi remembers it as Pi's global default; AGY also accepts a family stem plus `--effort` (e.g. `--model gemini-4-hydrogen --effort high`).
+- Check cost with `claive usage --all --since 12h` (host) and `claive usage ID --json` (worker). Pass `--no-fallback` to suppress configured `fallback_models` (`--enable-steering` and non-default `--provider` suppress them automatically).
 
-**Claude budget recovery.** A handoff needs a nonblank `## Owed to the parent` section.
-Claive retains the frozen assignment and eligible exact messages across sessions.
-Continuation entry confirms input delivery, not compliance. Check inexpensive handoff claims
-before relying on them. Return owed answers in the final outward reply.
-For exit 3 with `budget_recovery`, read the artifact paths in `claive show ID` and restore
-missing or corrupt inputs. Then use `claive answer` or `followup` to resume a reusable worker.
-For a one-shot worker, start a new worker from the saved context.
-A budget pause leaves an `ask` question open. Retry the same question ID after recovery,
-with the same question and schema. Its original deadline still applies.
-Treat pause guidance and intermediate handoffs as recovery information, never as an answer.
+## Launch, wait, and wake reliably
 
-**Check `claive engines [--json]` before choosing an engine.** It lists each engine's
-enabled state, the user's reason, default and disabled models and efforts, and steering
-transport. Use it to map dictated model and effort names. A disabled launch is refused:
-do not retry or work around it.
+- **Identity and scoping:** Pass `--alias NAME` (`--reuse-alias` safely rebinds a settled alias with no open `ASK` or unaccepted dirty worktree). Launches auto-tag `parent_session` from harness env (`$CLAUDE_SESSION_ID`, `$CODEX_THREAD_ID`, `$ANTIGRAVITY_CONVERSATION_ID`, `$OPENCODE_SESSION_ID`, `$PI_SESSION_ID`) or `--session S`.
+- **Detached launches do not auto-wake idle turns:** `claive start`, `open --detach`, and `batch start` exit `0` in ~50ms. Before ending a turn with active non-parked workers, arm a background `claive wait` (reactive harnesses) or wait in-turn (non-reactive harnesses); otherwise use `claive park ID` (`--park`) for intentional handoffs.
+- **Always use `--heartbeat 600`:** Run `claive wait ID1 ID2 ... --all --heartbeat 600 --timeout 1800` (`--any` for first settled). `inotify` wakes in `<5ms` on settlement (`0` done, `1` failed, `3` `ASK`); `125` prints a compact progress preview (`phase`, `steps`, `changed_files`, `active_tool`) and the exact `Re-arm wait:` command.
+- **Inspect without fighting sandboxes:** Use `claive show ID --json`, `claive list --active`, `claive inbox --session S [--since-seq N]`, `claive peek ID`, or `claive-mcp` (`claive_wait`, `claive_list`). Do not call `read_file` on `~/.local/state/claive/.../status.json` from workspace-sandboxed sessions.
+- **Bound and rescue turns:** Always pass `--turn-timeout`. Use `--tool-idle-timeout SECONDS` or `claive interrupt-tool ID` to abort only a hung silent child tool so the worker recovers. Never `cancel` a working worker blindly: `claive steer` or `send` for a summary first.
+- **Questions (`exit 3`):** An `ASK` turn pauses with `needs_parent`; reply on reusable workers with `claive answer ID --message ...`. Workers cannot launch claive workers (`CLAIVE_WORKER_ID` guard).
 
-## Configuration and isolated runs
+## Worktrees, checks, and acceptance
 
-The host config is YAML or JSON at `$CLAIVE_CONFIG`, else `config.yaml`,
-`config.yml` or `config.json` in `~/.config/claive/`. Validate it before a launch:
+- **One writer per isolated worktree:** Pass `--worktree` (all engines). Add `--carry-dirty` to copy uncommitted parent edits without committing, `--link-deps` to symlink `.venv`/`node_modules`, and `--worktree-setup CMD` for one-time setup. Clean up with `claive worktree list` / `clean --dry-run`.
+- **Declare checks and ownership at launch:** Pass `--check NAME=CMD` (pipelines/`cd` auto-wrap in `bash -lc`) or `--checks-file` (`[...]` or `{"checks": [...]}` with `"command"` or `"shell"`), plus repeated `--owned-path`. Add `--verify-in-worktree` when checks need `.git`, `node_modules`, or `.venv` (newly created gitignored build outputs like `dist/` do not fail mutation checks).
+- **Separate execution, verification, and acceptance:** After settlement, inspect `claive show ID --json`, run `claive verify ID`, and integrate/accept with `claive apply ID --close` (or `claive accept ID`). Never invent `--exception` to pass a failed mandatory check.
 
-```sh
-claive config check
-```
+## References (load only when needed)
 
-Do not edit the shared host file while another agent uses it. For a parallel wave,
-copy it and export the path:
-
-```sh
-cp ~/.config/claive/config.yaml /tmp/wave3.yaml
-export CLAIVE_CONFIG=/tmp/wave3.yaml
-claive config check
-```
-
-The supervisor inherits `CLAIVE_CONFIG`, so follow-ups use the same file. Override one
-key for one worker without a file edit:
-
-```sh
-claive run --set '{engines: {pi: {default_model_efforts: {deepseek-v4-1-flash-1017: low}}}}' ...
-```
-
-`--set` deep-merges over the file, a dedicated flag still wins, and the worker record
-keeps it for follow-ups.
-
-Effort is per model. `default_model_efforts` sets an effort for one model; with no
-value Claive passes no effort flag and the engine uses the model's own level.
-`disabled_model_efforts` refuses an effort for one model. `providers` disables a
-provider with a reason. The old engine-wide `default_reasoning_effort` and
-`disabled_reasoning_efforts` keys are removed and fail with the replacement.
-
-Inspect before choosing:
-
-```sh
-claive config check
-claive engines
-claive engine config NAME
-claive models NAME
-```
-
-## Cost and batching
-
-Each call resends the whole conversation. Cost scales with calls × context, not with
-the number of files changed. A worker with 400 follow-ups and a 340k context costs
-far more than one worker with 20 larger turns.
-
-- Batch related work into one brief. One coherent slice per worker, not one
-  micro-task per follow-up.
-- Put every related file, check and acceptance criterion in the first prompt.
-- Do not use a follow-up for a small edit. Add it to the same brief.
-- Keep the context small: targeted reads and summaries, no large file or log dumps.
-- If a worker needs more than about 10 follow-ups, stop and reassess. The brief was
-  too narrow or the context is too large.
-- Check `claive usage ID --json` for one worker and `claive usage --all --since 12h`
-  for the host. Run it before and after a wave.
-- Prefer a cheaper model for mechanical steps. Reserve the frontier model for
-  reasoning and design.
-
-## Capability map
-
-Workers use the engine's default tools. Claive supplies no restricted tool list.
-
-| Engine | Read-only | Web | Steering | Fork | Step cap | `extra_args` |
-|---|---|---|---|---|---|---|
-| Claude | Default tools, soft-read instruction, not enforced | Always on | Stream JSON | Yes | Refused | Yes |
-| Codex | Read-only sandbox | Live every turn | App Server | Yes | Refused | Exec only |
-| Muse | `:read-only` profile, `--disable-write`, shell on | Always on | Refused | Refused | Opt-in | Yes |
-| Pi | Full tools and an instruction, no enforcement | `--web` refused | RPC | Yes | Refused | Yes |
-| AGY | Soft-read instruction, no enforcement | Refused | Refused | Refused | Refused | Yes |
-
-Steering needs `--enable-steering` (Claude budget mode turns it on by default).
-AGY defaults to `gemini-3.8-flash-high`; pass either a full slug (`gemini-4-hydrogen-high`) or family stem + `--effort` (`--engine agy --model gemini-4-hydrogen --effort high|medium|low|xhigh`).
-Read requests on AGY, Pi and Claude use soft instructions, not enforced write prevention.
-Use `--require-read-only` for a hard requirement. Soft read cannot bypass workspace
-write policy or ownership conflicts. AGY usage aggregates are not model calls.
-Fork needs an idle reusable session.
-`--web` has no effect on Claude, Codex and Muse.
-Claude write turns use `bypassPermissions`. `--setting-sources ""` keeps parent
-hooks and permission rules out. MCP servers and skills load.
-Claude workers load CLAUDE.md from the git root down to the workspace, plus
-`~/.config/claive/claude/CLAUDE.md` when it exists. The parent's `~/.claude/CLAUDE.md` does not load.
-Live check, 2026-10-15: `ExitPlanMode` is unavailable in `--print`.
-Model refusals did not prove a harness-level write block.
-Codex skills and repo `AGENTS.md` load, including on App Server turns.
-The App Server path links user auth, sessions and skills.
-User `config.toml` is opt-in through `engines.codex.user_config: true` or
-`CLAIVE_CODEX_USE_USER_CONFIG=1`. Exec retains `--ignore-rules`.
-Muse read-only omits `--disable-approval`, which conflicts with its profile.
-
-Config `engines.<name>.extra_args` accepts nonempty strings. Claive inserts them
-before `--`, or at the end. It refuses `--` and its owned flags, including
-`--flag=value`. Codex steering and fork turns refuse this setting.
-`enabled: false` plus optional `reason` disables an engine.
-Claive reloads config when a command needs policy. See the README config section
-and `docs/command-reference.md` for the exact options.
-
-## Roles and roster
-
-| Role | Default | Why |
-|---|---|---|
-| Implementer (lane a) | Pi `muse-spark-1.3-contributor-free`, effort `max` | Pi is the available implementer while Muse is disabled |
-| Critic (read-only) | Pi, in this order: `mimo-v2.6-flash-free`, `big-pickle`, `space-bunny-free`; rarely `longcat-2.5-preview-free` | Select a family different from the implementer |
-| Second candidate (lane b, arm D) | Pi, from the same list, a family different from lane a and the last critic, **plus a different strategy** | Diversity must be deliberate |
-| Reviewer (tie only) | Pi read-only, a different family from both lanes if possible | Called at most once |
-| Verifier | The verify command | Final judge |
-
-**Do not use** `nemotron-*` or `ling-3.1-flash-free` (user preference). Use
-`longcat-2.5-preview-free` only when the three preferred families are already
-used in the run or failing. `muse-spark-1.3-free` and
-`muse-spark-1.3-contributor-free` on Pi count as **the same family as Muse**:
-never use them as critic or lane b against Muse.
-
-**Reasoning effort.** Pi models are free: run them at `max` (the Pi engine default;
-Pi clamps it to each model's highest level). For Codex `gpt-6.1-terra`, use `xhigh`
-for complex or design work, `high` for specified mechanical work, and `medium` for
-low-stakes tasks. The host config provides `terra-complex`, `terra-mechanical`,
-and `terra-lowstakes` roles. Codex (`gpt-6.1-sol`) takes its effort
-from the kind of turn: `xhigh` for planning, logic or design debates and other important
-high-level discussion; `medium` (used when no effort is passed) or `low` for mechanical
-implementation where the brief states the exact steps; `high` for complex implementation
-where the brief gives a goal and the worker decides what to do and how. Never `max` or
-`ultra`: the engine refuses both for this model. Unless the user requests another effort, small models run at their
-highest effort (user rule, 2026-10-20): Claude Haiku at `max`, every Pi model (DeepSeek,
-MiniMax and others) at `max`, which Pi clamps to the model's highest level. At `max` a small
-Claude model once spent 63% of a 40-minute turn in hidden reasoning and wrote nothing: always
-pass `--turn-timeout` and check the first result for that failure.
-
-**Pi rules.** Always pass `--model` (an explicit model also becomes Pi's global
-default, and omitting it inherits whatever was used last), plus `--engine pi
---provider opencode2api`. Pi has no `--max-model-steps`, `--output-schema`,
-or `--web`. Pi supports managed worktrees. Both modes use `--tools '*'`, including bash.
-Read-only adds an instruction before and after the task, not a write barrier.
-Pi passes `--offline --no-extensions --no-prompt-templates --no-themes --no-approve`.
-Skills, MCP and context files load. The gateway models are
-free tiers: on a rate limit or an error, retry once, then pick another family and
-mention it in your report.
-
-## Host mechanics
-
-The same protocol works in every host; only how you wait differs. Full protocol:
-`docs/harness-integration.md`.
-
-All paths must be absolute. The ID is the 12-hex value on the first output
-line: `Worker <id> | label | path`. Common worker exit codes: 0 completed, 1 failed,
-3 needs a parent decision, 124 wait deadline expired, 130 cancelled.
-Argument parsing exits 2. Runtime and verification commands also use 2.
-See `docs/command-reference.md` for command-specific codes.
-
-- **Launch without blocking:** `claive start ...` (one turn),
-  `claive open --detach ...` (reusable; returns at once),
-  `claive batch start PLAN.json` (parallel lanes of stages). Pass `--prompt-file /abs/task.md`, `--prompt-file -` (stdin heredoc), or inline `--prompt "..."` (same on `followup`). Never use `&`,
-  `nohup`, or `sleep` polling loops. If start is not confirmed but the supervisor
-  is alive, inspect `claive show ID` before any relaunch.
-- **Name every worker you launch:** pass `--alias NAME` at launch (add `--reuse-alias` to safely rebind `@NAME` when the prior worker is settled, has no open `ASK`, and has no unaccepted dirty worktree), or pass `--label` to derive a name. The launch prints `Alias: @NAME`. Use `@NAME` for `show`, `wait`, `send`, `steer` and `cancel`. Use a session prefix so you never touch another session's workers, or `claive alias remove NAME` when done.
-- **Session-scoped wait (`--any` or `--all`) & monotonic `--since-seq`:** launches auto-tag `parent_session` from harness env (`$CLAUDE_CODE_SESSION_ID`, `$CODEX_THREAD_ID`, `$ANTIGRAVITY_CONVERSATION_ID`, `$PI_SESSION_ID`), `--session S`, or workspace fallback `ws-<hash>`. `claive wait ID1 ID2 ... --all --timeout S` waits for the whole parallel wave to settle (short-circuiting early on `exit 3` `ASK` or failure; `--any` returns on the first worker to settle), or `claive wait --session S [--since-seq N]`. Uses Linux `inotify` (`<5ms` wakeup) and registers a live watcher PID in `$CLAIVE_DIR/watchers/`. Every wake event carries monotonic `seq` (`1, 2, 3, ...`) and a `<= 200`-token `digest`; silent mid-turn progress (`wake: false`) never wakes the parent.
-- **After a context reset, between turns, or via hooks:** run `claive inbox --session <S>` (or `--since-seq N`), or wire `claive hook pre-turn|post-tool|stop|status`. Use `claive park ID` (or `start/open --park`) when intentionally handing off long background work without keeping a live `claive wait` watcher. Push notifications and peer coordinator wakes (`--notify-worker @coord`, `--notify-cmd`, `notifications.sinks` in config) log receipts inspectable via `claive notifications`.
-- **Long tasks:** `claive mission new --title T --goal-file F`, then
-  `export CLAIVE_MISSION=<id>` (or `--mission`) so launches link themselves;
-  `mission note` decisions; `claive mission show ID` prints `Next:`; close it with
-  `claive mission close ID`.
-- **Questions:** a turn asking for a decision exits 3, shows `ASK`, and records
-  `needs_parent`; reply with `claive answer ID --message ...` (reusable workers only).
-- **Roles and reports:** `--role NAME` selects a built-in or custom role.
-  It sets engine, model, effort, read-only and step-cap defaults and requests a
-  `claive-report` block. Built-in roles default to no step cap.
-  Custom roles need `engine`, `read_only`, and `preamble` or `prompt_file`.
-  `--team NAME --member NAME` selects a configured role and binds `@TEAM-MEMBER`.
-  It cannot use `--role`. `--project-file` replaces the team's project context.
-  Repeated `--context-file` adds up to ten bounded UTF-8 layers to the first turn.
-  `--report` requests it without a role. `--output-schema /abs/schema.json` (Muse,
-  Claude, AGY) makes the result schema-shaped JSON.
-- **Checks and worktrees:** add required checks with repeatable `--check NAME=CMD` (shell pipelines and `cd` auto-wrap in `bash -lc`)
-  or `--checks-file` (accepts `[...]` or `{"checks": [...]}` with `"command": [...]` or `"shell": "..."`; add `--verify-in-worktree` when checks need `.git`, `node_modules`, `dist`, or `.venv` — newly created gitignored build artifacts such as `dist/` do not fail mutation checks).
-  Use `--fit-checked` after assessing delegation fit. Every
-  engine supports opt-in `--worktree`, `--worktree --link-deps` (auto-symlinks existing `.venv`, `venv`, `node_modules`, and monorepo `*/node_modules` from source), `--worktree --carry-dirty` (carries uncommitted
-  parent edits into the isolated worktree without `git commit`), `claive apply ID [--close] [--dry-run] [--force] [--json]`
-  (verified, ownership-gated atomic integration back into `--workspace` with optional worker closure; `claive worktree apply` remains available for raw un-gated apply), and one-time `--worktree-setup CMD`.
-  Inspect logged trees with `claive worktree list` and `claive worktree clean --dry-run`.
-  Clean skips trees used by active workers, missing job state, and pending acceptance.
-  It keeps ignored dependency directories unless `--discard-changed` is passed.
-  Use `claive prune --interrupted`
-  for old interrupted jobs after their worktrees are cleared.
-- **Zero-shell inspection, hung-tool rescue, and MCP:** every job maintains an atomic
-  `<job>/status.json` file (readable directly with `read_file` without shell calls; byproduct/cache/linked-dep paths are stripped automatically),
-  and `claive-mcp` (`claive mcp`) provides 10 flat-schema MCP tools (`claive_start`,
-  `claive_peek`, `claive_steer`, `claive_wait`, `claive_cancel`, `claive_verify`, `claive_list`, `claive_followup`, `claive_apply`, `claive_close` — `owned_path` accepts comma/newline lists and `check` accepts newline-separated `NAME=CMD` lines).
-  Pass `--tool-idle-timeout SECONDS` or run `claive interrupt-tool ID [--message ...]` to kill
-  only a hung silent tool child so the worker recovers and emits its `claive-report`.
-  Pass `--no-fallback` to disable configured fallbacks (`--enable-steering` and non-default
-  `--provider` also auto-suppress configured `fallback_models`).
-- Workers cannot launch claive workers (`CLAIVE_WORKER_ID` guard).
-  Claude native subagents remain available through its default tools.
-
-Host specifics:
-- **Claude Code:** plain Bash for launches. Wait either in the foreground
-  (`wait ... --any --timeout 540`, Bash `timeout: 600000`) or with
-  `run_in_background: true` and no `--timeout` to be notified. Inbox consumer
-  `claude`. Output of a `run_in_background` call goes to its task file; read that file.
-  Foreground `sleep` is blocked: wait with the command above or use Monitor.
-- **Codex:** follow `claive-routing-codex`. Prefer `claive-worker` in a managed shell
-  with a short initial yield; retain both worker ID and shell session ID. Consumer
-  `codex`.
-- **Pi agent or shell:** the same commands through bash. Consumer
-  `pi-<name>` or `shell`. Optional push: `CLAIVE_NOTIFY_CMD` gets the event JSON
-  on stdin.
-
-Other capabilities: `fork ID --prompt '...'`, scheduled wakes through
-`send --at +30m [--every 1h]`, `schedule list|cancel`, parent `monitor` commands,
-and bounded peer `channel open|show|close`. A channel lets its members send
-`note|wake` messages to peers. Workers cannot open a channel.
-Exact syntax: `docs/command-reference.md`.
-
-Common commands: `claive show ID --json`, `logs ID [--stderr]`,
-`usage ID --json`, `followup ID --prompt-file F`, `close ID`, `cancel ID`.
-Read output in bounded pieces: `claive logs ID --lines 40 | cut -c1-300` (raw JSONL,
-one event can be several KB) and `claive show ID | head -n 80 | cut -c1-300` for the
-final text. `show --json` has `status`, `exit_code`, `failure_kind`, parsed reports,
-and separate verification/acceptance evidence. `claive doctor [--json]` is a read-only
-health check that never launches a model (`--live` adds one tiny Pi turn).
-
-## Plain workers: evidence and parent acceptance
-
-Keep three claims separate: the supervisor records **execution**, the verifier
-records **checks**, and the parent records **acceptance**. Exit 0 or a worker's
-`done` report establishes only its own scope; neither grants acceptance.
-The `claive list` tag `[exit≠0 N turn/M total: ...]` counts nonzero tool exits, such as a failing test
-run before a fix. The tag is not the outcome: read the report before you judge a worker.
-
-For consequential work, declare checks and file ownership at launch
-(`--check NAME=CMD` or `--checks-file /abs/checks.json`, repeated `--owned-path`), then `claive verify ID`
-after the turn settles and `claive accept ID` as the parent; nothing is accepted
-automatically. Rules that matter:
-
-- Derive expected results from the requirement or independent data. Do not use the
-  program's own output as the expected result.
-- Declare mandatory analyzers individually: a suite exiting 0 while skipping one
-  does not prove it ran.
-- One writer per isolated worktree. Every engine supports `--worktree`.
-- A blocked or unrun mandatory check keeps acceptance pending; only an explicitly
-  authorized parent exception (`--exception 'reason'`) resolves it. Failed mandatory
-  checks cannot be excepted. Never invent an exception to obtain a green status.
-- An ownership violation needs an explicit scope change
-  (`claive scope ID --owned-path ... --reason ...`), not a worker widening its task.
-- New turns start unverified and pending; later workspace edits make evidence stale.
-
-Manifest format, check recording flags, snapshot rules and the reporting fields:
-`docs/harness-integration.md`, "Execution, verification, and parent acceptance".
-
-**Live steering.** Launch Pi, Codex or Claude with `--enable-steering` (Claude with budget
-mode on needs no flag), then
-`claive steer ID --message 'instruction' --wait 10 --json`. The instruction enters
-after the current tool calls and before the next model call. An acknowledgement
-proves the provider accepted it, not that the model complied. Muse rejects steering;
-`followup` is a separate queued turn and `cancel` stops execution. Steering cannot be
-combined with single-turn model fallbacks. Receipt states: `docs/steering.md`.
-
-**Messages.** `claive send ID --message '...' [--mode note|wake|now] [--id HEX32] --json`
-gives a reusable worker context without a new task. `note` (default) waits for its next
-turn, `wake` starts a turn when it is idle, `now` steers and falls back to `wake`. The
-message is context, not a change of assignment. A repeated `--id` returns the first receipt. Question a worker with `claive ask ID --message '...' --timeout 120` (0 answered, 124
-withdrawn/expired, 3 needs the parent); it answers with `claive reply MSG_ID` or its final
-text. `claive peek ID [--steps N] [--start N]` shows its numbered recent steps without
-interrupting it. IDs accept a unique 4..11 character prefix.
-
-**Workers talking to each other.** When two or more perspectives should react to each
-other's reasoning (design debate, proposer/critic rounds, cross-checking a diagnosis),
-open reusable workers with `--alias NAME` or `--label NAME`, and run
-`claive conversation start @a @b --message-file /abs/topic.md --rounds 2 --timeout 300
---json`. Each reply reaches the next worker as evidence, never as an instruction or a
-grant of permissions. Not for independent subtasks (use a batch) or anything with an
-executable check (use the ladder). Exit codes and recovery:
-`docs/harness-integration.md`, "Coordinate a bounded conversation".
-
-**Unattended queue.** `claive goal add` plus `claive serve` run goals with no parent
-session; a parked goal shows as `goal ID ASK` in the inbox and is answered with
-`claive goal answer ID --message ...`. Details: `docs/harness-integration.md`.
-
-**Installed behavior disagrees with source?** Run `claive runtime --source-dir
-/abs/claive --json` before theorizing about flags, and sync with
-`install.sh --runtime-only`, not by editing installed files. On Pi-only hosts, respect
-that host's engine policy and memory budget instead of the laptop's Muse roster.
-
-## The verified ladder (`claive-orch`)
-
-**Read `docs/orchestration-ladder.md` before starting a run.** It has the full
-step table, the arbiter's rules, integration, and the quota fallback. In short:
-
-```bash
-claive-orch init --repo /abs/repo --task-file /abs/task.md \
-  --verify 'python3 -m pytest -q tests/test_x.py' --arm D --rounds 2 --category bug-fix
-claive-orch next RUN          # always ask; it prints NEXT / Why / How
-```
-
-- Lanes start from committed `HEAD` (or `--base REV`); uncommitted parent edits are
-  not in them, and you do not commit just so lanes can see them.
-- The verifier must fail at base; one that already passes makes the run invalid.
-- The task file states goal, constraints, files and acceptance criteria, not the
-  solution. Check every path, symbol and shell variable in it against the repo first.
-- Loop on `next` and do exactly the one action it names. If `claive-orch` refuses a
-  command, read its message and re-run `next`; never work around it with `--force`.
-- The verifier picks the winner. A failing best is reported as `stalled` or
-  `unresolved`, never as success.
-- After `finish`: read the diff, then `claive-orch integrate RUN` (applies unstaged,
-  re-verifies, never commits), then `claive-orch cleanup RUN --branches`.
-
-## Parallel fan-out (independent subtasks)
-
-For several independent tasks with **disjoint file ownership**, create one run
-per task (each has its own lane worktrees) and drive them concurrently. For
-unverifiable chores, use plain `claive open` workers, each in its own worktree.
-
-- One writer per worktree. Read-only workers may share.
-- No fixed cap on concurrent workers (the models run remotely), but run **one heavy
-  job at a time** (tests, builds, verifiers), with `claive-memcap <N>G --lock heavy -- CMD`.
-  Apply the lock to the heavy command, not to a Claive launch that runs worktree setup.
-  Check `uptime` first, re-run timings taken under load, and kill only processes you
-  started.
-- Give each worker its scope, the files it owns, "do not commit, do not delegate,
-  others are editing nearby", and the report format: outcome, files, checks run,
-  doubts, blockers.
-- Integrate one at a time and re-verify after each.
-
-## Quota and failures
-
-- Muse reports `Subscription quota exhausted` (a five-hour quota): stop assigning
-  Muse work and use the **pre-approved fallback**, Pi
-  `muse-spark-1.3-contributor-free` at `max`. Tell the user the reset time and that
-  the fallback is in use; any other fallback model needs the user's approval. Moving
-  a running `claive-orch` lane: `docs/orchestration-ladder.md`.
-- A worker that fails (non-zero `wait`) is not success. Read
-  `claive logs ID --stderr`, retry once only with a changed hypothesis,
-  otherwise stop (`claive-orch finish RUN --abort --reason "..."` in a run) and report.
-- Only `claive-orch verify` and your own re-verification count as proof.
-- Never run worker tasks against production systems or real data.
+- `references/hosts-and-waits.md` — Per-harness wait/hook recipes (`AGY`, `Claude`, `Codex`, `Pi`, `OpenCode`, `T3 Code`), `claive hook`, push sinks (`--notify-worker`, `notifications.sinks`), `claive-mcp`, and peer/scheduled messaging (`send`, `ask`, `conversation`, `schedule`).
+- `references/engines-and-budget.md` — Engine capability table (`claude`, `codex`, `pi`, `agy`, `muse`), sandbox/config flags, `extra_args`, and Claude budget recovery (`exit 3` / `budget_recovery`).
+- `references/ladder.md` — `claive-orch` verifier-gated ladder (`init`, `next`, `integrate`, `cleanup`), parallel fan-out, `claive-memcap`, and quota fallbacks.

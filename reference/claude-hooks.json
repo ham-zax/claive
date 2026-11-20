@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/.local/bin/claive\" hook pre-turn --harness claude --json",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/.local/bin/claive\" hook post-tool --harness claude --json",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/.local/bin/claive\" hook stop --harness claude --mode block",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

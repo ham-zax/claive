@@ -199,6 +199,29 @@ class WaitInboxChecks(unittest.TestCase):
         self.assertIn("use --any", misuse.stderr)
         self.assertEqual(self.cli("wait", "--inbox", "ops", "--timeout", "0").returncode, 1)
 
+    def test_torn_inbox_write_does_not_block_subsequent_reads(self):
+        from unittest import mock
+        from claivelib import inbox
+        inbox_file = self.registry / "inbox.jsonl"
+        inbox_file.parent.mkdir(parents=True, exist_ok=True)
+        with mock.patch.dict(os.environ, {"CLAIVE_DIR": str(self.registry)}):
+            inbox.append({"type": "done", "id": "w1"})
+            # Simulate an interrupted trailing write without a newline.
+            with inbox_file.open("ab") as stream:
+                stream.write(b'{"type": "done", "trunc')
+            # Subsequent append repairs the torn tail before writing the next event.
+            inbox.append({"type": "done", "id": "w2"})
+            events = inbox.read_new(consumer="ops")
+            self.assertEqual([e["id"] for e in events], ["w1", "w2"])
+
+            # Malformed JSON and non-object records must not block reads or sequence recovery.
+            with inbox_file.open("ab") as stream:
+                stream.write(b"{not-valid-json\nnull\n[]\n")
+            (self.registry / "inbox.seq").unlink()
+            inbox.append({"type": "done", "id": "w3"})
+            self.assertEqual([e["id"] for e in inbox.read_new(consumer="ops")], ["w3"])
+            self.assertEqual([e["id"] for e in inbox.read_since(0, wake_only=False)], ["w1", "w2", "w3"])
+
 
 if __name__ == "__main__":
     unittest.main()

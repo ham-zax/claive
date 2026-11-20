@@ -291,6 +291,8 @@ def _seed_seq_unlocked(inbox_path):
                 count += 1
                 try:
                     item = json.loads(raw.decode("utf-8", errors="replace"))
+                    if not isinstance(item, dict):
+                        continue
                     seq = item.get("seq")
                     if isinstance(seq, int) and not isinstance(seq, bool) and 0 < seq < 1_000_000_000:
                         max_dense = max(max_dense, seq)
@@ -337,6 +339,31 @@ def _next_seq_locked(base, inbox_path):
     return nxt
 
 
+def _repair_trailing_torn_line(inbox_path):
+    if not inbox_path.exists():
+        return
+    with inbox_path.open("r+b") as stream:
+        stream.seek(0, os.SEEK_END)
+        size = stream.tell()
+        if size == 0:
+            return
+        stream.seek(size - 1)
+        if stream.read(1) == b"\n":
+            return
+        pos = size
+        last_nl = -1
+        while pos > 0:
+            chunk_start = max(0, pos - 4096)
+            stream.seek(chunk_start)
+            chunk = stream.read(pos - chunk_start)
+            idx = chunk.rfind(b"\n")
+            if idx != -1:
+                last_nl = chunk_start + idx
+                break
+            pos = chunk_start
+        stream.truncate(last_nl + 1)
+
+
 def append(event):
     base = _root()
     base.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -344,6 +371,7 @@ def append(event):
     lock_fd = os.open(base / ".inbox.lock", os.O_WRONLY | os.O_CREAT, 0o600)
     with os.fdopen(lock_fd, "w") as lock_stream:
         fcntl.flock(lock_stream, fcntl.LOCK_EX)
+        _repair_trailing_torn_line(inbox_path)
         seq = _next_seq_locked(base, inbox_path)
         event["seq"] = seq
         if "wake" not in event:
@@ -534,8 +562,14 @@ def _read_complete_lines(inbox, start, size):
         end = size
     events = []
     for line in data.decode("utf-8", errors="replace").splitlines():
-        if line.strip():
-            events.append(json.loads(line))
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
     return events, end
 
 

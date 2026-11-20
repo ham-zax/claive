@@ -7,6 +7,7 @@ import dataclasses
 import datetime
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -1631,8 +1632,10 @@ def outcome_code(state):
     return min(code, 255) if isinstance(code, int) and code > 0 else 1
 
 
-def _wait_result(event, worker, code, inbox_events=()):
-    print(json.dumps(dict(event=event, worker=worker, code=code, inbox_events=list(inbox_events)), indent=2))
+def _wait_result(event, worker, code, inbox_events=(), **extra):
+    payload = dict(event=event, worker=worker, code=code, inbox_events=list(inbox_events))
+    payload.update(extra)
+    print(json.dumps(payload, indent=2))
     return code
 
 
@@ -1869,6 +1872,29 @@ def _safe_relpath(rel):
         raise ValueError(f"unsafe relative path: {rel}")
 
 
+def safe_contained_path(root, rel):
+    """Return (root / rel) after verifying no parent component is a symlink and it stays inside root."""
+    root_path = Path(root)
+    root_real = root_path.resolve()
+    rel_path = Path(rel)
+    parts = rel_path.parts
+    if not rel or rel_path.is_absolute() or ".." in parts or parts in ((), (".",)):
+        raise ValueError(f"unsafe relative path: {rel}")
+    if ".git" in parts:
+        raise ValueError(f"unsafe relative path: {rel}")
+    cur = root_path
+    for part in parts[:-1]:
+        cur = cur / part
+        if cur.is_symlink():
+            raise ValueError(f"unsafe symlinked parent directory in destination: {cur}")
+        if cur.exists() and not cur.is_dir():
+            raise ValueError(f"non-directory parent in destination: {cur}")
+    dst = root_path / rel_path
+    if not dst.parent.resolve().is_relative_to(root_real):
+        raise ValueError(f"destination escapes root: {dst}")
+    return dst
+
+
 def _copy_worktree_entry(src, dst):
     if src.is_symlink():
         if dst.is_dir() and not dst.is_symlink():
@@ -1975,7 +2001,7 @@ def worktree_apply_command(job_id, dry_run=False, force=False, json_output=False
                 continue
             if enforce_gates and owned_paths is not None and not force and acceptance.violations([rel], owned_paths):
                 continue
-            _safe_relpath(rel)
+            safe_contained_path(source, rel)
             initial_entry = (dirty_files[rel] if rel in dirty_files
                              else _entry_at_commit(target, base_commit, rel, before_files))
             wt_entry = entry_for_path(target / rel)
@@ -1995,9 +2021,9 @@ def worktree_apply_command(job_id, dry_run=False, force=False, json_output=False
         closed_worker = False
         if not dry_run and not blocked:
             for rel in to_apply:
-                _copy_worktree_entry(target / rel, source / rel)
+                _copy_worktree_entry(target / rel, safe_contained_path(source, rel))
             for rel in to_delete:
-                dst = source / rel
+                dst = safe_contained_path(source, rel)
                 if dst.is_dir() and not dst.is_symlink():
                     shutil.rmtree(dst)
                 elif os.path.lexists(dst):
@@ -4147,6 +4173,8 @@ def parser():
     waiting.add_argument("--no-fail-fast", action="store_true",
                          help="with --all, wait for remaining workers even after a worker fails")
     waiting.add_argument("--timeout", type=float)
+    waiting.add_argument("--heartbeat", "--preview-after", dest="heartbeat", type=float, metavar="SECONDS",
+                         help="wake early after SECONDS (exit 125) with a live progress preview if still running")
     waiting.add_argument("--inbox", metavar="CONSUMER", help="also return on new inbox events for CONSUMER")
     waiting.add_argument("--session", "--parent-session", dest="parent_session", metavar="SESSION",
                          help="return on new wake events scoped to parent SESSION")
@@ -4387,7 +4415,7 @@ def main(launcher=None):
             print(note, file=sys.stderr, flush=True)
         if args.action == "open" and getattr(args, "detach", False):
             spawn_supervisor(path, state, "_reusable")
-            print(f"Wait: claive wait {state['id']}\nFollow-up: claive followup {state['id']} --prompt-file ...\n"
+            print(f"Wait: claive wait {state['id']} --heartbeat 600\nFollow-up: claive followup {state['id']} --prompt-file ...\n"
                   f"Answer: claive answer {state['id']} --message ...\nClose: claive close {state['id']}")
             return 0
         if args.action in {"run", "open"}:
@@ -4395,7 +4423,7 @@ def main(launcher=None):
             report(load(path))
             return code
         spawn_supervisor(path, state, "_supervise")
-        print(f"Inspect: claive show {state['id']}\nCancel:  claive cancel {state['id']}")
+        print(f"Wait:    claive wait {state['id']} --heartbeat 600\nInspect: claive show {state['id']}\nCancel:  claive cancel {state['id']}")
         return 0
     if args.action == "fork":
         check_nested()
@@ -4814,13 +4842,34 @@ def main(launcher=None):
             raise ValueError("use --any or --all to wait for several workers")
         if args.timeout is not None and args.timeout <= 0:
             raise ValueError("--timeout must be > 0")
+        if args.heartbeat is not None and (args.heartbeat <= 0 or not math.isfinite(args.heartbeat)):
+            raise ValueError("--heartbeat must be finite and > 0")
         paths = [job_path(job_id) for job_id in ids]
         canonical_ids = [p.name for p in paths]
         watch_session = eff_session or inbox_mod.resolve_parent_session()
         start = time.monotonic()
+        next_heartbeat = args.heartbeat
 
         def _is_settled_worker(st, p):
             return st["status"] not in ACTIVE or (st["status"] == "idle" and not list((p / "requests").glob("*.json")))
+
+        def _wait_targets():
+            # Explicit ids win; otherwise only scan active, unparked workers in the resolved session.
+            if ids:
+                return list(zip(ids, paths))
+            scope = eff_session if eff_session is not None else watch_session
+            if scope is None:
+                return []
+            targets = []
+            for st in jobs(limit=None):
+                if st.get("status") not in ACTIVE or st.get("parked"):
+                    continue
+                if st.get("parent_session") != scope:
+                    continue
+                wid = st.get("id")
+                if wid:
+                    targets.append((wid, root() / wid))
+            return targets
 
         with watchers.watching(worker_ids=canonical_ids, inbox_consumer=eff_consumer,
                                parent_session=watch_session, timeout=args.timeout):
@@ -4909,21 +4958,78 @@ def main(launcher=None):
                         if events:
                             return _wait_inbox(events, args.json)
                     elapsed = time.monotonic() - start
+                    if args.heartbeat is not None and elapsed >= next_heartbeat and (args.timeout is None or args.heartbeat < args.timeout):
+                        from claivelib import status_file
+                        previews = []
+                        still_running = []
+                        for job_id, p in _wait_targets():
+                            st = load(p)
+                            if not _is_settled_worker(st, p):
+                                still_running.append(job_id)
+                                preview = status_file.read_or_build(p, st)
+                                previews.append(preview)
+                        if not ids and not still_running:
+                            # Nothing to preview yet; keep waiting for inbox/wake events.
+                            next_heartbeat = elapsed + args.heartbeat
+                        else:
+                            if args.json:
+                                return _wait_result(
+                                    "heartbeat",
+                                    still_running[0] if len(still_running) == 1 else None,
+                                    125,
+                                    elapsed_s=round(elapsed, 2),
+                                    still_running=still_running,
+                                    previews=previews,
+                                )
+                            print(f"Progress preview after {'%g' % args.heartbeat}s (still running: {' '.join(still_running) or 'none'}):")
+                            for preview in previews:
+                                print("  " + status_file.format_preview(preview))
+                            if still_running:
+                                parts = ["claive", "wait", *ids]
+                                if args.all_workers:
+                                    parts.append("--all")
+                                    if args.no_fail_fast:
+                                        parts.append("--no-fail-fast")
+                                elif args.any:
+                                    parts.append("--any")
+                                if eff_session is not None:
+                                    parts.extend(["--session", eff_session])
+                                if args.inbox is not None:
+                                    parts.extend(["--inbox", args.inbox])
+                                if args.since_seq is not None:
+                                    parts.extend(["--since-seq", str(args.since_seq)])
+                                parts.extend(["--heartbeat", '%g' % args.heartbeat])
+                                if args.timeout is not None:
+                                    parts.extend(["--timeout", '%g' % args.timeout])
+                                print(f"Re-arm wait: {shlex.join(parts)}")
+                            return 125
                     if args.timeout is not None and elapsed >= args.timeout:
+                        from claivelib import status_file
+                        timeout_targets = _wait_targets()
+                        running_summaries = []
+                        for job_id, p in timeout_targets:
+                            st = load(p)
+                            if not _is_settled_worker(st, p):
+                                running_summaries.append((job_id, status_file.read_or_build(p, st)))
                         if args.json:
-                            return _wait_result("timeout", None, 124)
-                        if ids:
-                            still_running = [
-                                job_id for job_id, p in zip(ids, paths)
-                                if not _is_settled_worker(load(p), p)
-                            ] or list(ids)
+                            extra_timeout = {}
+                            if running_summaries:
+                                extra_timeout = {
+                                    "still_running": [jid for jid, _ in running_summaries],
+                                    "previews": [s for _, s in running_summaries],
+                                }
+                            return _wait_result("timeout", None, 124, **extra_timeout)
+                        if ids or running_summaries:
+                            still_running = [jid for jid, _ in running_summaries] or list(ids)
                             print(f"Timed out after {'%g' % args.timeout}s; still running: {' '.join(still_running)}")
+                            for _jid, preview in running_summaries:
+                                print("  " + status_file.format_preview(preview))
                         elif args.since_seq is not None and eff_consumer is None:
                             print(f"Timed out after {'%g' % args.timeout}s; no new inbox events since seq {args.since_seq}")
                         else:
                             print(f"Timed out after {'%g' % args.timeout}s; no new inbox events for {eff_consumer}")
                         from claivelib import advice
-                        for job_id, path in zip(ids, paths):
+                        for job_id, path in timeout_targets:
                             state = load(path)
                             try:
                                 calls = get_engine(state.get("engine", DEFAULT_ENGINE)).session_usage(state).get("calls", [])
@@ -4933,8 +5039,12 @@ def main(launcher=None):
                             if note:
                                 print(f"{job_id}: {note}")
                         return 124
-                    step_wait = 0.25 if args.timeout is None else min(0.25, max(0.01, args.timeout - elapsed))
-                    fs_watcher.wait(step_wait)
+                    next_wake = 0.25
+                    if args.timeout is not None:
+                        next_wake = min(next_wake, max(0.01, args.timeout - elapsed))
+                    if args.heartbeat is not None:
+                        next_wake = min(next_wake, max(0.01, next_heartbeat - elapsed))
+                    fs_watcher.wait(next_wake)
     elif args.action == "followup":
         path = job_path(args.id)
         from claivelib import messaging, turns

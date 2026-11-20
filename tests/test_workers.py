@@ -899,6 +899,11 @@ class WorkerChecks(unittest.TestCase):
             skill = "claive-orchestration"
             self.assertEqual((home / "skills" / skill / "SKILL.md").read_bytes(),
                              (REPO_ROOT / "skills" / skill / "SKILL.md").read_bytes())
+            for ref in ("engines-and-budget.md", "hosts-and-waits.md", "ladder.md"):
+                installed_ref = home / "skills" / skill / "references" / ref
+                self.assertEqual(installed_ref.read_bytes(),
+                                 (REPO_ROOT / "skills" / skill / "references" / ref).read_bytes())
+                self.assertEqual(installed_ref.stat().st_mode & 0o777, 0o644)
             self.assertFalse((home / "skills/ttc-experiment").exists())
         self.assertEqual((codex_home / "skills/claive-routing-codex/SKILL.md").read_bytes(),
                          (REPO_ROOT / "skills/claive-routing-codex/SKILL.md").read_bytes())
@@ -910,12 +915,44 @@ class WorkerChecks(unittest.TestCase):
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assertEqual(len(list((state_home / "claive-install/backups").iterdir())), 1)
 
+        # A divergent reference file is backed up under a root+skill-prefixed name
+        # (no collision with the same file from another skills root) and reinstalled.
+        codex_ladder = codex_home / "skills/claive-orchestration/references/ladder.md"
+        codex_ladder.write_text("stale reference\n")
+        reinstall = subprocess.run([install], env=env, capture_output=True, text=True)
+        self.assertEqual(reinstall.returncode, 0, reinstall.stderr)
+        self.assertEqual(codex_ladder.read_bytes(),
+                         (REPO_ROOT / "skills/claive-orchestration/references/ladder.md").read_bytes())
+        self.assertEqual(codex_ladder.stat().st_mode & 0o777, 0o644)
+        ladder_backups = [p for p in (state_home / "claive-install/backups").glob("*/*")
+                          if p.name.endswith("claive-orchestration.references.ladder.md")]
+        self.assertEqual(len(ladder_backups), 1)
+        self.assertEqual(ladder_backups[0].read_text(), "stale reference\n")
+
         # Historical inspection does not require the default Muse adapter to import.
         (bin_dir / "claivelib/engines/muse.py").unlink()
         no_muse = subprocess.run([str(bin_dir / "claive"), "status-line"], env=env,
                                  cwd=outside, capture_output=True, text=True, timeout=12)
         self.assertEqual(no_muse.returncode, 0, no_muse.stderr)
         self.assertIn("Workers:", no_muse.stdout)
+
+        # A Skillshare-managed (symlinked) skill directory is never written through:
+        # a divergent reference file refuses the whole install.
+        import shutil
+        managed = self.path / "managed-skill"
+        (managed / "references").mkdir(parents=True)
+        shutil.copy(REPO_ROOT / "skills/claive-orchestration/SKILL.md", managed / "SKILL.md")
+        for ref in (REPO_ROOT / "skills/claive-orchestration/references").glob("*.md"):
+            shutil.copy(ref, managed / "references" / ref.name)
+        (managed / "references/ladder.md").write_text("managed variant\n")
+        real_skill = codex_home / "skills/claive-orchestration"
+        shutil.rmtree(real_skill)
+        real_skill.symlink_to(managed, target_is_directory=True)
+        refused = subprocess.run([install], env=env, capture_output=True, text=True)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("Managed skill link differs or is broken", refused.stderr)
+        self.assertIn("references/ladder.md", refused.stderr)
+        self.assertEqual((managed / "references/ladder.md").read_text(), "managed variant\n")
 
     def test_install_rejects_symlink_destination(self):
         bin_dir = self.path / "installed-bin"

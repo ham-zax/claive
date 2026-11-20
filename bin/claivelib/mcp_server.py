@@ -104,6 +104,7 @@ TOOL_DEFINITIONS = [
                 "any_worker": {"type": "boolean", "description": "Return as soon as any listed worker settles."},
                 "all_workers": {"type": "boolean", "description": "Wait until every listed worker settles (short-circuiting early on ASK or failure)."},
                 "timeout": {"type": "number", "description": "Maximum seconds to wait (default 60, capped at 300)."},
+                "heartbeat": {"type": "number", "description": "Optional preview interval in seconds; wakes early (exit_code 125) with a live progress preview if still running."},
                 "inbox_consumer": {"type": "string", "description": "Optional inbox consumer name to wake on."},
                 "parent_session": {"type": "string", "description": "Optional parent session token to scope wake events."},
                 "since_seq": {"type": "integer", "description": "Optional monotonic sequence cursor; wakes immediately on seq > since_seq."},
@@ -397,6 +398,9 @@ def _tool_wait(arguments):
         timeout = 60.0
     timeout = min(float(timeout), 300.0)
     cmd = ["wait", *ids, "--timeout", str(timeout), "--json"]
+    heartbeat = arguments.get("heartbeat")
+    if not isinstance(heartbeat, bool) and isinstance(heartbeat, (int, float)) and heartbeat > 0:
+        cmd.extend(["--heartbeat", str(float(heartbeat))])
     if arguments.get("all_workers") is True:
         cmd.append("--all")
     elif arguments.get("any_worker") is True:

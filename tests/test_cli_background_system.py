@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -45,8 +46,9 @@ class CliBackgroundSystemTests(unittest.TestCase):
         for name in (
             "CLAIVE_WORKER_ID", "CLAIVE_ALLOW_NESTED", "CLAIVE_MISSION",
             "CLAIVE_NOTIFY_CMD", "CLAIVE_PARENT_SESSION", "CLAUDE_SESSION_ID",
-            "CODEX_THREAD_ID", "ANTIGRAVITY_CONVERSATION_ID", "AGY_CONVERSATION_ID",
-            "FIXTURE_TEXT_FILE",
+            "CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CODEX_THREAD_ID", "CODEX_CI",
+            "ANTIGRAVITY_CONVERSATION_ID", "AGY_CONVERSATION_ID", "OPENCODE_SESSION_ID",
+            "PI_SESSION_ID", "FIXTURE_TEXT_FILE",
         ):
             self.env.pop(name, None)
         self.prompt = self.path / "task.md"
@@ -284,6 +286,54 @@ class CliBackgroundSystemTests(unittest.TestCase):
             self.assertIn(job, retry_data["systemMessage"])
         finally:
             self.cli("cancel", job)
+
+    def test_hook_stop_stdin_session_isolated_from_inherited_harness_env(self):
+        tests_dir = Path(__file__).resolve().parent
+        script = "\n".join([
+            "import json, os, sys, time",
+            "from pathlib import Path",
+            f"sys.path.insert(0, {str(tests_dir)!r})",
+            f"sys.path.insert(0, {str(tests_dir.parent / 'bin')!r})",
+            "import hermetic",
+            "from claivelib import hooks",
+            "root = Path(os.environ['CLAIVE_DIR'])",
+            "job = 'abcdef123456'",
+            "(root / job).mkdir(parents=True)",
+            "(root / job / 'state.json').write_text(json.dumps({",
+            "    'id': job, 'label': 'inherited-env', 'engine': 'pi', 'workspace': os.getcwd(),",
+            "    'status': 'running', 'started_at': time.time(), 'parent_session': 'claude-cc-99',",
+            "}))",
+            "payload = {'hook_event_name': 'Stop', 'session_id': 'cc-99', 'stop_hook_active': False}",
+            "code, message = hooks.run_stop(stdin_payload=payload)",
+            "session, harness = hooks._resolve_session_and_harness(stdin_payload=payload)",
+            "markers = ('CLAUDE_SESSION_ID', 'CLAUDE_CODE_SESSION_ID', 'CLAUDECODE',",
+            "           'CODEX_THREAD_ID', 'CODEX_CI', 'ANTIGRAVITY_CONVERSATION_ID', 'OPENCODE_SESSION_ID')",
+            "print(json.dumps({'code': code, 'message': message, 'session': session,",
+            "                  'harness': harness, 'leaked': [k for k in markers if k in os.environ]}))",
+        ])
+        inherited = {
+            "CLAUDE_SESSION_ID": "outer-review",
+            "CLAUDE_CODE_SESSION_ID": "outer-review",
+            "CLAUDECODE": "1",
+            "CODEX_THREAD_ID": "outer-review",
+            "CODEX_CI": "1",
+            "ANTIGRAVITY_CONVERSATION_ID": "outer-review",
+            "OPENCODE_SESSION_ID": "outer-review",
+        }
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            env=dict(os.environ, **inherited),
+            text=True, capture_output=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["leaked"], [])
+        self.assertEqual((data["session"], data["harness"]), ("claude-cc-99", "claude"))
+        self.assertEqual(data["code"], 2)
+        self.assertIn("abcdef123456", data["message"])
+        self.assertIn("claive wait --session claude-cc-99 --heartbeat 600", data["message"])
+        for name in inherited:
+            self.assertNotIn(name, self.env)
 
     def test_top_level_apply_close_and_agy_preinvocation_hook_envelope(self):
         # 1. AGY PreInvocation hook returns {} when empty, and injectSteps envelope when an event arrives

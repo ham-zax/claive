@@ -155,7 +155,7 @@ OWNED_FLAGS = {
            "--session-dir", "--no-session", "--fork", "--continue", "-c", "--resume", "-r"},
     "agy": {"-p", "--print", "--prompt", "--prompt-interactive", "-i", "--input-format", "--output-format",
             "--model", "--effort", "--conversation", "--continue", "-c", "--print-timeout", "--json-schema",
-            "--dangerously-skip-permissions", "--mode", "--sandbox", "--json-schema", "--project",
+            "--dangerously-skip-permissions", "--mode", "--sandbox", "--project",
             "--new-project", "--add-dir", "--settings"},
 }
 ROLE_KEYS = {

@@ -340,3 +340,19 @@ class WorktreeHousekeepingChecks(unittest.TestCase):
         self.assertIn("kept 111111111111: changes", self.command("worktree", "clean").stdout)
         self.assertTrue(changed.exists())
         self.assertIn("cleaned 111111111111", self.command("worktree", "clean", "--discard-changed").stdout)
+
+    def test_worktree_apply_rejects_symlinked_destination_parent(self):
+        job, state = self.make_tree("333333333333")
+        state["status"] = "completed"
+        state["retained_worktree"] = str(job / "worktree")
+        state["launch"] = {"isolation": {"owner": "claive", "source": str(self.repo), "base_commit": "HEAD"}}
+        module.save(job / "state.json", state)
+        wt_file = job / "worktree" / "review" / "info.txt"
+        wt_file.parent.mkdir(parents=True)
+        wt_file.write_text("from worker\n")
+        outside = Path(tempfile.mkdtemp(dir=self.repo.parent))
+        self.addCleanup(shutil.rmtree, outside, True)
+        (self.repo / "review").symlink_to(outside)
+        with self.assertRaisesRegex(ValueError, "symlinked parent"):
+            module.worktree_apply_command("333333333333")
+        self.assertFalse((outside / "info.txt").exists())

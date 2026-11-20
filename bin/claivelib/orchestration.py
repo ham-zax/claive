@@ -18,8 +18,10 @@ import random
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -831,26 +833,30 @@ def copy_cached_entry(source, destination):
 def copy_acceptance(source, target):
     """Copy held-out checks into a workspace; return the created paths for removal."""
     created = []
-    for file in sorted(Path(source).rglob("*")):
-        if not file.is_file():
-            continue
-        destination = Path(target) / file.relative_to(source)
-        if destination.exists():
-            remove_paths(created)
-            raise ValueError(f"held-out check collides with a workspace file: {destination}")
-        for parent in reversed(destination.relative_to(target).parents[:-1]):
-            directory = Path(target) / parent
-            if not directory.exists():
-                directory.mkdir()
-                created.append(directory)
-        shutil.copy2(file, destination)
-        created.append(destination)
+    try:
+        for file in sorted(Path(source).rglob("*")):
+            if not file.is_file():
+                continue
+            rel = file.relative_to(source)
+            destination = workers.safe_contained_path(target, rel)
+            if os.path.lexists(destination):
+                raise ValueError(f"held-out check collides with a workspace file: {destination}")
+            for parent in reversed(rel.parents[:-1]):
+                directory = Path(target) / parent
+                if not directory.exists():
+                    directory.mkdir()
+                    created.append(directory)
+            created.append(destination)
+            shutil.copy2(file, destination)
+    except Exception:
+        remove_paths(created)
+        raise
     return created
 
 
 def remove_paths(paths):
     for path in reversed(paths):
-        if path.is_dir():
+        if path.is_dir() and not path.is_symlink():
             try:
                 path.rmdir()
             except OSError:
@@ -939,7 +945,8 @@ def restore_cache(cache_dir, workspace, cache_paths):
         cleaned = cache_entry(entry)
         if cleaned is None:
             continue
-        source, destination = Path(cache_dir) / cleaned, Path(workspace) / cleaned
+        source = Path(cache_dir) / cleaned
+        destination = workers.safe_contained_path(workspace, cleaned)
         if os.path.lexists(source):
             copy_cached_entry(source, destination)
 
@@ -2015,55 +2022,63 @@ def command_integrate(args):
     spec = list(include) + [f":(exclude){p}" for p in exclude]
     diff_extra = ["--", *spec] if spec else []
 
-    def filtered_names():
-        output = git(repo, "diff", "--no-renames", base, commit, "--name-only", *diff_extra, check=False)
-        return [line.strip() for line in output.splitlines() if line.strip()]
-
     # Bytes, unstripped: trailing whitespace and CRLF line endings are part of the patch.
-    patch = subprocess.run(["git", "-C", str(repo), "diff", "--no-renames", "--binary", base, commit,
-                            *diff_extra], capture_output=True).stdout
+    command = ["git", "-C", str(repo), "diff", "--no-renames"]
+    patch = subprocess.check_output([*command, "--binary", base, commit, *diff_extra])
     if not patch.strip():
         if spec:
             raise ValueError("nothing to integrate for the selected paths")
     if patch.strip():
+        changed = subprocess.check_output([*command, "--name-only", "-z", base, commit, *diff_extra])
+        names = [os.fsdecode(name) for name in changed.split(b"\0") if name]
         first = subprocess.run(["git", "-C", str(repo), "apply"], input=patch, capture_output=True)
         if first.returncode != 0:
-            # --3way can fail after writing conflict markers and index stages; snapshot the
-            # touched files so a failure leaves the checkout exactly as it was.
-            touched = filtered_names()
-            snapshot = {name: ((Path(repo) / name).read_bytes() if (Path(repo) / name).is_file() else None)
-                        for name in touched}
-            staged = set(git(repo, "diff", "--cached", "--name-only", "--", *touched, check=False).splitlines()
-                         if touched else [])
-            second = subprocess.run(["git", "-C", str(repo), "apply", "--3way"], input=patch,
-                                    capture_output=True)
-            if second.returncode == 0:
-                names = filtered_names()
-                if names:
-                    subprocess.run(["git", "-C", str(repo), "reset", "-q", "--", *names],
-                                   capture_output=True, text=True)
-            else:
-                for name, content in snapshot.items():
-                    target = Path(repo) / name
-                    if content is None:
-                        target.unlink(missing_ok=True)
+            # --3way can stage changes and write conflict markers. Use a private
+            # index and save touched files so the caller keeps their staging.
+            snapshot = {}
+            for name in names:
+                target = workers.safe_contained_path(repo, name)
+                if target.is_symlink():
+                    snapshot[name] = ("symlink", os.readlink(target))
+                elif target.is_file():
+                    snapshot[name] = ("file", target.read_bytes(), stat.S_IMODE(target.stat().st_mode))
+                else:
+                    snapshot[name] = None
+            index_path = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-path", "index"))
+            with tempfile.TemporaryDirectory(prefix="claive-integrate-") as temporary:
+                temporary_index = Path(temporary) / "index"
+                if index_path.is_file():
+                    shutil.copy2(index_path, temporary_index)
+                second = subprocess.run(
+                    ["git", "-C", str(repo), "apply", "--3way"], input=patch, capture_output=True,
+                    env=dict(os.environ, GIT_INDEX_FILE=str(temporary_index)),
+                )
+            if second.returncode != 0:
+                for name, entry in snapshot.items():
+                    target = workers.safe_contained_path(repo, name)
+                    if entry is None:
+                        if target.is_symlink() or target.is_file():
+                            target.unlink()
+                    elif entry[0] == "symlink":
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        if target.is_symlink() or target.is_file():
+                            target.unlink()
+                        target.symlink_to(entry[1])
                     else:
                         target.parent.mkdir(parents=True, exist_ok=True)
-                        target.write_bytes(content)
-                if touched:
-                    git(repo, "reset", "-q", "--", *touched, check=False)
-                if staged:
-                    git(repo, "add", "--", *sorted(staged), check=False)
+                        if target.is_symlink():
+                            target.unlink()
+                        target.write_bytes(entry[1])
+                        target.chmod(entry[2])
                 output = b"".join(part or b"" for part in (second.stdout, second.stderr,
                                                             first.stdout, first.stderr)).decode(errors="replace")
-                names = filtered_names()
                 conflicting = [name for name in names if name and name in output]
                 if not conflicting:
                     conflicting = names or ["(unknown)"]
                 for name in conflicting:
                     print(f"Conflict: {name}")
                 return 1
-        for applied in filtered_names():
+        for applied in names:
             print(f"Applied: {applied}")
     result = None
     if not args.no_verify:

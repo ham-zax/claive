@@ -33,8 +33,14 @@ class SandboxTestCase(unittest.TestCase):
                 "CLAIVE_PARENT_SESSION",
                 "CLAIVE_PARENT_HARNESS",
                 "CLAUDE_SESSION_ID",
+                "CLAUDE_CODE_SESSION_ID",
+                "CLAUDECODE",
                 "CODEX_THREAD_ID",
+                "CODEX_CI",
+                "ANTIGRAVITY_CONVERSATION_ID",
                 "AGY_CONVERSATION_ID",
+                "OPENCODE_SESSION_ID",
+                "PI_SESSION_ID",
             )
         }
         os.environ["CLAIVE_DIR"] = str(self.state_dir)
@@ -43,9 +49,12 @@ class SandboxTestCase(unittest.TestCase):
         os.environ.pop("CLAIVE_NOTIFY_CMD", None)
         os.environ.pop("CLAIVE_PARENT_SESSION", None)
         os.environ.pop("CLAIVE_PARENT_HARNESS", None)
-        os.environ.pop("CLAUDE_SESSION_ID", None)
-        os.environ.pop("CODEX_THREAD_ID", None)
-        os.environ.pop("AGY_CONVERSATION_ID", None)
+        for name in (
+            "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CODEX_THREAD_ID",
+            "CODEX_CI", "ANTIGRAVITY_CONVERSATION_ID", "AGY_CONVERSATION_ID",
+            "OPENCODE_SESSION_ID", "PI_SESSION_ID",
+        ):
+            os.environ.pop(name, None)
 
     def tearDown(self):
         config.set_overrides()
@@ -412,8 +421,41 @@ class HooksTests(SandboxTestCase):
         self.assertEqual(sess, "agy-conv1")
         self.assertEqual(har, "agy")
 
+        sess, har = hooks._resolve_session_and_harness(env={"CLAUDE_CODE_SESSION_ID": "cc/77"})
+        self.assertEqual(sess, "claude-cc-77")
+        self.assertEqual(har, "claude")
+
         with self.assertRaises(ValueError):
             hooks._resolve_session_and_harness(harness="unknown-harness")
+
+    def test_fallback_session_and_harness_cover_claude_code_session_env(self):
+        env = {"CLAUDE_CODE_SESSION_ID": "cc-77"}
+        self.assertEqual(hooks._fallback_resolve_session(env=env), "claude-cc-77")
+        self.assertEqual(hooks._fallback_resolve_session("explicit", env=env), "explicit")
+        self.assertEqual(hooks._fallback_infer_harness(env=env), "claude")
+        self.assertEqual(hooks._fallback_infer_harness(env={"CLAUDECODE": "1"}), "claude")
+        self.assertEqual(hooks._fallback_infer_harness(env={"CODEX_CI": "1"}), "codex")
+
+    def test_remediation_hint_without_session_targets_blocking_workers(self):
+        one = [{"id": "aaaa1111bbbb"}]
+        two = [{"id": "aaaa1111bbbb"}, {"id": "cccc2222dddd"}]
+        self.assertIn("claive wait aaaa1111bbbb --heartbeat 600",
+                      hooks._remediation_hint("claude", None, one))
+        two_hint = hooks._remediation_hint("claude", None, two)
+        self.assertIn("claive wait aaaa1111bbbb cccc2222dddd --all --heartbeat 600", two_hint)
+        self.assertNotIn("--session", two_hint)
+        self.assertIn("claive wait aaaa1111bbbb --heartbeat 600 --timeout 1800",
+                      hooks._remediation_hint("agy", None, one))
+        self.assertIn("claive wait aaaa1111bbbb cccc2222dddd --all --heartbeat 600 --timeout 1800",
+                      hooks._remediation_hint("agy", None, two))
+        # Empty worker lists still fall back to a parseable placeholder target.
+        self.assertIn("claive wait <ID> --heartbeat 600", hooks._remediation_hint("claude", None, []))
+        self.assertIn("claive wait aaaa1111bbbb", hooks._remediation_hint("generic", None, one))
+        # A resolved session keeps the session-targeted form.
+        self.assertIn("claive wait --session s1 --heartbeat 600",
+                      hooks._remediation_hint("claude", "s1", one))
+        self.assertIn("claive wait --session s1 --heartbeat 600 --timeout 1800",
+                      hooks._remediation_hint("agy", "s1", one))
 
     def test_pre_turn_silent_when_nothing_pending(self):
         code, out = hooks.run_pre_turn(session="s1", harness="claude")

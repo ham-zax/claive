@@ -40,6 +40,14 @@ targets=("$bin_dir/claive" "$bin_dir/claive-worker"
          "$bin_dir/claive-codex" "$bin_dir/claive-orch"
          "$bin_dir/claive-memcap" "$bin_dir/claive-mcp")
 modes=(755 755 755 755 755 755)
+# guards[i] parallels sources/targets: empty for launchers, or the skills root
+# owning a skill file. Skillshare symlinks the whole skill directory, so a
+# target like <skills_root>/<skill>/references/foo.md must also check the skill
+# directory two levels up; see symlinked_target below.
+guards=()
+for _ in "${targets[@]}"; do
+  guards+=("")
+done
 # --runtime-only syncs the package, launchers, and provenance, and skips every
 # skill check and write: Skillshare owns skill destinations, so a divergent or
 # broken managed skill link must not block a runtime repair.
@@ -47,6 +55,7 @@ if ! "$runtime_only"; then
   sources+=("$source_dir/skills/claive-routing-codex/SKILL.md")
   targets+=("$skill_dir/SKILL.md")
   modes+=(644)
+  guards+=("$codex_skills")
 fi
 # Host-neutral skills go to Codex and Claude Code, and with --pi to a Pi parent agent.
 # Pi workers read the same directory; claive's recursion guard stops them launching workers.
@@ -60,6 +69,18 @@ for skill in "${shared_skills[@]}"; do
     sources+=("$source_dir/skills/$skill/SKILL.md")
     targets+=("$skills_root/$skill/SKILL.md")
     modes+=(644)
+    guards+=("$skills_root")
+    # Reference docs ship alongside SKILL.md into <skill>/references/.
+    skill_references=$source_dir/skills/$skill/references
+    if [[ -d $skill_references ]]; then
+      for reference_file in "$skill_references"/*; do
+        [[ -f $reference_file ]] || continue
+        sources+=("$reference_file")
+        targets+=("$skills_root/$skill/references/$(basename -- "$reference_file")")
+        modes+=(644)
+        guards+=("$skills_root")
+      done
+    fi
   done
 done
 fi
@@ -69,6 +90,30 @@ fi
 project_launcher_link() {
   [[ $1 -lt 6 && -L $3 ]] &&
     [[ "$(readlink -f -- "$3")" == "$(readlink -f -- "$2")" ]]
+}
+
+# True when path itself or any directory from its parent up to (excluding)
+# guard is a symlink, i.e. installing path would write through a link. An empty
+# guard keeps the legacy launcher check: only path and its parent directory.
+symlinked_target() {
+  local path=$1 guard=$2 dir
+  if [[ -L $path ]]; then
+    return 0
+  fi
+  dir=$(dirname -- "$path")
+  if [[ -z $guard ]]; then
+    if [[ -L $dir ]]; then
+      return 0
+    fi
+    return 1
+  fi
+  while [[ $dir != "$guard" && $dir != / ]]; do
+    if [[ -L $dir ]]; then
+      return 0
+    fi
+    dir=$(dirname -- "$dir")
+  done
+  return 1
 }
 
 [[ -d $package_source ]] || { echo "Missing source package: $package_source" >&2; exit 1; }
@@ -83,9 +128,10 @@ for index in "${!sources[@]}"; do
   if project_launcher_link "$index" "$source_file" "$target"; then
     continue
   fi
-  if [[ -L $target || -L $(dirname -- "$target") ]]; then
-    # Skillshare links the SKILL DIRECTORY, not SKILL.md. Never write through it.
-    # The repo and managed source must match before the rest of the installer runs.
+  if symlinked_target "$target" "${guards[index]}"; then
+    # Skillshare links the SKILL DIRECTORY, not SKILL.md or references/. Never
+    # write through it. The repo and managed source must match before the rest
+    # of the installer runs.
     if [[ ! -f $target ]] || ! cmp -s -- "$source_file" "$target"; then
       echo "Managed skill link differs or is broken: $target (update Skillshare source and sync)" >&2
       exit 1
@@ -192,7 +238,7 @@ for index in "${!sources[@]}"; do
     fi
     continue
   fi
-  if [[ -L $target || -L $(dirname -- "$target") ]]; then
+  if symlinked_target "$target" "${guards[index]}"; then
     echo "Already current (managed link): $target"
     continue
   fi
@@ -208,8 +254,13 @@ for index in "${!sources[@]}"; do
   if [[ -f $target ]]; then
     ensure_backup_dir
     backup_name=$(basename -- "$target")
-    [[ $backup_name != SKILL.md ]] ||
-      backup_name=$(basename -- "$(dirname -- "$(dirname -- "$(dirname -- "$target")")")")-$(basename -- "$(dirname -- "$target")").SKILL.md
+    if [[ -n ${guards[index]} && $target == "${guards[index]}"/* ]]; then
+      # Skill files: prefix the backup with the skills root and the path inside
+      # it (SKILL.md keeps its historical <root>-<skill>.SKILL.md name), so the
+      # same reference file backed up from codex, claude, and pi never collides.
+      backup_name="$(basename -- "$(dirname -- "${guards[index]}")")-${target#"${guards[index]}"/}"
+      backup_name=${backup_name//\//.}
+    fi
     cp -p -- "$target" "$backup_dir/$backup_name"
   fi
   mkdir -p -- "$(dirname -- "$target")"

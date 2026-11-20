@@ -402,6 +402,100 @@ class OrchMore(unittest.TestCase):
             engines += [event["data"]["engine"] for event in map(json.loads, events) if event["type"] == "lane.added"]
         self.assertEqual(engines, ["pi", "muse"])
 
+    def test_restore_cache_and_copy_acceptance_reject_symlinked_parents(self):
+        from claivelib import orchestration
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "secret.txt").write_text("keep")
+
+            cache_dir = root / "cache"
+            (cache_dir / "sub").mkdir(parents=True)
+            (cache_dir / "sub" / "data.txt").write_text("overwrite")
+            ws = root / "ws"
+            ws.mkdir()
+            (ws / "sub").symlink_to(outside)
+            with self.assertRaisesRegex(ValueError, "symlinked parent"):
+                orchestration.restore_cache(cache_dir, ws, ["sub/data.txt"])
+            self.assertFalse((outside / "data.txt").exists())
+            self.assertEqual((outside / "secret.txt").read_text(), "keep")
+
+            acc_src = root / "acc"
+            (acc_src / "sub").mkdir(parents=True)
+            (acc_src / "sub" / "check.py").write_text("assert True\n")
+            with self.assertRaisesRegex(ValueError, "symlinked parent"):
+                orchestration.copy_acceptance(acc_src, ws)
+            self.assertFalse((outside / "check.py").exists())
+
+    def test_command_integrate_preserves_partial_staging_on_conflict(self):
+        import types
+        from unittest import mock
+        from claivelib import orchestration
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            target = repo / "target.txt"
+            target.write_text("line1\nline2\nline3\n")
+            subprocess.run(["git", "add", "target.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=repo, check=True)
+            base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # Create a conflicting branch commit
+            subprocess.run(["git", "checkout", "-q", "-b", "lane"], cwd=repo, check=True)
+            target.write_text("line1\nlane-change\nline3\n")
+            subprocess.run(["git", "commit", "-q", "-am", "lane"], cwd=repo, check=True)
+            lane_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # Switch back and create partial staging: index != HEAD and worktree != index
+            subprocess.run(["git", "checkout", "-q", "-"], cwd=repo, check=True)
+            target.write_text("line1\nstaged-change\nline3\n")
+            subprocess.run(["git", "add", "target.txt"], cwd=repo, check=True)
+            target.write_text("line1\nworktree-change\nline3\n")
+            subprocess.run(["git", "update-index", "--assume-unchanged", "target.txt"], cwd=repo, check=True)
+            index_path = repo / ".git" / "index"
+            index_before = index_path.read_bytes()
+
+            run_dir = root / "runs" / "r1"
+            run_dir.mkdir(parents=True)
+            state = {
+                "config": {"repo": str(repo), "base": base},
+                "finished": {"outcome": "verified", "commit": lane_commit},
+                "integrated": False,
+            }
+            args = types.SimpleNamespace(run="r1", paths=None, exclude=None, no_verify=True, force=False)
+            with mock.patch.object(orchestration, "load_state", return_value=(run_dir, state)):
+                rc = orchestration.command_integrate(args)
+            self.assertEqual(rc, 1)
+            idx_text = subprocess.run(["git", "show", ":target.txt"], cwd=repo, capture_output=True, text=True, check=True).stdout
+            self.assertEqual(idx_text, "line1\nstaged-change\nline3\n")
+            self.assertEqual(target.read_text(), "line1\nworktree-change\nline3\n")
+            self.assertEqual(index_path.read_bytes(), index_before)
+
+    def test_copy_acceptance_removes_partial_destination_on_failure(self):
+        from unittest import mock
+        from claivelib import orchestration
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "checks"
+            workspace = root / "workspace"
+            (source / "sub").mkdir(parents=True)
+            workspace.mkdir()
+            (source / "sub" / "check.py").write_text("assert True\n")
+
+            def copy_then_fail(_source, destination):
+                destination.write_text("partial")
+                raise OSError("copy failed")
+
+            with mock.patch.object(orchestration.shutil, "copy2", side_effect=copy_then_fail):
+                with self.assertRaisesRegex(OSError, "copy failed"):
+                    orchestration.copy_acceptance(source, workspace)
+            self.assertEqual(list(workspace.iterdir()), [])
+
 
 if __name__ == "__main__":
     unittest.main()

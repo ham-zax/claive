@@ -396,7 +396,7 @@ claive send [--mode {note,wake,now}] (--message MESSAGE | --message-file MESSAGE
 | `--message-file` | Existing absolute message file |
 | `--id` | 32 lowercase hexadecimal message ID |
 | `--at` | Wake at an ISO-8601 time or +duration. Refuses --mode now |
-| `--every` | Repeat duration, at least 30s. Requires --at |
+| `--every` | Repeat duration, at least 60s (max 16 active schedules per worker). Requires --at |
 | `--json` | Print JSON |
 
 Exit codes: 0 on success. Common errors apply.
@@ -958,22 +958,26 @@ Example: `claive peek @backend --steps 5 --start 10`.
 
 ## `wait`
 
-Wait for a settled worker or new inbox events. Several IDs require `--any`.
+Wait for settled workers (`--any` or `--all`), an early progress preview (`--heartbeat`), or new inbox events.
 
 ```text
-claive wait [--any] [--timeout TIMEOUT] [--inbox CONSUMER] [--json] [id ...]
+claive wait [--any | --all] [--no-fail-fast] [--heartbeat SECONDS] [--timeout TIMEOUT] [--inbox CONSUMER] [--session SESSION] [--since-seq SEQ] [--json] [id ...]
 ```
 
 | Option | Meaning |
 |---|---|
-| `--any` | Return when the first worker settles |
+| `--any` | Return when the first listed worker settles |
+| `--all` | Wait until every listed worker settles (short-circuits early on `ASK` or failure unless `--no-fail-fast`) |
+| `--heartbeat`, `--preview-after` | Wake early after `SECONDS` (`exit 125`) with a compact live progress preview (`phase`, `steps`, `changed_files`, `active_tool`/`last_tool`) if still running |
 | `--timeout` | Wait deadline in seconds, positive |
-| `--inbox` | also return on new inbox events for CONSUMER |
-| `--json` | print one JSON object with the event that ended the wait |
+| `--inbox` | Also return on new inbox events for `CONSUMER` |
+| `--session` | Return on new wake events scoped to parent `SESSION` |
+| `--since-seq` | Return on wake events with monotonic `seq > SEQ` |
+| `--json` | Print one JSON object with the event that ended the wait |
 
-Exit codes: Worker outcome, 124 wait deadline, or inbox result: 3 needs parent, otherwise 0.
+Exit codes: Worker outcome (`0` completed, `1` failed, `3` needs parent), `125` heartbeat progress preview, `124` wait deadline, or inbox result.
 
-Example: `claive wait @builder @reviewer --any --timeout 30 --json`.
+Example: `claive wait @builder @reviewer --all --heartbeat 600 --timeout 1800`.
 
 ## `inbox`
 

@@ -291,7 +291,7 @@ native copy of an idle Pi, Codex or Claude session. It reuses the workspace and
 launch policy. It does not create an isolated worktree.
 
 `claive send ID --message '...' --at +30m [--every 1h]` schedules a wake.
-`--every` needs `--at` and must be at least 30 seconds. `--mode now` cannot schedule.
+`--every` needs `--at` and must be at least 60 seconds (up to 16 active schedules per worker). `--mode now` cannot schedule.
 Use `claive schedule list ID` and `claive schedule cancel ID SCHEDULE_ID`.
 
 `claive monitor add ID --command 'git status --short' --every 5m` registers a

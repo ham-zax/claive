@@ -3,856 +3,1549 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>claive: a referee for AI coding agents</title>
-<meta name="description" content="claive is a referee for AI coding agents. Workers write code, a different-model critic finds defects, and your tests decide what gets kept or rolled back. MIT licensed; experimental.">
-<meta name="color-scheme" content="light dark">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='2' y='1' width='5' height='14' fill='%231d6a42'/%3E%3Crect x='9' y='1' width='5' height='14' fill='%231b1814'/%3E%3C/svg%3E">
+<title>claive — Multi-harness coding agent orchestration &amp; triage</title>
+<meta name="description" content="claive is a harness-neutral outer cloth that wraps Codex, Claude Code, Pi, AGY, and Muse with isolated Git worktrees, a Ratatui triage dashboard, flat-schema MCP tools, verifier-gated orchestration, and an unattended server queue. MIT licensed.">
+<meta name="color-scheme" content="dark light">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%230d1117'/%3E%3Crect x='4' y='4' width='6' height='16' rx='1.5' fill='%2338bdf8'/%3E%3Crect x='13' y='4' width='7' height='7' rx='1.5' fill='%2334d399'/%3E%3Crect x='13' y='13' width='7' height='7' rx='1.5' fill='%23e879f9'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400..600;1,6..72,400&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400..600;1,6..72,400&display=swap">
 <style>
-:root{--paper:#f3eee3;--wash:#ebe4d3;--ink:#1b1814;--muted:#5b5445;--rule:#cdc4af;--pass:#1d6a42;--bad:#a8391b;
---serif:"Newsreader",Charter,"Iowan Old Style",Georgia,serif;--mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
-box-sizing:border-box;color-scheme:light dark;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
-@media (prefers-color-scheme:dark){:root{--paper:#15130f;--wash:#1d1b16;--ink:#eee8da;--muted:#aba392;--rule:#3a362c;--pass:#78d3a0;--bad:#f0987a}}
-*,*::before,*::after{box-sizing:inherit}
-html{scroll-padding-top:env(safe-area-inset-top,0px);-webkit-text-size-adjust:100%}
-@media (prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}
-body{margin:0;background:var(--paper);color:var(--ink);font:400 1.125rem/1.6 var(--serif);font-optical-sizing:auto}
-::selection{background:var(--ink);color:var(--paper)}
-a{color:inherit;text-underline-offset:.2em;text-decoration-thickness:1px}
-a:hover{text-decoration-thickness:2px}
-:focus-visible{outline:2px solid var(--pass);outline-offset:3px;border-radius:1px}
-.skip{position:absolute;top:-5rem;left:1rem;z-index:99;background:var(--ink);color:var(--paper);padding:.65rem 1rem;font:500 .85rem var(--mono)}
-.skip:focus{top:1rem}
-@media(prefers-reduced-motion:reduce){.poster,.film .step,.film .tape .te,.film .count span,.film .verdict span,.film .s4 .a2,.film .s4 .shelf,.film .s5 .lb{transition:none!important}}
-.wrap{max-width:68rem;margin-inline:auto;padding-inline:max(16px,env(safe-area-inset-left,0px),env(safe-area-inset-right,0px))}
-p,li,dd{max-width:65ch;text-wrap:pretty}
-h1,h2,h3{font-weight:500;text-wrap:balance;margin:0}
-h1{font-size:clamp(2.6rem,7.4vw,5.2rem);line-height:1.02;letter-spacing:-.025em}
-h2{font-size:clamp(1.7rem,4vw,2.5rem);line-height:1.12;letter-spacing:-.015em;margin-bottom:1rem}
-code,pre,.mono{font-family:var(--mono);font-size:.86em}
-header{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;column-gap:1.5rem;padding-block:.3rem;border-bottom:1px solid var(--rule)}
-header .name{display:inline-flex;align-items:center;min-height:2.75rem;font:500 1.25rem var(--mono);text-decoration:none}
-header nav{display:flex;gap:1.4rem;font-size:.95rem}
-header nav a{display:inline-flex;align-items:center;min-height:2.75rem;white-space:nowrap}
-@media (max-width:36rem){header nav{flex:1 0 100%;justify-content:space-between;gap:0;border-top:1px solid var(--rule)}}
-section{padding-block:clamp(3rem,8vw,5.5rem) 0}
-.hero{display:grid;gap:2.5rem;padding-block:clamp(2.5rem,7vw,5rem) 0}
-@media (min-width:60rem){.hero{grid-template-columns:1.08fr .92fr;align-items:center;gap:3.5rem}}
-.lede{font-size:clamp(1.2rem,2.4vw,1.45rem);line-height:1.45;margin:1.4rem 0}
-.chip{display:inline-flex;align-items:center;gap:.55rem;font:500 .8rem var(--mono);padding:.3rem .7rem;border:1px solid var(--muted);color:var(--muted);margin:0}
-.chip::before{content:"";width:.5rem;height:.5rem;background:var(--bad)}
-.acts{display:flex;flex-wrap:wrap;gap:.8rem;margin-top:1.6rem}
-.btn{display:inline-flex;align-items:center;min-height:2.75rem;padding:.55rem 1.3rem;font:500 .95rem var(--mono);background:var(--ink);color:var(--paper);border:1.5px solid var(--ink);text-decoration:none}
-.btn.alt{background:none;color:var(--ink)}
-.btn:hover{background:var(--pass);border-color:var(--pass);color:var(--paper)}
-.record{margin:0;border-block:2px solid var(--ink);background:var(--wash);padding:.4rem clamp(.8rem,2vw,1.3rem) 1rem}
-.record ol{list-style:none;margin:0;padding:0}
-.record li{display:flex;flex-wrap:wrap;align-items:center;gap:.3rem 1rem;padding-block:.85rem;border-bottom:1px dotted var(--muted);max-width:none}
-.record li:last-child{border-bottom:0}
-.role{flex:0 0 5.2rem;font:500 .74rem var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
-.what{flex:1 1 13rem;font-size:1rem;line-height:1.4}
-.t{display:inline-flex;gap:3px;flex:none}
-.record figcaption{font-size:.88rem;line-height:1.45;color:var(--muted);margin-top:.5rem}
-.record figcaption .mono{display:block;margin-top:.5rem;font-size:.78rem}
-.rungs{list-style:none;padding:0;margin:1.8rem 0 0;border-top:1px solid var(--ink)}
-.rungs li{display:grid;gap:.3rem 1.5rem;padding-block:1.2rem;border-bottom:1px solid var(--rule);max-width:none}
-@media (min-width:44rem){.rungs li{grid-template-columns:10rem 1fr}}
-.rungs b{font:500 1.15rem var(--serif)}
-.rungs b span{display:block;font:500 .78rem var(--mono);color:var(--muted)}
-.rungs p{margin:0}
-.rungs .bad{color:var(--bad);font-weight:500}
-dl{margin:0}
-.terms{display:grid;gap:0 2.5rem;margin-top:2rem}
-@media (min-width:44rem){.terms{grid-template-columns:1fr 1fr}}
-.terms>div,.arms>div{padding-block:.8rem;border-top:1px solid var(--rule)}
-dt{font-weight:600}
-dd{margin:0;color:var(--muted)}
-.why{list-style:none;padding:0;margin:1.5rem 0 0;display:grid;gap:0 3rem}
-@media (min-width:44rem){.why{grid-template-columns:1fr 1fr}.why li:first-child{grid-column:1/-1}}
-.why li{padding-block:1rem;border-top:1px solid var(--rule);max-width:none}
-.why li:first-child{border-top:2px solid var(--ink);font-size:clamp(1.4rem,3vw,2rem);line-height:1.25;padding-block:1.4rem}
-.why strong{font-weight:600}
-.why li:first-child span{display:block;font-size:1.05rem;color:var(--muted);margin-top:.5rem;max-width:60ch}
-.q{font-size:clamp(1.25rem,2.6vw,1.65rem);line-height:1.35;font-style:italic;margin:0 0 1.5rem;padding:0;max-width:44ch}
-.arms{margin:1.5rem 0}
-.arms dt{display:inline-block;min-width:2.4rem;font:500 .95rem var(--mono)}
-.arms dd{display:inline}
-pre{background:var(--wash);border:1px solid var(--rule);padding:1rem;margin:1rem 0;overflow-x:auto;line-height:1.55;scrollbar-color:var(--muted) var(--wash);max-width:100%}
-.try h3{font-size:1.15rem;margin-top:1.8rem}
-.try p{margin:.5rem 0}
-.apart{color:var(--muted)}
-.gap{margin:0;padding:0;list-style:none}
-.gap li{padding-block:.5rem;border-top:1px solid var(--rule);max-width:none}
-footer{margin-top:clamp(3.5rem,9vw,6rem);padding-block:1.6rem calc(2rem + env(safe-area-inset-bottom,0px));border-top:2px solid var(--ink);display:flex;flex-wrap:wrap;gap:.4rem 1.5rem;justify-content:space-between;font-size:.95rem}
-footer p{margin:0;max-width:none}
-footer a{display:inline-block;padding-block:.4rem}
-/* ===== motion: shared test squares ===== */
-.sq{position:relative;display:block;width:var(--sw,.62rem);height:var(--sh,1.2rem);flex:none}
-.sq b{position:absolute;inset:0;display:block}
-.sq .ok{background:var(--pass);transform-origin:50% 100%}
-.sq .no{box-shadow:inset 0 0 0 var(--sb,1.5px) var(--bad);opacity:0}
-.sq.f .ok{opacity:0}
-.sq.f .no{opacity:1}
-.sq.dash .ok{opacity:0}
-.sq.dash .no{opacity:1;box-shadow:none;border:var(--sb,1.5px) dashed var(--muted)}
-.sq.gh{box-shadow:inset 0 0 0 var(--sb,1.5px) var(--rule)}
-.sq.gh .ok,.sq.gh .no{opacity:0}
-.strip{display:flex;gap:var(--sg,3px)}
-.strip.big{--sw:clamp(1.1rem,3.4vw,2rem);--sh:clamp(2.4rem,7vw,4.4rem);--sb:2px;--sg:clamp(4px,.8vw,8px)}
-.strip.mid{--sw:clamp(.7rem,2vw,1rem);--sh:clamp(1.5rem,4vw,2.1rem);--sb:1.5px;--sg:3px}
-/* The run record is readable before, during and without enhancement. */
-
-/* ===== motion: the film ===== */
-.filmsec>p{margin-top:0}
-.film .stage{isolation:isolate}
-.film .hud,.film .capbar{position:relative;z-index:1}
-.film .hud .badge span{visibility:hidden}
-.film[data-chapter="0"] .hud .badge .ill,.film[data-chapter="1"] .hud .badge .ill,.film[data-chapter="2"] .hud .badge .real,.film[data-chapter="3"] .hud .badge .ill,.film[data-chapter="4"] .hud .badge .ill,.film[data-chapter="5"] .hud .badge .ill{visibility:visible}
-.film .step,.film .tape .te,.film .count span,.film .verdict span,.film .s4 .a2,.film .s4 .shelf,.film .s5 .lb{opacity:0}
-.film[data-chapter="2"] .step.active,.film[data-chapter="2"] .tape .te.active,.film[data-chapter="2"] .count span.active,.film[data-chapter="2"] .verdict span.active,.film[data-chapter="3"] .s4 .a2.active,.film[data-chapter="3"] .s4 .shelf.active,.film[data-chapter="4"] .s5 .lb.active{opacity:1}
-.film .step,.film .tape .te,.film .count span,.film .verdict span{pointer-events:none}
-.film .tape .te,.film .count span,.film .verdict span,.film .step{visibility:hidden}
-.film .tape .te.active,.film .count span.active,.film .verdict span.active,.film .step.active{visibility:visible}
-@media(prefers-reduced-motion:no-preference){.film .step,.film .tape .te,.film .count span,.film .verdict span,.film .s4 .a2,.film .s4 .shelf,.film .s5 .lb{transition:opacity .35s ease-out}}
-.film .rail .bar{transform:scaleX(0)}
-.film .rail li.active .bar{transform:scaleX(1)}
-@media(prefers-reduced-motion:no-preference){.film .rail .bar{transition:transform .45s ease-out}}
-.film .stamp{opacity:0}
-.film .stamp.active{opacity:1}
-@media(max-width:47.99rem){.s3{gap:.8rem}.s3 .l{gap:.65rem}.rail{gap:.2rem}.rail li{font-size:.6rem}.s3 .score{gap:.4rem}.s3 .count{font-size:2rem}.s3 .stamp{font-size:.7rem}.s4 .bf{gap:.5rem}.s4 .cp,.s5 .cp{padding:.45rem}.capbar{padding-block:.7rem}.s5 .lanes{gap:.65rem}}
-@media(max-width:47.99rem){
-  .s3{grid-template-columns:minmax(0,1fr)}
-  .s3 .l,.s3 .score,.s3 .tape,.s3 .tc{width:100%;min-width:0;max-width:100%}
-  .s3 .tape .te,.s3 .fine{overflow-wrap:anywhere}
-  .rail{grid-template-columns:repeat(5,minmax(0,1fr))}
-  .rail li{min-width:0;overflow-wrap:anywhere}
-  .hud .badge{width:46%;max-width:46%;min-width:0;font-size:.61rem}
-  .hud .badge span{min-width:0;overflow-wrap:anywhere;padding:.18rem .25rem}
+:root {
+  --bg: #f6f2e8;
+  --surface: #ece6d8;
+  --surface-2: #e3dccb;
+  --ink: #171512;
+  --muted: #595244;
+  --rule: #cfc7b4;
+  --accent: #0c628c;
+  --accent-soft: rgba(12, 98, 140, 0.11);
+  --ok: #156d43;
+  --ok-soft: rgba(21, 109, 67, 0.12);
+  --warn: #9a5b04;
+  --warn-soft: rgba(154, 91, 4, 0.13);
+  --ask: #8e248a;
+  --ask-soft: rgba(142, 36, 138, 0.12);
+  --fail: #b2321e;
+  --fail-soft: rgba(178, 50, 30, 0.12);
+  /* Always-dark cockpit terminal tokens */
+  --term-bg: #0c1017;
+  --term-surface: #131923;
+  --term-row-sel: #1c2535;
+  --term-border: #253042;
+  --term-ink: #e5ecf4;
+  --term-muted: #7f8ea3;
+  --term-cyan: #38bdf8;
+  --term-green: #34d399;
+  --term-yellow: #fbbf24;
+  --term-magenta: #e879f9;
+  --term-red: #f87171;
+  --serif: "Newsreader", Charter, Georgia, serif;
+  --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --radius: 8px;
+  --shadow: 0 14px 40px rgba(0, 0, 0, 0.10);
+  color-scheme: light dark;
 }
-@media(max-width:24rem){.hud{gap:.25rem}.s3 .tape{font-size:.61rem}.cast li{gap:.15rem}.screen{--pad:.85rem}}
-.film{margin:1.6rem 0 0}
-.film .screen,.film .ctrl,.film .cnav{display:none}
-html.film-ready .film .screen{display:block}
-html.film-ready .film .ctrl{display:flex}
-html.film-ready .film .cnav{display:grid}
-.screen{position:relative;overflow:hidden;background:var(--wash);border-block:2px solid var(--ink);--pad:clamp(1rem,3vw,2.25rem)}
-.stage{display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:auto 1fr auto;aspect-ratio:16/9;min-width:0;width:100%}
-@media (max-width:47.99rem){.stage{aspect-ratio:auto;min-height:clamp(34rem,155vw,40rem)}}
-.hud{display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;padding:var(--pad) var(--pad) 0;font:500 .72rem/1.3 var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
-.hud .chap,.hud .badge{display:grid}
-.hud .chap span,.hud .badge span{grid-area:1/1}
-.hud .badge{justify-items:end;text-align:right;max-width:58%}
-.hud .badge span{border:1px solid currentColor;padding:.2rem .5rem;color:var(--ink)}
-.hud .badge .ill{color:var(--bad)}
-.scenes{display:grid;grid-template-columns:minmax(0,1fr);position:relative;min-width:0;width:100%}
-.sc{grid-area:1/1;display:grid;align-content:center;gap:clamp(1rem,2.4vw,1.8rem);padding:var(--pad);opacity:0;visibility:hidden;min-width:0;pointer-events:none}
-.film[data-chapter="0"] .s1,.film[data-chapter="1"] .s2,.film[data-chapter="2"] .s3,.film[data-chapter="3"] .s4,.film[data-chapter="4"] .s5,.film[data-chapter="5"] .s6{opacity:1;visibility:visible}
-@media (prefers-reduced-motion:no-preference){.sc{transition:opacity .45s ease-out,visibility .45s}}
-.film .capbar{min-height:5.5rem;align-content:center}
-.ttl{font:500 clamp(1.25rem,3vw,1.9rem)/1.15 var(--serif);letter-spacing:-.01em}
-.k{font:500 .72rem/1.3 var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
-.capbar{display:grid;padding:.9rem var(--pad) calc(var(--pad)*.85);border-top:1px solid var(--rule)}
-.capbar p{grid-area:1/1;margin:0;max-width:62ch;font-size:clamp(1.05rem,2.3vw,1.5rem);line-height:1.32;opacity:1}
 
-/* scene 1: the problem */
-.s1{grid-template-columns:1fr}
-@media (min-width:48rem){.s1{grid-template-columns:1fr 1fr;align-items:center;column-gap:clamp(2rem,6vw,5rem)}}
-.flow{display:grid;justify-items:start}
-.node{border:1.5px solid var(--ink);background:var(--paper);padding:.7rem 1rem;min-width:min(100%,19rem);display:grid;gap:.15rem}
-.node .v{font-size:clamp(1rem,2vw,1.25rem);line-height:1.3}
-.ar{display:block;position:relative;width:1.5px;height:1.9rem;margin-left:1.4rem}
-.ar .ln{position:absolute;left:0;right:0;top:0;bottom:.35rem;background:var(--ink);transform-origin:50% 0}
-.ar .hd{position:absolute;left:-.28rem;bottom:.05rem;width:.62rem;height:.62rem;border-right:1.5px solid var(--ink);border-bottom:1.5px solid var(--ink);rotate:45deg}
-.unk{display:grid;gap:1rem;justify-items:start}
-.unk .big{margin:0;font:500 clamp(1.5rem,3.6vw,2.4rem)/1.12 var(--serif);letter-spacing:-.01em}
-
-/* scene 2: the cast */
-.cast{list-style:none;margin:0;padding:0;display:grid}
-.cast li{position:relative;display:grid;grid-template-columns:6rem 1fr;gap:.2rem 1.2rem;align-items:baseline;padding-block:clamp(.55rem,1.4vw,.95rem);border-top:1px solid var(--rule);max-width:none}
-.cast .ln{position:absolute;left:0;right:0;top:-1px;height:2px;background:var(--ink);transform-origin:0 50%}
-.cast .r{font:500 .78rem var(--mono);letter-spacing:.06em;text-transform:uppercase}
-.cast .d{font-size:clamp(1rem,2vw,1.3rem);line-height:1.35}
-@media (max-width:30rem){.cast li{grid-template-columns:1fr}}
-
-/* scene 3: a real run */
-.s3{grid-template-columns:1fr}
-@media (min-width:48rem){.s3{grid-template-columns:1.15fr .85fr;column-gap:clamp(2rem,5vw,4rem);align-items:center}}
-.s3 .l{display:grid;gap:1rem;align-content:center;min-width:0}
-.rail{display:grid;grid-template-columns:repeat(5,1fr);gap:.4rem;list-style:none;margin:0;padding:0}
-.rail li{position:relative;max-width:none;font:500 clamp(.62rem,1.7vw,.74rem) var(--mono);letter-spacing:.05em;text-transform:uppercase;padding-bottom:.45rem;border-bottom:3px solid var(--rule)}
-.rail .bar{position:absolute;left:0;right:0;bottom:-3px;height:3px;background:var(--ink);transform-origin:0 50%}
-.steps{display:grid}
-.step{grid-area:1/1;display:grid;gap:.4rem;align-content:start}
-.step p{margin:0;font-size:clamp(1.15rem,2.6vw,1.65rem);line-height:1.28}
-.tape{display:grid;gap:.35rem;border:1px solid var(--ink);background:var(--paper);padding:.7rem .9rem;font:400 clamp(.72rem,1.8vw,.84rem)/1.55 var(--mono)}
-.tape .th{color:var(--muted)}
-.tape .tc{display:grid}
-.tape .te{grid-area:1/1;display:grid;min-width:0;overflow-wrap:anywhere}
-.tape .te b{font-weight:500}
-.tape .te span{color:var(--muted)}
-.score{display:grid;gap:.9rem;justify-items:start;align-content:center}
-.score .strip{--sw:clamp(1.1rem,3.6vw,2.1rem);--sh:clamp(2.6rem,8vw,4.8rem);--sb:2.5px;--sg:clamp(4px,.7vw,7px)}
-.cnt{display:flex;flex-wrap:wrap;align-items:center;gap:.8rem 1.4rem}
-.count{display:grid;font:500 clamp(2.2rem,6vw,4rem)/1 var(--serif);font-variant-numeric:tabular-nums}
-.count span{grid-area:1/1;white-space:nowrap}
-.stamp{display:inline-block;border:3px solid var(--pass);color:var(--pass);font:500 clamp(.9rem,2vw,1.15rem) var(--mono);letter-spacing:.14em;text-transform:uppercase;padding:.25rem .7rem;rotate:-4deg}
-.verdict{display:grid;font:500 .85rem var(--mono)}
-.verdict span{grid-area:1/1}
-.verdict .bad{color:var(--bad)}
-.verdict .good{color:var(--pass)}
-.score .fine,.s5 .fine{margin:0;font:400 .8rem/1.5 var(--mono);color:var(--muted)}
-
-/* scene 4: a fix backfires */
-.bf{display:grid;grid-template-columns:1fr 1fr;gap:1rem clamp(.8rem,3vw,1.6rem);align-items:start}
-.cp{position:relative;display:grid;gap:.55rem;align-content:start;border:1.5px solid var(--ink);background:var(--paper);padding:.8rem;min-width:0}
-.cp .strip{--sw:clamp(.7rem,2.2vw,1rem);--sh:clamp(1.5rem,4vw,2.1rem);--sb:1.5px;--sg:3px}
-.cp .sts{display:grid;font:500 .78rem/1.3 var(--mono)}
-.cp .sts span{grid-area:1/1}
-.cp .bad{color:var(--bad)}
-.head{position:absolute;top:-.6rem;right:.6rem;font:500 .65rem var(--mono);letter-spacing:.08em;background:var(--ink);color:var(--paper);padding:.1rem .4rem}
-.col2{display:grid;gap:1rem;position:relative}
-.col2 .cp{z-index:1}
-.shelf{display:grid;align-content:end;gap:.3rem;min-height:8rem;border:1.5px dashed var(--muted);padding:.8rem}
-.shelf code{font-size:.68rem;overflow-wrap:anywhere;line-height:1.4}
-.s4 .tape{max-width:44rem}
-
-/* scene 5: a fix stalls */
-.lanes{display:grid;gap:1rem}
-.lane{display:flex;flex-wrap:wrap;align-items:center;gap:.8rem 1rem}
-.ll{flex:0 0 4.4rem;font:500 .78rem var(--mono);letter-spacing:.06em;text-transform:uppercase}
-.lane .cp{flex:1 1 9rem;max-width:13rem}
-.tag{display:inline-block;font:500 .82rem var(--mono);letter-spacing:.1em;text-transform:uppercase;padding:.25rem .65rem;border:2px solid currentColor}
-.tag.stalled{color:var(--bad)}
-.tag.win{color:var(--pass)}
-.ring{position:absolute;inset:-5px;border:2.5px solid var(--pass);pointer-events:none}
-
-/* scene 6: the point */
-.s6{justify-items:center;text-align:center}
-.s6 .end{margin:0;font:500 clamp(2rem,6.4vw,4.2rem)/1.04 var(--serif);letter-spacing:-.025em;text-wrap:balance}
-.s6 .fine{margin:0;font:400 .85rem var(--mono);color:var(--muted)}
-
-/* ===== polish: timed states, landing squares, scene entrances ===== */
-.sq{transform-origin:50% 100%}
-.film [data-at],.film .head{opacity:0}
-.film [data-at].active,.film .head.active{opacity:1}
-.film[data-chapter="3"] .s4 .tape .te.active{opacity:1}
-.tape .te b{justify-self:start}
-@media(prefers-reduced-motion:no-preference){
-@keyframes stamp{from{transform:scaleY(0)}}
-@keyframes rise{from{opacity:0;transform:translateY(10px)}}
-@keyframes draw-x{from{transform:scaleX(0)}}
-@keyframes draw-y{from{transform:scaleY(0)}}
-@keyframes print{from{clip-path:inset(0 100% 0 0)}to{clip-path:inset(0 0 0 0)}}
-.film [data-at],.film .head{transition:opacity .35s ease-out}
-.sq .ok{transition:transform .5s cubic-bezier(.2,.9,.3,1.3),opacity .2s}
-.sq.f .ok{transform:scaleY(0)}
-.sq .no{transition:opacity .2s}
-.film .stamp{scale:1.4;transition:opacity .12s,scale .3s cubic-bezier(.2,.9,.3,1.15) .18s}
-.film .stamp.active{scale:1}
-.film.started[data-chapter="0"] .s1 .sq,.film.started[data-chapter="2"] .s3 .sq,.film.started[data-chapter="3"] .s4 .sq,.film.started[data-chapter="4"] .s5 .sq,.film.started[data-chapter="5"] .s6 .sq{animation:stamp .42s cubic-bezier(.2,.9,.3,1.25) backwards;animation-delay:calc(var(--i,0)*65ms + .35s)}
-.film.started[data-chapter="0"] .s1 .node{animation:rise .55s cubic-bezier(.16,1,.3,1) backwards}
-.film.started[data-chapter="0"] .s1 .ar .ln{animation:draw-y .4s ease-out backwards}
-.film.started[data-chapter="0"] .s1 .unk .big{animation:rise .6s cubic-bezier(.16,1,.3,1) 1.45s backwards}
-.s1 .flow>.node:nth-child(1){animation-delay:.2s}.s1 .flow>.node:nth-child(3){animation-delay:.7s}.s1 .flow>.node:nth-child(5){animation-delay:1.2s}
-.s1 .flow>.ar:nth-child(2) .ln{animation-delay:.5s}.s1 .flow>.ar:nth-child(4) .ln{animation-delay:1s}
-.film.started[data-chapter="1"] .s2 .cast li{animation:rise .5s cubic-bezier(.16,1,.3,1) var(--d) backwards}
-.film.started[data-chapter="1"] .s2 .cast .ln{animation:draw-x .7s cubic-bezier(.16,1,.3,1) var(--d) backwards}
-.cast li:nth-child(1){--d:.25s}.cast li:nth-child(2){--d:.45s}.cast li:nth-child(3){--d:.65s}.cast li:nth-child(4){--d:.85s}.cast li:nth-child(5){--d:1.05s}
-.film.started[data-chapter="1"] .s2 .ttl,.film.started[data-chapter="2"] .s3 .ttl,.film.started[data-chapter="3"] .s4 .ttl,.film.started[data-chapter="4"] .s5 .ttl{animation:rise .45s cubic-bezier(.16,1,.3,1) .1s backwards}
-.film.started[data-chapter="3"] .s4 .best{animation:rise .5s cubic-bezier(.16,1,.3,1) .25s backwards}
-.film.started[data-chapter="3"] .s4 .col2{animation:rise .5s cubic-bezier(.16,1,.3,1) .5s backwards}
-.film.started[data-chapter="5"] .s6 .end{animation:rise .7s cubic-bezier(.16,1,.3,1) .9s backwards}
-.film.started[data-chapter="5"] .s6 .chip,.film.started[data-chapter="5"] .s6 .fine{animation:rise .6s cubic-bezier(.16,1,.3,1) 1.4s backwards}
-.film[data-chapter="2"] .s3 .tape .te.active b,.film[data-chapter="3"] .s4 .te.l1.active b{animation:print .5s steps(28,end) backwards}
-.film[data-chapter="2"] .s3 .tape .te.active span{animation:rise .4s ease-out .4s backwards}
-.film.seeking *{animation-duration:.01s!important;animation-delay:0s!important}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0b0e14;
+    --surface: #121721;
+    --surface-2: #181f2d;
+    --ink: #ecf1f8;
+    --muted: #93a1b5;
+    --rule: #232d3f;
+    --accent: #38bdf8;
+    --accent-soft: rgba(56, 189, 248, 0.12);
+    --ok: #34d399;
+    --ok-soft: rgba(52, 211, 153, 0.13);
+    --warn: #fbbf24;
+    --warn-soft: rgba(251, 191, 36, 0.14);
+    --ask: #e879f9;
+    --ask-soft: rgba(232, 121, 249, 0.14);
+    --fail: #f87171;
+    --fail-soft: rgba(248, 113, 113, 0.14);
+    --shadow: 0 20px 55px rgba(0, 0, 0, 0.45);
+  }
 }
-/* poster, controls, chapters, script */
-.poster{position:absolute;inset:0;z-index:2;display:grid;place-content:center;justify-items:center;gap:1.2rem;border:0;background:var(--wash);color:var(--ink);cursor:pointer;font:inherit;padding:1rem;transition:opacity .6s,visibility .6s}
-.poster.gone{opacity:0;visibility:hidden;pointer-events:none}
-.ptitle{font:500 clamp(1.6rem,5vw,3rem)/1.05 var(--serif);letter-spacing:-.02em;text-wrap:balance;text-align:center}
-.pplay{display:inline-flex;align-items:center;gap:.7rem;min-height:2.75rem;padding:.55rem 1.3rem;background:var(--ink);color:var(--paper);font:500 .95rem var(--mono)}
-.poster:hover .pplay{background:var(--pass)}
-.pplay .tri{width:0;height:0;border-style:solid;border-width:.45rem 0 .45rem .75rem;border-color:transparent transparent transparent currentColor}
-.ctrl{align-items:center;gap:.4rem .9rem;border-bottom:1px solid var(--rule)}
-.pp{width:2.75rem;height:2.75rem;flex:none;background:var(--ink);color:var(--paper);border:0;cursor:pointer;display:grid;place-items:center}
-.pp:hover{background:var(--pass)}
-.pp .ic{width:0;height:0;border-style:solid;border-width:.5rem 0 .5rem .85rem;border-color:transparent transparent transparent currentColor}
-.pp[data-s=playing] .ic{width:.8rem;height:.95rem;border:0;background:linear-gradient(90deg,currentColor 0 36%,transparent 36% 64%,currentColor 64% 100%)}
-.scrub{flex:1;min-width:0;height:2.75rem;margin:0;background:transparent;cursor:pointer;-webkit-appearance:none;appearance:none}
-.scrub::-webkit-slider-runnable-track{height:3px;background:linear-gradient(to right,var(--ink) var(--pg,0%),var(--rule) var(--pg,0%))}
-.scrub::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;margin-top:-5.5px;background:var(--ink);border:0;border-radius:0}
-.scrub::-moz-range-track{height:3px;background:var(--rule)}
-.scrub::-moz-range-progress{height:3px;background:var(--ink)}
-.scrub::-moz-range-thumb{width:14px;height:14px;background:var(--ink);border:0;border-radius:0}
-.tm{flex:none;min-width:8.4ch;text-align:right;font:500 .8rem var(--mono);color:var(--muted);font-variant-numeric:tabular-nums}
-.cnav{grid-template-columns:repeat(3,1fr)}
-@media (min-width:44rem){.cnav{grid-template-columns:repeat(6,1fr)}}
-.cnav button{display:flex;align-items:center;gap:.5rem;min-height:2.75rem;padding:.3rem .5rem;background:linear-gradient(var(--bar,var(--muted)),var(--bar,var(--muted))) 0 100%/var(--cp,0%) 3px no-repeat;border:0;border-bottom:1px solid var(--rule);font:500 .78rem var(--mono);color:var(--muted);text-align:left;cursor:pointer}
-.cnav button:hover{color:var(--ink)}
-.cnav button[aria-current=true]{color:var(--ink);--bar:var(--ink);box-shadow:inset 0 -3px 0 var(--rule)}
-.rmnote{margin:.6rem 0 0;font:400 .85rem/1.5 var(--mono);color:var(--muted)}
-.script{margin-top:1.2rem}
-.script summary{cursor:pointer;display:inline-flex;align-items:center;min-height:2.75rem;font:500 .9rem var(--mono)}
-.script h3{font-size:1.05rem;margin:1.2rem 0 .3rem}
-.script ol{margin:.2rem 0 .5rem;padding-left:1.3rem}
-.script li{max-width:62ch}
-.script .onscreen{color:var(--muted);font-size:.95rem;margin:.3rem 0 0}
+
+:root[data-theme="dark"] {
+  --bg: #0b0e14;
+  --surface: #121721;
+  --surface-2: #181f2d;
+  --ink: #ecf1f8;
+  --muted: #93a1b5;
+  --rule: #232d3f;
+  --accent: #38bdf8;
+  --accent-soft: rgba(56, 189, 248, 0.12);
+  --ok: #34d399;
+  --ok-soft: rgba(52, 211, 153, 0.13);
+  --warn: #fbbf24;
+  --warn-soft: rgba(251, 191, 36, 0.14);
+  --ask: #e879f9;
+  --ask-soft: rgba(232, 121, 249, 0.14);
+  --fail: #f87171;
+  --fail-soft: rgba(248, 113, 113, 0.14);
+  --shadow: 0 20px 55px rgba(0, 0, 0, 0.45);
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-padding-top: 4.5rem;
+}
+@media (prefers-reduced-motion: no-preference) {
+  html { scroll-behavior: smooth; }
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 1rem/1.62 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+::selection { background: var(--accent); color: #071018; }
+a { color: inherit; text-underline-offset: 0.2em; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
+code, pre, .mono { font-family: var(--mono); }
+
+.skip {
+  position: absolute; top: -5rem; left: 1rem; z-index: 200;
+  background: var(--ink); color: var(--bg);
+  padding: 0.6rem 1rem; font: 500 0.85rem var(--mono); border-radius: 4px;
+}
+.skip:focus { top: 0.75rem; }
+
+.wrap {
+  max-width: 76rem;
+  margin-inline: auto;
+  padding-inline: max(1rem, env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px));
+}
+
+/* Header */
+.site-header {
+  position: sticky; top: 0; z-index: 100;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--rule);
+}
+.header-inner {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 0.5rem 1.25rem; min-height: 3.75rem; padding-block: 0.35rem;
+}
+.brand {
+  display: inline-flex; align-items: center; gap: 0.6rem;
+  font: 600 1.15rem var(--mono); text-decoration: none; letter-spacing: -0.02em;
+  min-height: 2.5rem;
+}
+.brand-mark {
+  display: inline-grid; grid-template-columns: 5px 5px; gap: 2px;
+}
+.brand-mark i { display: block; border-radius: 1px; }
+.brand-mark i:nth-child(1) { grid-row: 1 / 3; height: 14px; background: var(--accent); }
+.brand-mark i:nth-child(2) { height: 6px; background: var(--ok); }
+.brand-mark i:nth-child(3) { height: 6px; background: var(--ask); }
+
+.nav-links {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 1.15rem;
+  font-size: 0.92rem;
+}
+.nav-links a {
+  text-decoration: none; color: var(--muted); padding-block: 0.45rem;
+  white-space: nowrap; transition: color 0.15s ease;
+}
+.nav-links a:hover { color: var(--ink); }
+
+.header-actions { display: flex; align-items: center; gap: 0.5rem; }
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem;
+  min-height: 2.25rem; padding: 0.3rem 0.7rem;
+  font: 500 0.8rem var(--mono); color: var(--ink);
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 6px;
+  cursor: pointer; text-decoration: none;
+}
+.icon-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+@media (max-width: 44rem) {
+  .nav-links {
+    order: 3; flex: 1 0 100%; justify-content: space-between; gap: 0.25rem;
+    border-top: 1px solid var(--rule); padding-top: 0.35rem; font-size: 0.84rem;
+  }
+}
+
+/* Typography & Sections */
+section { padding-block: clamp(3.2rem, 7vw, 5.2rem) 0; }
+h1, h2, h3 { margin: 0; font-weight: 500; text-wrap: balance; }
+h1 {
+  font: 500 clamp(2.35rem, 5.8vw, 4.15rem)/1.05 var(--serif);
+  letter-spacing: -0.025em;
+}
+h2 {
+  font: 500 clamp(1.7rem, 3.6vw, 2.45rem)/1.14 var(--serif);
+  letter-spacing: -0.015em; margin-bottom: 0.75rem;
+}
+h3 { font: 600 1.08rem/1.3 var(--sans); }
+.eyebrow {
+  display: inline-flex; align-items: center; gap: 0.5rem;
+  font: 500 0.76rem var(--mono); text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--accent); margin-bottom: 0.75rem;
+}
+.eyebrow::before {
+  content: ""; width: 0.48rem; height: 0.48rem; border-radius: 2px; background: var(--accent);
+}
+.section-lede {
+  color: var(--muted); max-width: 64ch; margin: 0 0 1.75rem; font-size: 1.04rem;
+}
+
+/* Hero */
+.hero {
+  display: grid; gap: 2.25rem; padding-block: clamp(2.4rem, 6vw, 4.5rem) 0;
+  align-items: center;
+}
+@media (min-width: 62rem) {
+  .hero { grid-template-columns: 1.06fr 0.94fr; gap: 3rem; }
+}
+.hero-lede {
+  font-size: clamp(1.06rem, 1.8vw, 1.2rem); line-height: 1.58;
+  color: var(--muted); max-width: 56ch; margin: 1.15rem 0 1.4rem;
+}
+.hero-lede strong { color: var(--ink); font-weight: 600; }
+.meta-pills { display: flex; flex-wrap: wrap; gap: 0.45rem; margin-bottom: 1.5rem; }
+.pill {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  font: 500 0.76rem var(--mono); padding: 0.28rem 0.65rem;
+  border: 1px solid var(--rule); background: var(--surface);
+  border-radius: 999px; color: var(--muted);
+}
+.pill .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+.cta-row { display: flex; flex-wrap: wrap; gap: 0.7rem; }
+.btn {
+  display: inline-flex; align-items: center; gap: 0.5rem;
+  min-height: 2.7rem; padding: 0.5rem 1.15rem;
+  font: 500 0.88rem var(--mono); text-decoration: none;
+  border-radius: 6px; border: 1.5px solid var(--ink);
+  background: var(--ink); color: var(--bg); cursor: pointer;
+  transition: transform 0.12s ease, background 0.15s ease, border-color 0.15s ease;
+}
+.btn:hover { background: var(--accent); border-color: var(--accent); color: #061018; }
+.btn.alt { background: transparent; color: var(--ink); border-color: var(--rule); }
+.btn.alt:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+
+/* Hero Rope Topology Card */
+.topology {
+  background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius);
+  padding: 1.25rem; box-shadow: var(--shadow);
+}
+.topo-title {
+  display: flex; justify-content: space-between; align-items: center; gap: 0.5rem;
+  font: 500 0.74rem var(--mono); text-transform: uppercase; letter-spacing: 0.07em;
+  color: var(--muted); padding-bottom: 0.75rem; border-bottom: 1px solid var(--rule);
+  margin-bottom: 0.9rem;
+}
+.topo-tier { display: grid; gap: 0.5rem; }
+.topo-label {
+  font: 600 0.7rem var(--mono); text-transform: uppercase; letter-spacing: 0.07em;
+  color: var(--muted);
+}
+.topo-nodes { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.topo-node {
+  font: 500 0.78rem var(--mono); padding: 0.34rem 0.62rem;
+  border: 1px solid var(--rule); background: var(--bg); border-radius: 5px;
+}
+.topo-connector {
+  display: flex; align-items: center; gap: 0.6rem;
+  margin-block: 0.65rem; font: 500 0.72rem var(--mono); color: var(--accent);
+}
+.topo-connector::before, .topo-connector::after {
+  content: ""; flex: 1; height: 1px; background: var(--rule);
+}
+.topo-rope {
+  background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--rule));
+  border-radius: 6px; padding: 0.85rem;
+}
+.topo-rope-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.45rem 0.75rem;
+  margin-top: 0.45rem; font: 500 0.76rem var(--mono);
+}
+.topo-rope-grid span { display: flex; align-items: center; gap: 0.38rem; }
+.topo-rope-grid span::before {
+  content: ""; width: 5px; height: 5px; border-radius: 1px; background: var(--accent); flex: none;
+}
+
+/* Interactive Dark Cockpit Simulator */
+.cockpit-shell {
+  background: var(--term-bg); color: var(--term-ink);
+  border: 1px solid var(--term-border); border-radius: 10px;
+  overflow: hidden; box-shadow: var(--shadow);
+  font-family: var(--mono);
+}
+.cockpit-chrome {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 0.5rem 1rem; padding: 0.6rem 0.9rem;
+  background: #080b10; border-bottom: 1px solid var(--term-border);
+  font-size: 0.76rem; color: var(--term-muted);
+}
+.chrome-dots { display: inline-flex; gap: 0.38rem; align-items: center; }
+.chrome-dots i { width: 9px; height: 9px; border-radius: 50%; display: block; background: #2c374b; }
+.chrome-title { color: var(--term-ink); font-weight: 500; }
+.chrome-controls { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.term-toggle {
+  font: 500 0.72rem var(--mono); padding: 0.22rem 0.55rem;
+  background: var(--term-surface); color: var(--term-muted);
+  border: 1px solid var(--term-border); border-radius: 4px; cursor: pointer;
+}
+.term-toggle:hover, .term-toggle[aria-pressed="true"] {
+  border-color: var(--term-cyan); color: var(--term-cyan);
+}
+
+.cockpit-status-bar {
+  padding: 0.55rem 0.9rem; border-bottom: 1px solid var(--term-border);
+  font-size: 0.76rem; display: grid; gap: 0.25rem; background: #0e131c;
+}
+.status-row-1 { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; }
+.status-row-2 { color: var(--term-muted); font-size: 0.72rem; }
+.t-badge {
+  display: inline-block; padding: 0.08rem 0.42rem; border-radius: 3px;
+  font-weight: 600; font-size: 0.7rem; letter-spacing: 0.03em;
+}
+.t-badge.brand-b { background: var(--term-cyan); color: #051018; }
+.t-badge.ask { background: var(--term-magenta); color: #16041a; }
+.t-badge.run { background: #1e293b; color: #f8fafc; border: 1px solid #475569; }
+.t-badge.review { background: var(--term-green); color: #041911; }
+.t-badge.done { background: transparent; color: var(--term-muted); border: 1px solid var(--term-border); }
+.t-badge.warn { background: var(--term-yellow); color: #1a1102; }
+.t-badge.fail { background: var(--term-red); color: #1d0404; }
+
+.cockpit-grid {
+  display: grid; gap: 0; grid-template-columns: 1fr;
+}
+@media (min-width: 64rem) {
+  .cockpit-grid { grid-template-columns: 1.05fr 1.25fr 0.95fr; }
+}
+.pane {
+  border-bottom: 1px solid var(--term-border);
+  display: flex; flex-direction: column; min-width: 0;
+}
+@media (min-width: 64rem) {
+  .pane { border-bottom: 0; border-right: 1px solid var(--term-border); min-height: 25rem; }
+  .pane:last-child { border-right: 0; }
+}
+.pane-head {
+  display: flex; justify-content: space-between; align-items: center; gap: 0.5rem;
+  padding: 0.45rem 0.75rem; background: var(--term-surface);
+  border-bottom: 1px solid var(--term-border);
+  font-size: 0.73rem; color: var(--term-cyan); font-weight: 600;
+}
+.pane-head .sub { color: var(--term-muted); font-weight: 400; }
+
+/* Workers Table inside Cockpit */
+.worker-list { list-style: none; margin: 0; padding: 0; }
+.worker-item {
+  width: 100%; text-align: left; background: transparent; border: 0;
+  border-bottom: 1px solid rgba(37, 48, 66, 0.55);
+  color: inherit; font: inherit; padding: 0.55rem 0.7rem; cursor: pointer;
+  display: grid; gap: 0.22rem;
+}
+.worker-item:hover { background: rgba(28, 37, 53, 0.55); }
+.worker-item[aria-selected="true"] {
+  background: var(--term-row-sel);
+  box-shadow: inset 3px 0 0 var(--term-cyan);
+}
+.worker-top {
+  display: flex; align-items: center; gap: 0.45rem; font-size: 0.75rem;
+}
+.worker-name { color: var(--term-ink); font-weight: 600; }
+.worker-seen { margin-left: auto; color: var(--term-muted); font-size: 0.7rem; }
+.worker-now {
+  font-size: 0.74rem; color: #cbd5e1;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.worker-sub {
+  font-size: 0.69rem; color: var(--term-muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Inspector Pane */
+.tab-bar {
+  display: flex; flex-wrap: wrap; gap: 0.15rem; padding: 0.35rem 0.55rem;
+  border-bottom: 1px solid var(--term-border); background: #0e131c;
+}
+.tab-btn {
+  background: transparent; border: 0; border-bottom: 2px solid transparent;
+  color: var(--term-muted); font: 500 0.72rem var(--mono);
+  padding: 0.28rem 0.48rem; cursor: pointer;
+}
+.tab-btn:hover { color: var(--term-ink); }
+.tab-btn[aria-selected="true"] {
+  color: var(--term-cyan); border-bottom-color: var(--term-cyan);
+}
+.pane-body {
+  padding: 0.7rem 0.8rem; font-size: 0.75rem; line-height: 1.5;
+  overflow-x: auto; flex: 1;
+}
+.filter-strip {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem;
+  margin-bottom: 0.6rem; font-size: 0.7rem; color: var(--term-muted);
+}
+.filter-pill {
+  font: 500 0.69rem var(--mono); padding: 0.15rem 0.45rem;
+  background: transparent; color: var(--term-muted);
+  border: 1px solid var(--term-border); border-radius: 4px; cursor: pointer;
+}
+.filter-pill[aria-pressed="true"] {
+  background: rgba(56, 189, 248, 0.15); color: var(--term-cyan); border-color: var(--term-cyan);
+}
+.act-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.28rem; }
+.act-row { border: 1px solid transparent; border-radius: 4px; }
+.act-btn {
+  width: 100%; text-align: left; background: transparent; border: 0;
+  color: inherit; font: inherit; padding: 0.28rem 0.35rem; cursor: pointer;
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.35rem;
+  border-radius: 4px;
+}
+.act-btn:hover { background: rgba(28, 37, 53, 0.65); }
+.act-row.open { background: rgba(19, 25, 35, 0.9); border-color: var(--term-border); }
+.cat-tag { font-weight: 600; min-width: 3.3rem; font-size: 0.7rem; }
+.cat-test { color: var(--term-green); }
+.cat-build, .cat-read, .cat-run { color: var(--term-cyan); }
+.cat-edit { color: var(--term-yellow); }
+.cat-say { color: #ffffff; }
+.cat-err { color: var(--term-red); }
+.act-sum { color: var(--term-ink); flex: 1 1 11rem; min-width: 0; }
+.act-out { font-size: 0.72rem; }
+.act-out.ok { color: var(--term-green); }
+.act-out.err { color: var(--term-red); }
+.act-out.running { color: var(--term-yellow); }
+.act-detail {
+  padding: 0.45rem 0.65rem 0.55rem 1.35rem;
+  border-top: 1px dashed var(--term-border);
+  font-size: 0.71rem; color: #cbd5e1; white-space: pre-wrap; word-break: break-word;
+}
+.act-detail .cmd { color: var(--term-cyan); }
+.act-detail .exit-err { color: var(--term-red); }
+
+/* Briefing Pane styling */
+.brief-block { margin-bottom: 0.75rem; }
+.brief-h {
+  font-size: 0.69rem; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--term-muted); font-weight: 600; margin-bottom: 0.22rem;
+}
+.brief-ask {
+  border: 1px solid rgba(232, 121, 249, 0.45); background: rgba(232, 121, 249, 0.08);
+  padding: 0.5rem 0.6rem; border-radius: 5px; margin-bottom: 0.75rem;
+}
+.brief-ask .ask-t { color: var(--term-magenta); font-weight: 600; font-size: 0.72rem; }
+.brief-kv { display: grid; grid-template-columns: 5.8rem 1fr; gap: 0.2rem 0.5rem; font-size: 0.73rem; }
+.brief-kv dt { color: var(--term-muted); }
+.brief-kv dd { margin: 0; color: var(--term-ink); word-break: break-word; }
+
+.cockpit-footer {
+  padding: 0.45rem 0.9rem; border-top: 1px solid var(--term-border);
+  background: #080b10; font-size: 0.7rem; color: var(--term-muted);
+  display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.4rem 1rem;
+}
+.cockpit-note {
+  margin: 0.7rem 0 0; font: 400 0.84rem var(--mono); color: var(--muted);
+}
+
+/* Harness Switcher */
+.harness-tabs {
+  display: flex; flex-wrap: wrap; gap: 0.45rem; margin-bottom: 1.15rem;
+}
+.h-tab {
+  font: 500 0.84rem var(--mono); padding: 0.48rem 0.9rem;
+  background: var(--surface); color: var(--muted);
+  border: 1px solid var(--rule); border-radius: 6px; cursor: pointer;
+}
+.h-tab:hover { color: var(--ink); border-color: var(--accent); }
+.h-tab[aria-selected="true"] {
+  background: var(--accent-soft); color: var(--accent);
+  border-color: var(--accent); font-weight: 600;
+}
+.harness-card {
+  background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius);
+  padding: 1.35rem; display: grid; gap: 1.25rem;
+}
+@media (min-width: 54rem) {
+  .harness-card { grid-template-columns: 1.1fr 0.9fr; align-items: start; }
+}
+.h-specs {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(11.5rem, 1fr));
+  gap: 0.85rem; margin: 0;
+}
+.h-spec {
+  background: var(--bg); border: 1px solid var(--rule); border-radius: 6px;
+  padding: 0.7rem 0.8rem;
+}
+.h-spec dt {
+  font: 600 0.69rem var(--mono); text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted); margin-bottom: 0.25rem;
+}
+.h-spec dd { margin: 0; font-size: 0.88rem; color: var(--ink); }
+
+/* Is / Is Not contrast */
+.contrast-grid {
+  display: grid; gap: 1rem; margin-top: 1.5rem;
+}
+@media (min-width: 48rem) {
+  .contrast-grid { grid-template-columns: 1fr 1fr; }
+}
+.contrast-box {
+  border: 1px solid var(--rule); border-radius: var(--radius);
+  padding: 1.15rem 1.25rem; background: var(--surface);
+}
+.contrast-box h3 {
+  font: 600 0.86rem var(--mono); text-transform: uppercase; letter-spacing: 0.06em;
+  margin-bottom: 0.6rem;
+}
+.contrast-box.is h3 { color: var(--ok); }
+.contrast-box.is-not h3 { color: var(--fail); }
+.contrast-box p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+
+/* 6 Pillars Grid */
+.pillars {
+  display: grid; gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+}
+.pillar {
+  background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius);
+  padding: 1.25rem; display: flex; flex-direction: column; gap: 0.65rem;
+}
+.pillar-tag {
+  align-self: flex-start;
+  font: 600 0.7rem var(--mono); text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 0.18rem 0.5rem; border-radius: 4px;
+  background: var(--accent-soft); color: var(--accent);
+}
+.pillar p { margin: 0; color: var(--muted); font-size: 0.93rem; }
+.pillar .cmds {
+  margin-top: auto; padding-top: 0.6rem; border-top: 1px solid var(--rule);
+  font: 500 0.76rem var(--mono); color: var(--ink);
+  display: flex; flex-wrap: wrap; gap: 0.35rem;
+}
+.pillar .cmds code {
+  background: var(--bg); border: 1px solid var(--rule);
+  padding: 0.12rem 0.4rem; border-radius: 4px;
+}
+
+/* Verifier-gated ladder */
+.ladder {
+  list-style: none; padding: 0; margin: 1.25rem 0 0;
+  display: grid; gap: 0.85rem;
+}
+@media (min-width: 54rem) {
+  .ladder { grid-template-columns: repeat(3, 1fr); }
+}
+.rung {
+  background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius);
+  padding: 1.15rem; position: relative;
+}
+.rung-head {
+  display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.55rem;
+}
+.rung-code {
+  font: 600 0.78rem var(--mono); padding: 0.18rem 0.5rem; border-radius: 4px;
+  background: var(--ok-soft); color: var(--ok);
+}
+.rung:nth-child(2) .rung-code { background: var(--warn-soft); color: var(--warn); }
+.rung:nth-child(3) .rung-code { background: var(--ask-soft); color: var(--ask); }
+.rung p { margin: 0; font-size: 0.92rem; color: var(--muted); }
+.roles-strip {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 0.75rem; margin-top: 1.25rem;
+}
+.role-card {
+  border-top: 2px solid var(--rule); padding-top: 0.65rem;
+}
+.role-card dt { font: 600 0.86rem var(--mono); color: var(--ink); margin-bottom: 0.2rem; }
+.role-card dd { margin: 0; font-size: 0.88rem; color: var(--muted); }
+
+/* Quickstart Code Switcher */
+.qs-box {
+  background: var(--term-bg); color: var(--term-ink);
+  border: 1px solid var(--term-border); border-radius: var(--radius);
+  overflow: hidden; box-shadow: var(--shadow);
+}
+.qs-tabs {
+  display: flex; flex-wrap: wrap; gap: 0.15rem; padding: 0.45rem 0.65rem;
+  background: #080b10; border-bottom: 1px solid var(--term-border);
+}
+.qs-tab {
+  font: 500 0.76rem var(--mono); padding: 0.35rem 0.65rem;
+  background: transparent; color: var(--term-muted); border: 0;
+  border-bottom: 2px solid transparent; cursor: pointer;
+}
+.qs-tab:hover { color: var(--term-ink); }
+.qs-tab[aria-selected="true"] {
+  color: var(--term-cyan); border-bottom-color: var(--term-cyan);
+}
+.qs-body { position: relative; padding: 1.1rem 1.2rem; }
+.qs-body pre {
+  margin: 0; overflow-x: auto; font: 400 0.83rem/1.6 var(--mono);
+  color: var(--term-ink); max-width: 100%;
+}
+.copy-btn {
+  position: absolute; top: 0.75rem; right: 0.85rem;
+  font: 500 0.74rem var(--mono); padding: 0.28rem 0.65rem;
+  background: var(--term-surface); color: var(--term-ink);
+  border: 1px solid var(--term-border); border-radius: 5px; cursor: pointer;
+}
+.copy-btn:hover { border-color: var(--term-cyan); color: var(--term-cyan); }
+.qs-caption {
+  padding: 0.6rem 1.2rem; background: var(--term-surface);
+  border-top: 1px solid var(--term-border); font-size: 0.82rem; color: var(--term-muted);
+}
+
+/* Limits */
+.limits-list {
+  list-style: none; padding: 0; margin: 1rem 0 0;
+  display: grid; gap: 0.65rem;
+}
+@media (min-width: 48rem) {
+  .limits-list { grid-template-columns: 1fr 1fr; }
+}
+.limits-list li {
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 6px;
+  padding: 0.85rem 1rem; font-size: 0.92rem; color: var(--muted);
+}
+.limits-list strong { color: var(--ink); }
+
+/* Footer */
+footer {
+  margin-top: clamp(3.5rem, 8vw, 5.5rem);
+  padding-block: 1.6rem calc(2rem + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--rule);
+  display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center;
+  gap: 0.6rem 1.5rem; font-size: 0.9rem; color: var(--muted);
+}
+footer p { margin: 0; }
+.footer-links { display: flex; flex-wrap: wrap; gap: 1rem; }
+.footer-links a { text-decoration: none; padding-block: 0.25rem; }
+.footer-links a:hover { color: var(--ink); text-decoration: underline; }
 </style>
 </head>
 <body>
-<a class="skip" href="#top">Skip to main content</a>
-<div class="wrap">
-<header>
-  <a class="name" href="#top">claive</a>
-  <nav aria-label="Primary"><a href="#how">How it works</a><a href="#experiment">The experiment</a><a href="https://github.com/ham-zax/claive">GitHub</a></nav>
-</header>
-<main id="top">
-<div class="hero">
-  <div>
-    <h1>A referee for AI coding agents.</h1>
-    <p class="lede">One agent delegates the coding. A different-model critic finds defects. Your tests decide whether each attempt is kept or rolled back. Plain code—not another AI—runs the process.</p>
-    <p class="chip">Experimental. No results yet.</p>
-    <div class="acts"><a class="btn" href="#watch">Watch it work</a><a class="btn alt" href="#how">How it works</a><a class="btn alt" href="#try">Try it</a></div>
+<a class="skip" href="#main">Skip to main content</a>
+
+<header class="site-header">
+  <div class="wrap header-inner">
+    <a class="brand" href="#main">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span>claive</span>
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="#cockpit">Cockpit</a>
+      <a href="#harnesses">Harnesses</a>
+      <a href="#architecture">Platform</a>
+      <a href="#orchestration">Arbiter</a>
+      <a href="#quickstart">Quickstart</a>
+    </nav>
+    <div class="header-actions">
+      <button class="icon-btn" id="theme-toggle" type="button" aria-label="Toggle light or dark theme">Theme</button>
+      <a class="icon-btn" href="https://github.com/ham-zax/claive">GitHub</a>
+    </div>
   </div>
-  <figure class="record">
-    <ol>
-      <li><span class="role">Worker</span><span class="what">Writes the code. The task left out one requirement, on purpose.</span><span class="t" role="img" aria-label="6 of 7 tests pass"><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq f"><b class="ok"></b><b class="no"></b></span></span></li>
-      <li><span class="role">Critic</span><span class="what">A different model family reads the failing output and names the exact defect.</span></li>
-      <li><span class="role">Worker</span><span class="what">The same session fixes it.</span></li>
-      <li><span class="role">Tests</span><span class="what"><strong>7 of 7 pass.</strong> The change is kept.</span><span class="t" role="img" aria-label="7 of 7 tests pass"><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span><span class="sq"><b class="ok"></b><b class="no"></b></span></span></li>
-    </ol>
-    <figcaption>A real run from the repo's shakedown log. One small task, run once. It checks the mechanics; it is not evidence that claive works.<span class="mono">run bd886bb32632 · 245 s · 668k input tokens, 544k cached</span></figcaption>
-  </figure>
-</div>
+</header>
 
-<section id="watch" class="filmsec">
-  <h2>Watch it work</h2>
-  <p>A short film with captions and no sound. It follows a real run from the repo, then shows what the arbiter does when a fix makes things worse, or stalls. Pause it, or jump to any chapter.</p>
-  <figure class="film" id="film" data-total="96" aria-label="Film: one claive run, start to finish">
-    <div class="screen">
-      <div class="stage" aria-hidden="true">
-        <div class="hud"><div class="chap"></div><div class="badge"><span class="real">Real run · bd886bb32632</span><span class="ill">Illustration · not a recorded run</span></div></div>
-        <div class="scenes">
-
-          <div class="sc s1">
-            <div class="flow">
-              <div class="node"><span class="k">The job</span><span class="v">Write <code>parse_duration</code> and <code>format_duration</code></span></div>
-              <span class="ar"><span class="ln"></span><span class="hd"></span></span>
-              <div class="node"><span class="k">One AI agent</span><span class="v">Gets a single attempt</span></div>
-              <span class="ar"><span class="ln"></span><span class="hd"></span></span>
-              <div class="node"><span class="k">The result</span><span class="v">Code, taken as it comes</span></div>
-            </div>
-            <div class="unk">
-              <div class="strip big" data-strip="ddddddd"></div>
-              <p class="big">Did it work?<br>Nobody checked.</p>
-            </div>
-          </div>
-
-          <div class="sc s2">
-            <h3 class="ttl">Five roles, one job each</h3>
-            <ul class="cast">
-              <li><span class="ln"></span><span class="r">Parent</span><span class="d">The agent you talk to: Claude Code, Codex, or a script. It hands out the jobs.</span></li>
-              <li><span class="ln"></span><span class="r">Worker</span><span class="d">A cheaper agent that does the coding.</span></li>
-              <li><span class="ln"></span><span class="r">Critic</span><span class="d">A second worker from a different model family. It names defects. It cannot edit.</span></li>
-              <li><span class="ln"></span><span class="r">Verifier</span><span class="d">Your test command. Its score is the only thing that counts.</span></li>
-              <li><span class="ln"></span><span class="r">Arbiter</span><span class="d">Plain code, not a model. It names one legal next step at a time.</span></li>
-            </ul>
-          </div>
-
-          <div class="sc s3">
-            <div class="l">
-              <h3 class="ttl">One real run</h3>
-              <ol class="rail"><li><span class="bar"></span>Write</li><li><span class="bar"></span>Test</li><li><span class="bar"></span>Critique</li><li><span class="bar"></span>Fix</li><li><span class="bar"></span>Retest</li></ol>
-              <div class="steps">
-                <div class="step"><span class="k">Worker</span><p>Writes the code. The task left out one requirement on purpose: a <code>sep</code> option for <code>format_duration</code>, checked by a held-out test.</p></div>
-                <div class="step"><span class="k">Tests</span><p>Your test command runs. <strong>6 of 7</strong> pass.</p></div>
-                <div class="step"><span class="k">Critic</span><p>A different model family reads the failing output and names the exact defect.</p></div>
-                <div class="step"><span class="k">Worker</span><p>The same session applies the fix, with its context intact.</p></div>
-                <div class="step"><span class="k">Tests</span><p><strong>7 of 7</strong> pass. The run ends: verified.</p></div>
-              </div>
-              <div class="tape">
-                <span class="th">$ claive-orch next RUN</span>
-                <div class="tc">
-                  <div class="te"><b>NEXT: implement lane a</b><span>Why:  lane has no implementer yet</span></div>
-                  <div class="te"><b>NEXT: verify lane a</b><span>Why:  implementer registered; verify after its turn completes</span></div>
-                  <div class="te"><b>NEXT: critique lane a round 1</b><span>Why:  verification failed; ask a cross-family critic for defects</span></div>
-                  <div class="te"><b>NEXT: correct lane a round 1</b><span>Why:  critic named concrete defects; same session corrects them</span></div>
-                  <div class="te"><b>NEXT: finish lane a -&gt; outcome verified</b><span>Why:  lane a: verifier passed; highest verification</span></div>
-                </div>
-              </div>
-            </div>
-            <div class="score">
-              <div class="strip" data-strip="ggggggg"></div>
-              <div class="cnt">
-                <span class="count"><span data-c="6">6 of 7</span><span data-c="7">7 of 7</span></span>
-                <span class="stamp">Verified</span>
-              </div>
-              <div class="verdict"><span class="bad" data-v="no">Not passing yet</span><span class="good" data-v="yes">Passing</span></div>
-              <p class="fine">245 s · 668k input tokens (544k cached) · one task, run once</p>
-            </div>
-          </div>
-
-          <div class="sc s4">
-            <h3 class="ttl">When a fix makes things worse</h3>
-            <div class="bf">
-              <div class="cp best"><span class="head">HEAD</span><span class="k">Best so far</span><div class="strip" data-strip="oooooff"></div><span class="sts"><span>Kept as the checkpoint</span></span></div>
-              <div class="col2">
-                <div class="cp att"><span class="head">HEAD</span><span class="k">The fix attempt</span><div class="strip" data-strip="oooooff"></div><span class="sts"><span class="a1">The fix is applied</span><span class="a2 bad">Worse than the best</span></span></div>
-                <div class="shelf"><span class="k">On the shelf</span><code>refs/claive-orch/&lt;run&gt;/a/rejected-r1</code></div>
-              </div>
-            </div>
-            <div class="tape">
-              <div class="tc">
-                <div class="te l1" data-at="62"><b>Lane a round 1: worse than the best checkpoint.</b></div>
-              </div>
-              <span class="l2" data-at="64.4">Reverted to the best commit. The attempt is kept on the shelf.</span>
-            </div>
-          </div>
-
-          <div class="sc s5">
-            <h3 class="ttl">When fixing stalls</h3>
-            <div class="lanes">
-              <div class="lane la">
-                <span class="ll">Lane a</span>
-                <div class="cp r1" data-at="69.4"><span class="k">Round 1</span><div class="strip" data-strip="oooooff"></div><span class="sts"><span>Same score</span></span></div>
-                <div class="cp r2" data-at="72"><span class="k">Round 2</span><div class="strip" data-strip="oooooff"></div><span class="sts"><span>Same score</span></span></div>
-                <span class="tag stalled" data-at="75">Stalled</span>
-              </div>
-              <div class="lane lb">
-                <span class="ll">Lane b</span>
-                <div class="cp rb"><span class="ring" data-at="80.4"></span><span class="k">A different approach</span><div class="strip" data-strip="ooooooo"></div><span class="sts"><span>Separate git worktree</span></span></div>
-                <span class="tag win" data-at="80.4">The tests pick lane b</span>
-              </div>
-            </div>
-            <p class="fine">Breadth runs only after refining stalls. In the experiment this is arm D.</p>
-          </div>
-
-          <div class="sc s6">
-            <div class="strip big" data-strip="ooooooo"></div>
-            <p class="end">Your tests are the referee.</p>
-            <p class="chip">Experimental. No results yet.</p>
-            <p class="fine">github.com/ham-zax/claive · MIT licensed</p>
-          </div>
-
-        </div>
-        <div class="capbar"></div>
+<main id="main" class="wrap">
+  <section class="hero">
+    <div>
+      <p class="eyebrow">Multi-Harness Agent Runtime</p>
+      <h1>One shared rope for every coding agent.</h1>
+      <p class="hero-lede">
+        <strong>claive</strong> is a harness-neutral outer cloth that wraps <strong>Codex</strong>, <strong>Claude Code</strong>, <strong>Pi</strong>, <strong>AGY</strong>, and <strong>Muse</strong>—so any parent agent can launch, steer, question, verify, and connect any other agent as a subagent without stripping native tools, skills, or prompt caching.
+      </p>
+      <div class="meta-pills">
+        <span class="pill"><span class="dot" aria-hidden="true"></span>Linux · Python 3 stdlib</span>
+        <span class="pill">Ratatui 0.30 Rust TUI</span>
+        <span class="pill">Flat-schema MCP server</span>
+        <span class="pill">MIT License</span>
       </div>
-      <button class="poster" type="button" aria-label="Play the film">
-        <span class="strip big" data-strip="oooooof"></span>
-        <span class="ptitle">One run, start to finish</span>
-        <span class="pplay"><span class="tri"></span>Play <span data-dur>1:36</span></span>
-      </button>
+      <div class="cta-row">
+        <a class="btn" href="#cockpit">Try live cockpit</a>
+        <a class="btn alt" href="#quickstart">Install &amp; quickstart</a>
+        <a class="btn alt" href="https://github.com/ham-zax/claive/blob/main/docs/command-reference.md">Command reference</a>
+      </div>
     </div>
-    <div class="ctrl">
-      <button class="pp" type="button" data-s="paused" aria-label="Play"><span class="ic"></span></button>
-      <input class="scrub" type="range" min="0" max="96" step="0.05" value="0" aria-label="Film position">
-      <span class="tm" aria-hidden="true"><span data-now>0:00</span> / <span data-tot>1:36</span></span>
+
+    <aside class="topology" aria-label="Claive architecture topology">
+      <div class="topo-title">
+        <span>Shared Rope Topology</span>
+        <span>Zero tool neutering</span>
+      </div>
+      <div class="topo-tier">
+        <span class="topo-label">Any Parent Driver</span>
+        <div class="topo-nodes">
+          <span class="topo-node">Claude Code</span>
+          <span class="topo-node">Codex</span>
+          <span class="topo-node">Pi</span>
+          <span class="topo-node">AGY</span>
+          <span class="topo-node">Shell / MCP / systemd</span>
+        </div>
+      </div>
+      <div class="topo-connector">CLI · claive-mcp · claive-tui</div>
+      <div class="topo-rope">
+        <span class="topo-label" style="color:var(--accent)">Claive Core (Shared Rope)</span>
+        <div class="topo-rope-grid">
+          <span>Isolated Git worktrees</span>
+          <span>systemd-run + subreaper</span>
+          <span>Atomic status.json</span>
+          <span>Verify &amp; apply gates</span>
+          <span>@alias &amp; conversations</span>
+          <span>Live progress signals</span>
+        </div>
+      </div>
+      <div class="topo-connector">Thin Native Engine Hooks</div>
+      <div class="topo-tier">
+        <span class="topo-label">Workers (Full Native Tools, MCP &amp; Skills Preserved)</span>
+        <div class="topo-nodes">
+          <span class="topo-node">codex</span>
+          <span class="topo-node">claude</span>
+          <span class="topo-node">pi</span>
+          <span class="topo-node">agy</span>
+          <span class="topo-node">muse</span>
+        </div>
+      </div>
+    </aside>
+  </section>
+
+  <!-- Interactive Ratatui Cockpit Preview -->
+  <section id="cockpit">
+    <p class="eyebrow">Ratatui Triage Dashboard · claive dash</p>
+    <h2>Inspect every worker at a glance—without blocking your session.</h2>
+    <p class="section-lede">
+      <code>claive-tui</code> is a native Rust dashboard built on Ratatui 0.30. It runs read-only by default with zero locks, reacts to <code>inotify</code> registry updates, tails <code>events.jsonl</code> natively in Rust with automatic secret redaction, and unlocks safe operator controls with <code>--actions</code>. Click workers, tabs, filters, and action rows below to try the 3-column wide cockpit.
+    </p>
+
+    <div class="cockpit-shell" id="cockpit-demo" role="region" aria-label="Interactive claive-tui cockpit preview">
+      <div class="cockpit-chrome">
+        <div style="display:flex;align-items:center;gap:0.65rem">
+          <span class="chrome-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="chrome-title">claive dash --all --actions</span>
+        </div>
+        <div class="chrome-controls">
+          <button class="term-toggle" id="btn-triage" type="button" aria-pressed="false">[t] Triage only</button>
+          <span style="font-size:0.7rem">160×40 wide split: Workers | Activity | Briefing</span>
+        </div>
+      </div>
+
+      <div class="cockpit-status-bar">
+        <div class="status-row-1" id="cockpit-counts"></div>
+        <div class="status-row-2" id="cockpit-scope">Scope: session=all · ws=all · mode=recent · ACTIONS-ON · native Rust events tailer · watchers=1</div>
+      </div>
+
+      <div class="cockpit-grid">
+        <!-- Column 1: Workers -->
+        <div class="pane">
+          <div class="pane-head">
+            <span id="workers-title">Workers (4)</span>
+            <span class="sub">STATE · WORKER · NOW · SEEN</span>
+          </div>
+          <ul class="worker-list" id="worker-list" role="listbox" aria-label="Demo workers"></ul>
+        </div>
+
+        <!-- Column 2: Inspector (Activity / Evidence / Summary & Logs / Briefing) -->
+        <div class="pane">
+          <div class="pane-head">
+            <span id="inspector-title">Inspector</span>
+            <span class="sub" id="inspector-id"></span>
+          </div>
+          <div class="tab-bar" role="tablist" aria-label="Inspector tabs">
+            <button class="tab-btn" role="tab" data-tab="briefing" aria-selected="false">1 Briefing</button>
+            <button class="tab-btn" role="tab" data-tab="evidence" aria-selected="false">2 Evidence</button>
+            <button class="tab-btn" role="tab" data-tab="activity" aria-selected="true">3 Activity</button>
+            <button class="tab-btn" role="tab" data-tab="logs" aria-selected="false">4 Summary/Logs</button>
+          </div>
+          <div class="pane-body" id="inspector-body" role="tabpanel"></div>
+        </div>
+
+        <!-- Column 3: Persistent Right-Hand Briefing Pane -->
+        <div class="pane">
+          <div class="pane-head">
+            <span id="briefing-title">Briefing</span>
+            <span class="sub">Right-anchored context</span>
+          </div>
+          <div class="pane-body" id="briefing-body"></div>
+        </div>
+      </div>
+
+      <div class="cockpit-footer">
+        <span>[j/k] nav · [1-4] tabs · [f] filter Actions/Milestones/All · [Space] expand · [L] Summary/Prompt/Stderr/Supervisor · [a] answer · [A] apply dry-run</span>
+        <span>Interactive preview (sample worker data)</span>
+      </div>
     </div>
-    <nav class="cnav" aria-label="Film chapters"></nav>
-    <p class="rmnote" hidden>Reduced motion is on, so the film will not start by itself and uses fades only.</p>
-    <details class="script" open>
-      <summary>Read the script</summary>
+    <p class="cockpit-note">
+      Need a minimal tmux bar instead? Run <code>claive-codex</code> or <code>CLAIVE_TMUX_TUI=1 claive-codex</code> for the 5-row <code>--compact</code> passive pane.
+    </p>
+  </section>
 
-      <section data-ch="1" data-title="The problem" data-short="Problem" data-s="0">
-        <h3>1. The problem</h3>
-        <ol>
-          <li data-s="0.8" data-e="5.0">An AI agent normally gets one attempt at a job.</li>
-          <li data-s="5.4" data-e="9.0">If the job is hard, that one try can go wrong, and nobody checks it.</li>
-        </ol>
-        <p class="onscreen">On screen: a job goes to one AI agent, which hands back code. Beside it, seven dashed squares and the words: did it work? Nobody checked.</p>
-      </section>
+  <!-- Five Harnesses -->
+  <section id="harnesses">
+    <p class="eyebrow">Engine Adapters · bin/claivelib/engines/</p>
+    <h2>Five harnesses, one contract—without lowest-common-denominator compromises.</h2>
+    <p class="section-lede">
+      Each adapter is a thin hook tuned to its harness's real CLI and streaming protocol. Unified config keys in <code>~/.config/claive/config.yaml</code> (or JSON) and per-launch <code>--set</code> overrides govern models, efforts, and providers across every engine.
+    </p>
 
-      <section data-ch="2" data-title="The cast" data-short="Cast" data-s="9.2">
-        <h3>2. The cast</h3>
-        <ol>
-          <li data-s="9.8" data-e="15.2">claive puts a small cast around that single attempt. Each role has one job.</li>
-          <li data-s="15.6" data-e="22.0">The critic comes from a different model family, so it does not repeat the worker's blind spots.</li>
-          <li data-s="22.2" data-e="24.6">The tests, not any AI, have the final say.</li>
-        </ol>
-        <p class="onscreen">On screen: five roles, one line each: parent, worker, critic, verifier and arbiter.</p>
-      </section>
+    <div class="harness-tabs" role="tablist" aria-label="Supported harnesses">
+      <button class="h-tab" role="tab" data-engine="codex" aria-selected="true">Codex</button>
+      <button class="h-tab" role="tab" data-engine="claude" aria-selected="false">Claude Code</button>
+      <button class="h-tab" role="tab" data-engine="pi" aria-selected="false">Pi</button>
+      <button class="h-tab" role="tab" data-engine="agy" aria-selected="false">AGY</button>
+      <button class="h-tab" role="tab" data-engine="muse" aria-selected="false">Muse</button>
+    </div>
 
-      <section data-ch="3" data-title="A real run" data-short="Real run" data-s="25.2">
-        <h3>3. A real run</h3>
-        <ol>
-          <li data-s="25.8" data-e="30.8">This is a real run from the repo's shakedown log. A worker writes the code first.</li>
-          <li data-s="32.0" data-e="36.4">Then the tests score it. Six of seven pass, so the work is not done.</li>
-          <li data-s="36.8" data-e="41.4">A critic from a different model family reads the failing output and names the exact defect.</li>
-          <li data-s="41.8" data-e="45.3">The same worker session applies the fix.</li>
-          <li data-s="46.0" data-e="50.2">The tests run again: seven of seven. The run ends, verified.</li>
-          <li data-s="50.6" data-e="54.8">One small task, run once. It checks the mechanics. It is not evidence.</li>
-        </ol>
-        <p class="onscreen">On screen: five steps (write, test, critique, fix, retest); seven test squares going from six green and one red outline to seven green; and the arbiter's own output for each step, for example “NEXT: critique lane a round 1 / Why: verification failed; ask a cross-family critic for defects”. A stamp reads “Verified”. Run bd886bb32632: 245 seconds, 668k input tokens (544k cached).</p>
-      </section>
+    <div class="harness-card" id="harness-panel" role="tabpanel"></div>
 
-      <section data-ch="4" data-title="A fix backfires" data-short="Backfire" data-s="55.2">
-        <h3>4. A fix backfires (illustration)</h3>
-        <ol>
-          <li data-s="56.4" data-e="61.6">Sometimes a fix makes things worse. This is an illustration of the rule, not a recorded run.</li>
-          <li data-s="62.0" data-e="67.9">The score drops, so the arbiter reverts the change with git. The rejected attempt stays on a shelf to inspect.</li>
-        </ol>
-        <p class="onscreen">On screen, marked as an illustration: a best-so-far checkpoint; a fix attempt that scores worse; the attempt moving onto a shelf labeled with its git ref; and the HEAD marker returning to the best checkpoint.</p>
-      </section>
+    <div class="contrast-grid">
+      <div class="contrast-box is">
+        <h3>What claive is</h3>
+        <p>An outer control plane for process lifecycles, isolated Git worktrees, cross-agent messaging, structured progress signals, verification/acceptance gates, and terminal triage. Any agent that can run a shell command or speak MCP can drive it.</p>
+      </div>
+      <div class="contrast-box is-not">
+        <h3>What claive is not</h3>
+        <p>Not a replacement coding agent and not a restricted sandbox that strips tools. Workers keep their native toolsets, MCP servers, prompt caching, Skillshare skills, and repo instruction files (<code>AGENTS.md</code>, <code>CLAUDE.md</code>, <code>GEMINI.md</code>).</p>
+      </div>
+    </div>
+  </section>
 
-      <section data-ch="5" data-title="A fix stalls" data-short="Stall" data-s="68.2">
-        <h3>5. A fix stalls (illustration)</h3>
-        <ol>
-          <li data-s="69.2" data-e="75.6">Two rounds in a row with no improvement, and the lane has stalled. A reverted round counts as no progress too.</li>
-          <li data-s="76.4" data-e="82.4">Only then does claive try one deliberately different second attempt, in its own git worktree. The tests pick the winner.</li>
-          <li data-s="82.8" data-e="87.3">If neither passes, the run is reported as stalled or unresolved, never as a success.</li>
-        </ol>
-        <p class="onscreen">On screen, marked as an illustration: lane a with two rounds at the same score, tagged stalled; lane b, a different approach in a separate worktree, with all seven squares green; and the tests picking lane b.</p>
-      </section>
+  <!-- 6 Core Capabilities -->
+  <section id="architecture">
+    <p class="eyebrow">The Whole Platform</p>
+    <h2>Everything needed to delegate, observe, verify, and integrate real work.</h2>
+    <p class="section-lede">
+      Start with a single reusable worker or coordinate parallel multi-model specialists across worktrees, MCP, and unattended server queues.
+    </p>
 
-      <section data-ch="6" data-title="The point" data-short="Point" data-s="87.8">
-        <h3>6. The point</h3>
-        <ol>
-          <li data-s="88.6" data-e="92.3">Models propose. Plain code and your tests decide.</li>
-          <li data-s="92.7" data-e="95.8">claive is an experiment, and it has no results yet.</li>
-        </ol>
-        <p class="onscreen">On screen: seven green squares, the line “Your tests are the referee.”, and the tag “Experimental. No results yet.”</p>
-      </section>
-    </details>
-  </figure>
-</section>
+    <div class="pillars">
+      <article class="pillar">
+        <span class="pillar-tag">01 · Messaging &amp; Specialists</span>
+        <h3>Named workers &amp; cross-engine conversations</h3>
+        <p>Bind persistent <code>@aliases</code> to reusable sessions. Send notes or wake idle workers, ask questions with optional JSON schemas, steer running turns live, or run bounded multi-round conversations across different model families.</p>
+        <div class="cmds"><code>claive open</code><code>@alias</code><code>send / ask</code><code>conversation start</code><code>steer</code></div>
+      </article>
 
-<section>
-  <h2>One shot is a bad deal either way</h2>
-  <p>An agent normally gets a single attempt. Easy work is over-served with expensive reasoning. Hard work gets one try that can lock in a bad approach, with nobody checking it.</p>
-  <p>claive adds the checking, and spends more effort only when the tests show it is needed.</p>
-</section>
+      <article class="pillar">
+        <span class="pillar-tag">02 · Live Triage TUI</span>
+        <h3>Dark Cockpit dashboard in Rust</h3>
+        <p>Zero-lock <code>inotify</code> reader with native incremental <code>events.jsonl</code> tailing, secret redaction before clipping, paired action→outcome timelines, and optional <code>--actions</code> with dual-driver hijack confirmation.</p>
+        <div class="cmds"><code>claive dash</code><code>--triage</code><code>--actions</code><code>--compact</code><code>peek --structured</code></div>
+      </article>
 
-<section id="how">
-  <h2>How it works</h2>
-  <p>Work climbs a ladder, and stops as soon as your tests pass.</p>
-  <ol class="rungs">
-    <li><b>Direct<span>L0</span></b><p>One worker tries the job and your test command runs. If it passes, that is the end.</p></li>
-    <li><b>Refine<span>L1</span></b><p>If it fails, a critic names concrete defects and the same worker session fixes them. Tests run again. A better or equal score is kept as a commit. <span class="bad">A worse score is reverted with git</span>, and the rejected attempt stays under a ref so you can inspect it. Two rounds by default, three at most.</p></li>
-    <li><b>Breadth<span>L2</span></b><p>Only if refining stalls, meaning two rounds without improvement, one deliberately different second attempt runs in a separate git worktree. The tests pick the winner. A run that never passes is reported as stalled or unresolved, never as success.</p></li>
-  </ol>
-  <dl class="terms">
-    <div><dt>Parent</dt><dd>The agent you talk to: Claude Code, Codex, a Pi agent, or a shell script. It hands out the jobs.</dd></div>
-    <div><dt>Worker</dt><dd>A cheaper agent that does the coding.</dd></div>
-    <div><dt>Critic</dt><dd>A second worker, from a different model family. It reads the result and names defects. It cannot edit.</dd></div>
-    <div><dt>Verifier</dt><dd>Your test command. Its score is the only thing that counts.</dd></div>
-    <div><dt>Arbiter</dt><dd><code>claive-orch</code>. Plain code, not a model. It names one legal next step at a time and refuses commands out of sequence.</dd></div>
-  </dl>
-</section>
+      <article class="pillar">
+        <span class="pillar-tag">03 · Isolation &amp; Containment</span>
+        <h3>Managed Git worktrees &amp; acceptance gates</h3>
+        <p>Run writers on isolated <code>claive/&lt;id&gt;</code> branches with optional <code>--carry-dirty</code> and <code>--link-deps</code>. Process trees stay contained under <code>systemd-run --user --scope</code> + subreaper, and <code>apply --dry-run</code> enforces verification and ownership gates before merging.</p>
+        <div class="cmds"><code>--worktree</code><code>--carry-dirty</code><code>claive verify</code><code>worktree apply</code><code>claive-memcap</code></div>
+      </article>
 
-<section>
-  <h2>Why it's different</h2>
-  <ul class="why">
-    <li><strong>Your tests are the referee, not another AI's opinion.</strong><span>The critic proposes. Only the test score decides whether a change is kept.</span></li>
-    <li><strong>Fix before re-roll.</strong> Refine an attempt before paying for a second one.</li>
-    <li><strong>A different AI family critiques.</strong> The arbiter refuses a same-family critic unless you override it, and the override is recorded.</li>
-    <li><strong>Code runs the process.</strong> One legal next step at a time, with regressions reverted by git.</li>
-    <li><strong>Any agent that can run a shell command can drive it.</strong> It is a plain CLI with exit codes and file state.</li>
-    <li><strong>It measures itself.</strong> Compute-matched baselines, pass bars fixed before data, and a null result counts as an answer.</li>
-  </ul>
-  <p class="apart">Also in the repo: plain <code>claive</code> workers outside the ladder, with live steering, <code>fork</code>, questions to the parent (<code>ask</code>/<code>reply</code>), peer channels, teams, scheduled wakes and monitors; an unattended goal queue (<code>claive goal</code>, <code>claive serve</code>); and <code>stats</code> and <code>pick</code>, which choose a critic from past results. Every command: <a href="https://github.com/ham-zax/claive/blob/main/docs/command-reference.md">command reference</a>.</p>
-</section>
+      <article class="pillar">
+        <span class="pillar-tag">04 · Zero-Shell MCP</span>
+        <h3>Flat-schema MCP stdio server</h3>
+        <p>Expose 10 clean scalar-schema tools (<code>claive_start</code>, <code>claive_peek</code>, <code>claive_steer</code>, <code>claive_wait</code>, <code>claive_verify</code>, <code>claive_apply</code>, and more) backed by atomic <code>status.json</code> snapshots—no fragile shell polling.</p>
+        <div class="cmds"><code>claive-mcp</code><code>claive mcp</code><code>status.json</code></div>
+      </article>
 
-<section>
-  <h2>What it's built on</h2>
-  <p>The idea comes from <em>Refining Over Resampling</em> (Bilal et al., arXiv 2608.05643): sampling more answers hits diminishing returns, so refine one first. The paper studies math reasoning. claive adapts the idea to coding agents, which the paper did not test.</p>
-  <dl class="terms">
-    <div><dt>Foreman</dt><dd>A coding agent works while a watcher decides whether to step in, under deterministic rules.</dd></div>
-    <div><dt>Claudexor</dt><dd>Isolated best-of-N workspaces, cross-family reviewers, arbitration and bounded repair.</dd></div>
-    <div><dt>JevRouter</dt><dd>Treats models, tools and agents as options, while plain code owns what is allowed.</dd></div>
-    <div><dt>JevLoop</dt><dd>One authoritative event history, with every other view derived from it.</dd></div>
-    <div><dt>pi-subagents</dt><dd>Background runs and waiting, the pattern behind claive's async workers.</dd></div>
-  </dl>
-  <p class="apart">Ideas, not code. The repo calls these references, not dependencies.</p>
-</section>
+      <article class="pillar">
+        <span class="pillar-tag">05 · Verified Arbiter</span>
+        <h3>Deterministic test-gated refinement</h3>
+        <p><code>claive-orch</code> is plain code—not an LLM—that steps workers through L0 direct execution, L1 cross-family critique and repair with automatic <code>git reset</code> on regressions, and L2 selective breadth only when refining stalls.</p>
+        <div class="cmds"><code>claive-orch init</code><code>next</code><code>report</code><code>integrate</code></div>
+      </article>
 
-<section id="experiment">
-  <h2>The experiment</h2>
-  <p class="q">For frontier coding agents, does verifier-gated refinement, with selective breadth only when refinement stalls, beat a single run and compute-matched resampling?</p>
-  <dl class="arms">
-    <div><dt>A</dt><dd>One try.</dd></div>
-    <div><dt>R</dt><dd>Two identical tries; the tests pick.</dd></div>
-    <div><dt>R′</dt><dd>Two different setups; the tests pick.</dd></div>
-    <div><dt>B</dt><dd>Fix loop with a critic.</dd></div>
-    <div><dt>B0</dt><dd>Fix loop without a critic, from test output alone.</dd></div>
-    <div><dt>D</dt><dd>Fix loop, then a different second try only if stuck.</dd></div>
-  </dl>
-  <p>Each decision has a pass bar, written down before the first data run, and a null result is an acceptable outcome. The bars are still being tuned, so they are not published here yet.</p>
-  <p><strong>Status.</strong> A small set of tasks, built from real fix commits of the author's own project. The first batch has not run. The only run so far is the shakedown above. A set this small supports exploratory conclusions only. Compute is measured in tokens and wall-clock time, not money.</p>
-</section>
+      <article class="pillar">
+        <span class="pillar-tag">06 · Unattended Queue</span>
+        <h3>Durable server runner via systemd</h3>
+        <p>When no parent session is open, <code>claive serve</code> works a durable <code>$CLAIVE_DIR/goals/</code> queue with wall-clock budgets, workspace allowlists, provider backoff, parked-question inbox events, and a clean stop switch.</p>
+        <div class="cmds"><code>claive goal add</code><code>goal answer</code><code>claive serve</code><code>claive-serve.service</code></div>
+      </article>
+    </div>
+  </section>
 
-<section>
-  <h2>Cheaper agents, same recipe</h2>
-  <p><em>Give a cheap agent the recipe and a failing test. The loop does the checking.</em> That is the bet the experiment tests. It is not a result.</p>
-  <p>Pi can run reviewers or second attempts on free-tier and flash-class models when those providers are available. Free-tier models can rate-limit, change, or disappear. The <code>stats</code> and <code>pick</code> commands were built by a worker running through claive's own ladder. None of this demonstrates cost savings, better results than frontier models, or local-model support.</p>
-</section>
+  <!-- Verifier-Gated Orchestration -->
+  <section id="orchestration">
+    <p class="eyebrow">Verified Orchestration · claive-orch</p>
+    <h2>Models propose. Plain code and your tests decide.</h2>
+    <p class="section-lede">
+      For verifier-gated coding tasks, <code>claive-orch</code> climbs a deterministic three-rung ladder and stops the moment your test command passes. Worse attempts are reverted automatically and shelved under a Git ref for inspection.
+    </p>
 
-<section id="try" class="try">
-  <h2>Try it</h2>
-  <p><strong>You need</strong> Linux and Python 3 (standard library only). Workers run on Muse, Pi, Claude Code or Codex, each installed separately. Each worker gets its engine's own default tools, and read-only work uses the engine's own read-only mode. The built-in default engine is Muse: <code>default_engine</code> in <code>~/.config/claive/config.json</code> changes it, and <code>engines.&lt;name&gt;.enabled: false</code> turns an engine off. The optional worker pane needs tmux and Codex.</p>
-  <p><strong>New to this?</strong> All you need is a repo and one command that currently fails, such as a test. That command is your verifier.</p>
-  <h3>Install</h3>
-  <pre tabindex="0"><code>git clone https://github.com/ham-zax/claive.git &amp;&amp; cd claive
-./install.sh --dry-run   # lists what would be copied; changes nothing
-./install.sh             # installs the tools and skills for Claude Code and Codex</code></pre>
-  <h3>Ask your agent</h3>
-  <p>Start a new Claude Code or Codex session and say:</p>
-  <pre tabindex="0"><code>Use the claive-orchestration skill. You have my permission to delegate to claive workers.
-Repo: /abs/repo. Task: &lt;goal&gt;. Verifier: &lt;command that fails now&gt;. Arm D. Don't commit.</code></pre>
-  <h3>Or drive the arbiter yourself</h3>
-  <pre tabindex="0"><code>claive-orch init --repo /abs/repo --task-file /abs/task.md --verify 'python3 -m pytest -q' --arm D
-claive-orch next RUN       # prints NEXT, Why and How: do exactly that one action
-claive-orch report RUN     # outcome, score trajectory, critics, tokens
-claive-orch integrate RUN  # apply the winner and re-verify in your checkout</code></pre>
-  <p>Source and issues: <a href="https://github.com/ham-zax/claive">github.com/ham-zax/claive</a>. MIT licensed.</p>
-</section>
+    <ol class="ladder">
+      <li class="rung">
+        <div class="rung-head">
+          <h3>Direct</h3>
+          <span class="rung-code">L0</span>
+        </div>
+        <p>One worker implements the task in an isolated lane and your verifier command runs. If the checks pass, the run completes immediately without extra spend.</p>
+      </li>
+      <li class="rung">
+        <div class="rung-head">
+          <h3>Cross-Family Refine</h3>
+          <span class="rung-code">L1</span>
+        </div>
+        <p>On failure, a read-only critic from a <strong>different model family</strong> names concrete defects. The same worker session fixes them. Better or equal scores checkpoint; regressions revert via Git and stay under <code>refs/claive-orch/&lt;run&gt;/&lt;lane&gt;/rejected-rN</code>.</p>
+      </li>
+      <li class="rung">
+        <div class="rung-head">
+          <h3>Selective Breadth</h3>
+          <span class="rung-code">L2</span>
+        </div>
+        <p>Only after refining stalls (two rounds without improvement, including reverts) does arm D launch a deliberately different second lane in its own worktree. Your verifier picks the winner—never a guess.</p>
+      </li>
+    </ol>
 
-<section>
-  <h2>What isn't built</h2>
-  <ul class="gap">
-    <li>Jev-based control, so arms C and E do not exist.</li>
-    <li>Stuck detection inside a single turn.</li>
-    <li>A test-author worker for hidden checks.</li>
-    <li>Enforced token budgets.</li>
-    <li>An enforced read-only mode for Pi. Pi has none, so a read-only Pi turn gets an instruction, not a block.</li>
-    <li>OpenCode as a direct worker engine (Pi uses the separate <code>opencode2api</code> route).</li>
-  </ul>
-</section>
+    <dl class="roles-strip">
+      <div class="role-card"><dt>Parent</dt><dd>Claude Code, Codex, Pi, AGY, or a shell script delegating tasks.</dd></div>
+      <div class="role-card"><dt>Worker</dt><dd>Reusable session writing code inside a workspace or isolated worktree.</dd></div>
+      <div class="role-card"><dt>Critic</dt><dd>Read-only reviewer from a distinct model family naming exact defects.</dd></div>
+      <div class="role-card"><dt>Verifier</dt><dd>Your own test/check command—the sole source of truth for keeping changes.</dd></div>
+      <div class="role-card"><dt>Arbiter</dt><dd><code>claive-orch</code>: plain Python state machine enforcing one legal step at a time.</dd></div>
+    </dl>
+    <p class="cockpit-note">
+      Note on benchmarking: the earlier TTC benchmark experiment is intentionally deferred (see <code>docs/experiment/README.md</code>). <code>claive-orch</code> remains available as an everyday verifier-gated workflow, and this page makes no unverified benchmark or win-rate claims.
+    </p>
+  </section>
+
+  <!-- Quickstart -->
+  <section id="quickstart">
+    <p class="eyebrow">Quickstart</p>
+    <h2>Up and running in two minutes.</h2>
+    <p class="section-lede">
+      Requires Linux and Python 3 (standard library only), plus whichever coding harness CLI(s) you already use. Add Cargo to compile the optional native Ratatui dashboard.
+    </p>
+
+    <div class="qs-box">
+      <div class="qs-tabs" role="tablist" aria-label="Quickstart examples">
+        <button class="qs-tab" role="tab" data-qs="install" aria-selected="true">Install</button>
+        <button class="qs-tab" role="tab" data-qs="worker" aria-selected="false">Workers &amp; @aliases</button>
+        <button class="qs-tab" role="tab" data-qs="dash" aria-selected="false">Triage Dashboard</button>
+        <button class="qs-tab" role="tab" data-qs="conv" aria-selected="false">Conversations</button>
+        <button class="qs-tab" role="tab" data-qs="mcp" aria-selected="false">MCP Server</button>
+        <button class="qs-tab" role="tab" data-qs="orch" aria-selected="false">Arbiter &amp; Serve</button>
+      </div>
+      <div class="qs-body">
+        <button class="copy-btn" id="qs-copy" type="button">Copy</button>
+        <pre><code id="qs-code"></code></pre>
+      </div>
+      <div class="qs-caption" id="qs-caption"></div>
+    </div>
+  </section>
+
+  <!-- Honest Limits -->
+  <section id="limits">
+    <p class="eyebrow">Scope &amp; Honest Limits</p>
+    <h2>What to know before adopting claive.</h2>
+    <ul class="limits-list">
+      <li><strong>Linux-first process containment:</strong> Designed for Linux (including WSL2) using <code>systemd-run --user --scope</code>, <code>/proc</code> liveness checks, and <code>inotify</code>. macOS and native Windows are not supported targets.</li>
+      <li><strong>Soft vs. enforced read-only:</strong> Codex and Muse enforce read-only at the harness level; Pi, Claude Code, and AGY use soft-read instructions unless you require strict enforcement via <code>--require-read-only</code>.</li>
+      <li><strong>Engine binaries are installed separately:</strong> Claive wraps the CLIs you already authenticate and pay for (<code>codex</code>, <code>claude</code>, <code>pi</code>, <code>agy</code>, <code>muse</code>). Free-tier routes on Pi can rate-limit or change availability.</li>
+      <li><strong>No fabricated benchmarks:</strong> No win-rate or cost-savings claims are published here; the TTC research experiment is deferred until a settled corpus and protocol are explicitly resumed.</li>
+    </ul>
+  </section>
 </main>
-<footer>
-  <p>claive by Hamza (<a href="https://github.com/ham-zax">ham-zax</a>). MIT licensed.</p>
-  <p><a href="https://github.com/ham-zax/claive">Source</a> · Last updated 2026-10-15</p>
+
+<footer class="wrap">
+  <p><strong>claive</strong> by Hamza (<a href="https://github.com/ham-zax">ham-zax</a>) · MIT License</p>
+  <div class="footer-links">
+    <a href="https://github.com/ham-zax/claive">Source</a>
+    <a href="https://github.com/ham-zax/claive/blob/main/docs/command-reference.md">Command reference</a>
+    <a href="https://github.com/ham-zax/claive/blob/main/docs/engine-configuration.md">Engine config</a>
+    <a href="https://github.com/ham-zax/claive/blob/main/docs/harness-integration.md">Harness integration</a>
+    <span>Updated 2026-11-24</span>
+  </div>
 </footer>
-</div>
 
 <script>
 (() => {
-  const film = document.querySelector('#film');
-  if (!film) return;
-
-  const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
-  const total = Number(film.dataset.total) || 96;
-  const poster = film.querySelector('.poster');
-  const playButton = film.querySelector('.pp');
-  const scrub = film.querySelector('.scrub');
-  const timer = film.querySelector('[data-now]');
-  const chapterDisplay = film.querySelector('.hud .chap');
-  const captionBar = film.querySelector('.capbar');
-  const chapterNav = film.querySelector('.cnav');
-  const chapters = [...film.querySelectorAll('.script section[data-ch]')];
-  const steps = [...film.querySelectorAll('.s3 .step')];
-  const tapeEntries = [...film.querySelectorAll('.s3 .tape .te')];
-  const rail = [...film.querySelectorAll('.s3 .rail li')];
-  const counts = [...film.querySelectorAll('.s3 .count span')];
-  const verdicts = [...film.querySelectorAll('.s3 .verdict span')];
-  const stamp = film.querySelector('.s3 .stamp');
-  const lateBackfire = film.querySelector('.s4 .a2');
-  const firstBackfire = film.querySelector('.s4 .a1');
-  const shelf = film.querySelector('.s4 .shelf');
-  const secondLane = film.querySelector('.s5 .lb');
-  const bestHead = film.querySelector('.s4 .best .head');
-  const attHead = film.querySelector('.s4 .att .head');
-  const timed = [...film.querySelectorAll('[data-at]')];
-  if (!chapters.length || !poster || !playButton || !scrub || !chapterNav) return;
-
-  const cues = chapters.flatMap((section, chapter) =>
-    [...section.querySelectorAll('li[data-s]')].map(item => ({
-      chapter, start: Number(item.dataset.s), end: Number(item.dataset.e),
-      text: item.textContent.trim()
-    }))
-  );
-  const caption = document.createElement('p');
-  caption.setAttribute('aria-live', 'off');
-  captionBar.append(caption);
-
-  film.querySelectorAll('[data-strip]').forEach(strip => {
-    const pattern = strip.dataset.strip || '';
-    strip.replaceChildren(...[...pattern].map((mark, index) => {
-      const box = document.createElement('span');
-      box.className = 'sq' + (mark === 'f' ? ' f' : mark === 'd' ? ' dash' : mark === 'x' ? ' gh' : '');
-      box.style.setProperty('--i', index);
-      const ok = document.createElement('b');
-      ok.className = 'ok';
-      const no = document.createElement('b');
-      no.className = 'no';
-      box.append(ok, no);
-      return box;
-    }));
+  // ---- Theme toggle ----
+  const root = document.documentElement;
+  const themeBtn = document.getElementById('theme-toggle');
+  const savedTheme = (() => { try { return localStorage.getItem('claive-theme'); } catch { return null; } })();
+  if (savedTheme === 'light' || savedTheme === 'dark') {
+    root.dataset.theme = savedTheme;
+  }
+  function currentTheme() {
+    if (root.dataset.theme === 'light' || root.dataset.theme === 'dark') return root.dataset.theme;
+    return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+  function syncThemeLabel() {
+    const t = currentTheme();
+    themeBtn.textContent = t === 'dark' ? 'Light mode' : 'Dark mode';
+  }
+  syncThemeLabel();
+  themeBtn.addEventListener('click', () => {
+    const next = currentTheme() === 'dark' ? 'light' : 'dark';
+    root.dataset.theme = next;
+    try { localStorage.setItem('claive-theme', next); } catch {}
+    syncThemeLabel();
   });
 
-  const chapterButtons = chapters.map((section, index) => {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.textContent = String(index + 1).padStart(2, '0') + '  ' + section.dataset.short;
-    button.setAttribute('aria-label', 'Go to chapter ' + (index + 1) + ': ' + section.dataset.title);
-    button.addEventListener('click', () => {
-      begin();
-      seek(Number(section.dataset.s));
+  // ---- Interactive Cockpit Demo Data ----
+  const WORKERS = [
+    {
+      id: 'ace72d874787',
+      alias: '@core-cli',
+      badge: 'ASK',
+      badgeClass: 'ask',
+      actionable: true,
+      engine: 'codex/gpt-6.1-terra (xhigh)',
+      workspace: 'repo/satori',
+      turn: 1,
+      elapsed: '8m35s',
+      seen: '12s',
+      watchedBy: 'codex-parent',
+      mission: 'Fix worktree lock recovery & add focused CLI regression tests',
+      now: 'ASK: Should recovery always back off for live PIDs, or add a helper-age threshold?',
+      stage: 'blocked',
+      intent: 'Core and CLI fixes pass tests; waiting on parent decision for live-PID lock recovery.',
+      lastCheck: { status: 'passed', summary: '47 passed (tsx --test)' },
+      filesTotal: 5,
+      verify: 'passed',
+      accept: 'pending',
+      branch: 'claive/ace72d874787',
+      baseCommit: '9f4b21c8a012',
+      cmdFailures: 1,
+      ask: {
+        kind: 'needs_decision',
+        question: 'Should lock recovery always back off while the recorded PID is alive, or introduce a separate helper-age ceiling?',
+        cmd: 'claive answer ace72d874787 --message ""'
+      },
+      changedFiles: [
+        'packages/core/src/core/context.ts',
+        'packages/core/src/lock/recovery.ts',
+        'packages/cli/src/commands/gc.ts',
+        'packages/cli/src/gc.test.ts',
+        'packages/core/src/lock/recovery.test.ts'
+      ],
+      actions: [
+        { id: 34, cat: 'test', tag: 'TEST ', summary: 'node --import tsx --test packages/core/src/lock/recovery.test.ts', outcome: '46 passed', status: 'ok', milestone: true,
+          cmd: 'node --import tsx --test packages/core/src/lock/recovery.test.ts', exit: 0, output: '# tests 46\n# pass 46\n# fail 0\n# duration_ms 412.4' },
+        { id: 35, cat: 'read', tag: 'READ ', summary: 'rg reuse|shardReuse in packages/core/src', outcome: '14 lines', status: 'ok', milestone: false,
+          cmd: "rg -n 'reuse|shardReuse' packages/core/src", exit: 0, output: 'packages/core/src/core/context.ts:55: relationshipVersion' },
+        { id: 36, cat: 'edit', tag: 'EDIT ', summary: 'packages/cli/src/gc.test.ts (2 edits)', outcome: 'applied', status: 'ok', milestone: true,
+          cmd: null, exit: 0, output: 'Updated lock-owner liveness fixture and live-PID regression test.' },
+        { id: 37, cat: 'build', tag: 'BUILD', summary: 'pnpm --filter @satori/cli build', outcome: 'ok', status: 'ok', milestone: true,
+          cmd: 'pnpm --filter @satori/cli build', exit: 0, output: '> @satori/cli build\n> tsc -b' },
+        { id: 38, cat: 'test', tag: 'TEST ', summary: 'node --import tsx --test packages/cli/src/gc.test.ts', outcome: '47 passed', status: 'ok', milestone: true,
+          cmd: 'node --import tsx --test packages/cli/src/gc.test.ts', exit: 0, output: '# tests 47\n# pass 47\n# fail 0' },
+        { id: 39, cat: 'say', tag: 'SAY  ', summary: 'Core build and focused suite pass; pausing for lock-recovery decision.', outcome: null, status: 'done', milestone: true,
+          cmd: null, exit: null, output: 'Core build and 47 tests pass. Found one design fork around live-PID lock backoff vs helper-age ceiling; escalating with needs_decision.' }
+      ],
+      logs: {
+        summary: '# Result Summary\n- Updated `context.ts` and `recovery.ts` for deterministic lock cleanup.\n- Verified `47 passed` in focused core + CLI test suites.\n- Escalated `needs_decision` before altering live-PID backoff policy.',
+        prompt: '# Mission\nImplement lock recovery fixes in `packages/core` and `packages/cli`.\nDo not commit or stage. Escalate with `needs_decision` if policy changes are needed.',
+        stderr: '(stderr.log is empty)',
+        supervisor: '[08:01:12] spawned codex worker ace72d874787 in worktree claive/ace72d874787\n[08:09:47] turn 1 settled with needs_parent (needs_decision)'
+      }
+    },
+    {
+      id: '92113e98e291',
+      alias: '@api-refactor',
+      badge: 'RUN',
+      badgeClass: 'run',
+      actionable: false,
+      engine: 'claude/claude-haiku-5-5 (xhigh)',
+      workspace: 'repo/gateway',
+      turn: 2,
+      elapsed: '2m14s',
+      seen: '2s',
+      watchedBy: 'claude-main',
+      mission: 'Split connector-policy parser into pure validator + unit tests',
+      now: '[TESTING] pytest tests/test_connector_policy.py',
+      stage: 'testing',
+      intent: 'Extracted policy validator; running edge-case test matrix now.',
+      lastCheck: { status: 'failed', summary: 'exit 1: 1 failed (missing default fallback)' },
+      filesTotal: 3,
+      verify: 'not_run',
+      accept: 'pending',
+      branch: 'claive/92113e98e291',
+      baseCommit: '3c8d09e14b77',
+      cmdFailures: 1,
+      ask: null,
+      changedFiles: [
+        'lib/bridge/connector-policy.mjs',
+        'lib/bridge/policy-schema.mjs',
+        'tests/test_connector_policy.mjs'
+      ],
+      actions: [
+        { id: 12, cat: 'edit', tag: 'EDIT ', summary: 'lib/bridge/connector-policy.mjs (1 edit)', outcome: 'applied', status: 'ok', milestone: true,
+          cmd: null, exit: 0, output: 'Split parseConnectorPolicy() into pure validatePolicy() helper.' },
+        { id: 13, cat: 'test', tag: 'TEST ', summary: 'just test-fast', outcome: 'exit 1: 1 failed', status: 'error', milestone: true,
+          cmd: 'just test-fast', exit: 1, output: 'FAIL tests/test_connector_policy.mjs\nAssertionError: expected default policy when env unset' },
+        { id: 14, cat: 'edit', tag: 'EDIT ', summary: 'lib/bridge/connector-policy.mjs (1 edit)', outcome: 'applied', status: 'ok', milestone: true,
+          cmd: null, exit: 0, output: 'Restored default fallback when CONNECTOR_POLICY is empty.' },
+        { id: 15, cat: 'test', tag: 'TEST ', summary: 'just test-fast', outcome: 'running...', status: 'running', milestone: true,
+          cmd: 'just test-fast', exit: null, output: 'Running 28 test cases...' }
+      ],
+      logs: {
+        summary: '(turn 2 still running — result.txt updates on settlement)',
+        prompt: '# Turn 2 Follow-up\nExtract connector policy validation into a pure function and cover missing-env defaults.',
+        stderr: '(no stderr warnings)',
+        supervisor: '[08:08:11] turn 2 started (--enable-steering active)\n[08:10:23] active tool: bash (just test-fast)'
+      }
+    },
+    {
+      id: '7d40a1f8c302',
+      alias: '@auth-audit',
+      badge: 'REVIEW',
+      badgeClass: 'review',
+      actionable: true,
+      engine: 'pi/mimo-v2.6-flash-free',
+      workspace: 'repo/claive',
+      turn: 1,
+      elapsed: '4m48s',
+      seen: '1m05s',
+      watchedBy: '',
+      mission: 'Add secret redaction coverage for multi-byte UTF-8 inputs',
+      now: 'check ok: 32/32 Rust tests passed · ready for apply dry-run',
+      stage: 'done',
+      intent: 'All 32 Rust unit & integration tests pass with clippy -D warnings clean.',
+      lastCheck: { status: 'passed', summary: '32 passed, 0 failed' },
+      filesTotal: 2,
+      verify: 'passed',
+      accept: 'pending',
+      branch: 'claive/7d40a1f8c302',
+      baseCommit: '11a7e4f9c203',
+      cmdFailures: 0,
+      ask: null,
+      changedFiles: [
+        'tui/src/events.rs',
+        'tui/tests/phase1_integration.rs'
+      ],
+      actions: [
+        { id: 8, cat: 'edit', tag: 'EDIT ', summary: 'tui/src/events.rs (2 edits)', outcome: 'applied', status: 'ok', milestone: true,
+          cmd: null, exit: 0, output: 'Switched issuer-token scanner to byte slices so multi-byte UTF-8 prefixes never panic.' },
+        { id: 9, cat: 'test', tag: 'TEST ', summary: 'cargo test --manifest-path tui/Cargo.toml', outcome: '32 passed', status: 'ok', milestone: true,
+          cmd: 'cargo test --manifest-path tui/Cargo.toml', exit: 0, output: 'test result: ok. 20 unit + 8 phase1 + 4 phase2_3 passed' },
+        { id: 10, cat: 'build', tag: 'BUILD', summary: 'cargo clippy --all-targets -- -D warnings', outcome: 'ok', status: 'ok', milestone: true,
+          cmd: 'cargo clippy --manifest-path tui/Cargo.toml --all-targets -- -D warnings', exit: 0, output: 'Finished dev profile cleanly with 0 warnings.' },
+        { id: 11, cat: 'say', tag: 'SAY  ', summary: 'Verified UTF-8 redaction safety; worktree ready for claive apply --dry-run.', outcome: null, status: 'done', milestone: true,
+          cmd: null, exit: null, output: 'All 32 Rust tests and clippy checks passed. Worktree is clean and ready for parent review/apply.' }
+      ],
+      logs: {
+        summary: '# Verification Ready\n- Hardened `redact_secrets` against multi-byte UTF-8 boundaries.\n- `just dash-test`: 32/32 passed.\n- `cargo clippy --all-targets -- -D warnings`: clean.\n- Press `[A]` in `--actions` mode to inspect `claive apply --dry-run`.',
+        prompt: '# Mission\nAudit `tui/src/events.rs` secret redaction for UTF-8 boundary panics and add regression coverage.',
+        stderr: '(stderr.log is empty)',
+        supervisor: '[08:04:10] spawned pi worker 7d40a1f8c302\n[08:08:58] verification passed -> status REVIEW'
+      }
+    },
+    {
+      id: '4f91b2e60019',
+      alias: '@spec-scout',
+      badge: 'DONE',
+      badgeClass: 'done',
+      actionable: false,
+      engine: 'agy/gemini-3.8-flash-high',
+      workspace: 'repo/claive',
+      turn: 1,
+      elapsed: '1m42s',
+      seen: '18m',
+      watchedBy: '',
+      mission: 'Read-only audit of MCP tool schemas for flat scalar compliance',
+      now: 'All 10 claive-mcp tool definitions comply with flat scalar schema rules',
+      stage: 'done',
+      intent: 'Confirmed zero nested object/anyOf/oneOf keys across all 10 MCP tools.',
+      lastCheck: { status: 'passed', summary: '10/10 tools flat-schema compliant' },
+      filesTotal: 0,
+      verify: 'passed',
+      accept: 'accepted',
+      branch: '(detached read-only)',
+      baseCommit: '11a7e4f9c203',
+      cmdFailures: 0,
+      ask: null,
+      changedFiles: [],
+      actions: [
+        { id: 1, cat: 'read', tag: 'READ ', summary: 'bin/claivelib/mcp_server.py', outcome: '210 lines', status: 'ok', milestone: false,
+          cmd: null, exit: 0, output: 'Read TOOL_DEFINITIONS and FORBIDDEN_SCHEMA_KEYS.' },
+        { id: 2, cat: 'test', tag: 'TEST ', summary: 'just test-one tests/test_mcp_server.py', outcome: '19 passed', status: 'ok', milestone: true,
+          cmd: 'just test-one tests/test_mcp_server.py', exit: 0, output: 'Ran 19 tests in 0.84s — OK' },
+        { id: 3, cat: 'say', tag: 'SAY  ', summary: 'All 10 MCP tools use flat scalar schemas with zero forbidden JSON Schema keywords.', outcome: null, status: 'done', milestone: true,
+          cmd: null, exit: null, output: 'Audit complete: claive_start, claive_peek, claive_steer, claive_wait, claive_cancel, claive_verify, claive_list, claive_followup, claive_apply, claive_close are all flat-schema compliant.' }
+      ],
+      logs: {
+        summary: '# Read-Only Audit\nConfirmed all 10 `claive-mcp` tools avoid `anyOf`, `oneOf`, `$ref`, and nested objects.',
+        prompt: '# Read-Only Scout\nVerify every tool in `bin/claivelib/mcp_server.py` obeys flat-schema constraints.',
+        stderr: '(stderr.log is empty)',
+        supervisor: '[07:50:02] spawned read-only agy worker 4f91b2e60019\n[07:51:44] settled (done)'
+      }
+    }
+  ];
+
+  let selectedId = WORKERS[0].id;
+  let activeTab = 'activity';
+  let actFilter = 'actions';
+  let logKind = 'summary';
+  let triageOnly = false;
+  const expanded = new Set([34]);
+
+  const countsEl = document.getElementById('cockpit-counts');
+  const workersTitleEl = document.getElementById('workers-title');
+  const workerListEl = document.getElementById('worker-list');
+  const inspectorTitleEl = document.getElementById('inspector-title');
+  const inspectorIdEl = document.getElementById('inspector-id');
+  const inspectorBodyEl = document.getElementById('inspector-body');
+  const briefingTitleEl = document.getElementById('briefing-title');
+  const briefingBodyEl = document.getElementById('briefing-body');
+  const triageBtn = document.getElementById('btn-triage');
+
+  function esc(str) {
+    return String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function renderBriefingHtml(w) {
+    let html = `<div style="margin-bottom:0.65rem">
+      <span class="t-badge ${w.badgeClass}">${esc(w.badge)}</span>
+      <span style="color:#fff;margin-left:0.35rem">${esc(w.engine)}</span>
+      <span style="color:var(--term-muted)"> · ${esc(w.workspace)} · t${w.turn} · ${esc(w.elapsed)}</span>
+    </div>`;
+
+    if (w.ask) {
+      html += `<div class="brief-ask">
+        <div class="ask-t">[ASK] NEEDS PARENT (${esc(w.ask.kind)})</div>
+        <div style="color:#fff;margin:0.25rem 0">${esc(w.ask.question)}</div>
+        <div style="color:var(--term-cyan);font-size:0.7rem">[a] answer · [y] ${esc(w.ask.cmd)}</div>
+      </div>`;
+    }
+
+    html += `<div class="brief-block">
+      <div class="brief-h">Mission</div>
+      <div style="color:#fff">${esc(w.mission)}</div>
+    </div>`;
+
+    html += `<div class="brief-block">
+      <div class="brief-h">Now &amp; Area</div>
+      <dl class="brief-kv">
+        <dt>Stage</dt><dd style="color:var(--term-cyan)">[${esc(w.stage.toUpperCase())}]</dd>
+        <dt>Intent</dt><dd>${esc(w.intent)}</dd>
+        <dt>Last check</dt><dd style="color:${w.lastCheck.status === 'passed' ? 'var(--term-green)' : 'var(--term-red)'}">${esc(w.lastCheck.status)} — ${esc(w.lastCheck.summary)}</dd>
+        <dt>Worktree</dt><dd>${w.filesTotal} files · verify=${esc(w.verify)} · accept=${esc(w.accept)}</dd>
+      </dl>
+    </div>`;
+
+    const milestones = w.actions.filter(a => a.milestone).slice(-3);
+    html += `<div class="brief-block">
+      <div class="brief-h">Recent Milestones</div>`;
+    for (const m of milestones) {
+      const outHtml = m.outcome
+        ? ` <span style="color:var(--term-muted)">-&gt;</span> <span class="act-out ${m.status}">${esc(m.outcome)}</span>`
+        : '';
+      html += `<div style="font-size:0.72rem;margin-bottom:0.2rem">
+        <span class="cat-tag cat-${m.cat}">${esc(m.tag.trim())}</span> ${esc(m.summary)}${outHtml}
+      </div>`;
+    }
+    html += `</div>`;
+    return html;
+  }
+
+  function renderCockpit() {
+    const visible = triageOnly ? WORKERS.filter(w => w.actionable) : WORKERS;
+    if (!visible.some(w => w.id === selectedId) && visible.length) {
+      selectedId = visible[0].id;
+    }
+    const w = visible.find(x => x.id === selectedId) || WORKERS[0];
+
+    countsEl.innerHTML = `
+      <span class="t-badge brand-b">CLAIVE</span>
+      <span class="t-badge ask">ASK:1</span>
+      <span class="t-badge review">REVIEW:1</span>
+      <span style="color:var(--term-ink)">run:1 idle:0 done:1</span>
+      ${triageOnly ? '<span class="t-badge warn">TRIAGE-ONLY</span>' : ''}
+    `;
+
+    workersTitleEl.textContent = `Workers (${visible.length}${triageOnly ? ' actionable' : ''})`;
+    workerListEl.innerHTML = visible.map(item => `
+      <li>
+        <button class="worker-item" type="button" role="option" data-wid="${item.id}" aria-selected="${item.id === w.id}">
+          <div class="worker-top">
+            <span class="t-badge ${item.badgeClass}">${esc(item.badge)}</span>
+            <span class="worker-name">${esc(item.alias)}</span>
+            <span class="worker-seen">${esc(item.seen)}</span>
+          </div>
+          <div class="worker-now">${esc(item.now)}</div>
+          <div class="worker-sub">${esc(item.workspace)} · ${esc(item.mission)}</div>
+        </button>
+      </li>
+    `).join('');
+
+    workerListEl.querySelectorAll('[data-wid]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        selectedId = btn.dataset.wid;
+        renderCockpit();
+      });
     });
-    chapterNav.append(button);
-    return button;
-  });
 
-  let elapsed = 0;
-  let playing = false;
-  let lastTick = 0;
-  let frame = 0;
-  let displayedCaption = '';
-  let displayedChapter = -1;
+    inspectorTitleEl.textContent = `Inspector: ${w.alias}`;
+    inspectorIdEl.textContent = w.id;
+    briefingTitleEl.textContent = `Briefing: ${w.alias}`;
+    briefingBodyEl.innerHTML = renderBriefingHtml(w);
 
-  const format = seconds => {
-    const s = Math.max(0, Math.floor(seconds));
-    return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
-  };
-  const activate = (nodes, index) =>
-    nodes.forEach((node, i) => node.classList.toggle('active', i === index));
+    document.querySelectorAll('#cockpit-demo .tab-btn').forEach(btn => {
+      btn.setAttribute('aria-selected', String(btn.dataset.tab === activeTab));
+    });
 
-  function render(time) {
-    elapsed = Math.max(0, Math.min(total, time));
-    const currentChapter = Math.max(0, chapters.findLastIndex(ch => elapsed >= Number(ch.dataset.s)));
-    film.dataset.chapter = String(currentChapter);
-
-    if (displayedChapter !== currentChapter) {
-      displayedChapter = currentChapter;
-      chapterDisplay.textContent = String(currentChapter + 1).padStart(2, '0') +
-        ' / ' + String(chapters.length).padStart(2, '0') + '   ' +
-        chapters[currentChapter].dataset.title;
-      chapterButtons.forEach((button, index) => {
-        if (index === currentChapter) button.setAttribute('aria-current', 'true');
-        else button.removeAttribute('aria-current');
+    if (activeTab === 'briefing') {
+      inspectorBodyEl.innerHTML = renderBriefingHtml(w);
+    } else if (activeTab === 'evidence') {
+      const filesHtml = w.changedFiles.length
+        ? w.changedFiles.map(f => `<div style="color:#cbd5e1">  ${esc(f)}</div>`).join('')
+        : '<div style="color:var(--term-muted)">  (none — read-only turn)</div>';
+      inspectorBodyEl.innerHTML = `
+        <dl class="brief-kv" style="margin-bottom:0.8rem">
+          <dt>Verification</dt><dd style="color:${w.verify === 'passed' ? 'var(--term-green)' : 'var(--term-yellow)'}">${esc(w.verify)}</dd>
+          <dt>Acceptance</dt><dd style="color:${w.accept === 'accepted' ? 'var(--term-green)' : 'var(--term-ink)'}">${esc(w.accept)}</dd>
+          <dt>Cmd failures</dt><dd>${w.cmdFailures}</dd>
+          <dt>Branch</dt><dd>${esc(w.branch)}</dd>
+          <dt>Base commit</dt><dd>${esc(w.baseCommit)}</dd>
+        </dl>
+        <div class="brief-h">Changed files (${w.filesTotal})</div>
+        ${filesHtml}
+      `;
+    } else if (activeTab === 'activity') {
+      const filtered = w.actions.filter(a => actFilter === 'milestones' ? a.milestone : true);
+      const hiddenCount = w.actions.length - filtered.length;
+      inspectorBodyEl.innerHTML = `
+        <div style="margin-bottom:0.45rem;color:#fff"><strong>Now:</strong> ${esc(w.intent)}</div>
+        <div class="filter-strip">
+          <span>${filtered.length} items${hiddenCount ? ` (${hiddenCount} hidden)` : ''}</span>
+          <button class="filter-pill" type="button" data-af="actions" aria-pressed="${actFilter === 'actions'}">Actions</button>
+          <button class="filter-pill" type="button" data-af="milestones" aria-pressed="${actFilter === 'milestones'}">Milestones</button>
+          <button class="filter-pill" type="button" data-af="all" aria-pressed="${actFilter === 'all'}">All</button>
+        </div>
+        <ul class="act-list">
+          ${filtered.map(a => {
+            const isOpen = expanded.has(a.id);
+            const outSpan = a.outcome
+              ? `<span style="color:var(--term-muted)">-&gt;</span><span class="act-out ${a.status}">${esc(a.outcome)}</span>`
+              : '';
+            const detailHtml = isOpen ? `<div class="act-detail">${a.cmd ? `<div class="cmd">$ ${esc(a.cmd)}</div>` : ''}${a.exit !== null ? `<div class="${a.exit !== 0 ? 'exit-err' : ''}">exit ${a.exit} (${esc(a.status)})</div>` : ''}<div>${esc(a.output)}</div></div>` : '';
+            return `<li class="act-row ${isOpen ? 'open' : ''}">
+              <button class="act-btn" type="button" data-aid="${a.id}" aria-expanded="${isOpen}">
+                <span style="color:var(--term-cyan)">${isOpen ? 'v' : '+'}</span>
+                <span style="color:var(--term-muted)">${a.id}</span>
+                <span class="cat-tag cat-${a.cat}">${esc(a.tag.trim())}</span>
+                <span class="act-sum">${esc(a.summary)}</span>
+                ${outSpan}
+              </button>
+              ${detailHtml}
+            </li>`;
+          }).join('')}
+        </ul>
+      `;
+      inspectorBodyEl.querySelectorAll('[data-af]').forEach(b => {
+        b.addEventListener('click', () => { actFilter = b.dataset.af; renderCockpit(); });
+      });
+      inspectorBodyEl.querySelectorAll('[data-aid]').forEach(b => {
+        b.addEventListener('click', () => {
+          const id = Number(b.dataset.aid);
+          if (expanded.has(id)) expanded.delete(id); else expanded.add(id);
+          renderCockpit();
+        });
+      });
+    } else if (activeTab === 'logs') {
+      const kinds = [
+        ['summary', 'Summary (result.txt)'],
+        ['prompt', 'Prompt'],
+        ['stderr', 'Stderr'],
+        ['supervisor', 'Supervisor']
+      ];
+      inspectorBodyEl.innerHTML = `
+        <div class="filter-strip">
+          <span>[L] View:</span>
+          ${kinds.map(([k, lbl]) => `<button class="filter-pill" type="button" data-lk="${k}" aria-pressed="${logKind === k}">${lbl}</button>`).join('')}
+        </div>
+        <pre style="margin:0;white-space:pre-wrap;color:#cbd5e1;font-size:0.74rem">${esc(w.logs[logKind])}</pre>
+      `;
+      inspectorBodyEl.querySelectorAll('[data-lk]').forEach(b => {
+        b.addEventListener('click', () => { logKind = b.dataset.lk; renderCockpit(); });
       });
     }
-
-    const cue = cues.find(c => c.chapter === currentChapter && elapsed >= c.start && elapsed < c.end) ||
-      [...cues].reverse().find(c => c.chapter === currentChapter && elapsed >= c.start);
-    const nextCaption = cue ? cue.text : chapters[currentChapter].dataset.title;
-    if (nextCaption !== displayedCaption) {
-      caption.textContent = nextCaption;
-      displayedCaption = nextCaption;
-    }
-
-    const phaseTimes = [25.8, 32, 36.8, 41.8, 46];
-    const phase = Math.max(0, phaseTimes.findLastIndex(t => elapsed >= t));
-    activate(steps, phase);
-    activate(tapeEntries, phase);
-    rail.forEach((item, index) => item.classList.toggle('active', index <= phase));
-    const verified = elapsed >= 46;
-    activate(counts, verified ? 1 : 0);
-    activate(verdicts, verified ? 1 : 0);
-    stamp.classList.toggle('active', verified);
-    const scoreSquare = film.querySelector('.s3 .score .strip .sq:last-child');
-    if (scoreSquare) scoreSquare.classList.toggle('f', !verified);
-
-    const backfired = elapsed >= 62;
-    const reverted = elapsed >= 64.4;
-    const applied = elapsed >= 56.4 && !reverted;
-    lateBackfire.classList.toggle('active', backfired);
-    firstBackfire.style.opacity = backfired ? '0' : '1';
-    shelf.classList.toggle('active', reverted);
-    bestHead.classList.toggle('active', !applied);
-    attHead.classList.toggle('active', applied);
-    timed.forEach(node => node.classList.toggle('active', elapsed >= Number(node.dataset.at)));
-    secondLane.classList.toggle('active', elapsed >= 76.4);
-
-    scrub.value = String(elapsed);
-    scrub.style.setProperty('--pg', elapsed / total * 100 + '%');
-    timer.textContent = format(elapsed);
-    scrub.setAttribute('aria-valuetext', format(elapsed) + ' of ' + format(total) + ', chapter ' + (currentChapter + 1) + ': ' + chapters[currentChapter].dataset.title);
-    chapterButtons.forEach((button, index) => {
-      const from = Number(chapters[index].dataset.s);
-      const to = index + 1 < chapters.length ? Number(chapters[index + 1].dataset.s) : total;
-      button.style.setProperty('--cp', (Math.max(0, Math.min(1, (elapsed - from) / (to - from))) * 100).toFixed(1) + '%');
-    });
   }
 
-  function begin() {
-    poster.classList.add('gone');
-    film.classList.add('started');
-  }
-
-  function stop() {
-    playing = false;
-    cancelAnimationFrame(frame);
-    playButton.dataset.s = 'paused';
-    playButton.setAttribute('aria-label', 'Play');
-    lastTick = 0;
-  }
-
-  function tick(now) {
-    if (!playing) return;
-    if (!lastTick) lastTick = now;
-    render(elapsed + Math.min((now - lastTick) / 1000, 0.1));
-    lastTick = now;
-    if (elapsed >= total) { stop(); return; }
-    frame = requestAnimationFrame(tick);
-  }
-
-  function play() {
-    if (playing) return;
-    if (elapsed >= total) render(0);
-    begin();
-    playing = true;
-    lastTick = 0;
-    playButton.dataset.s = 'playing';
-    playButton.setAttribute('aria-label', 'Pause');
-    frame = requestAnimationFrame(tick);
-  }
-
-  function seek(time) {
-    render(time);
-    lastTick = 0;
-    if (elapsed >= total && playing) stop();
-  }
-
-  poster.addEventListener('click', play);
-  playButton.addEventListener('click', () => playing ? stop() : play());
-  let seekTimer = 0;
-  scrub.addEventListener('input', () => {
-    begin();
-    film.classList.add('seeking');
-    clearTimeout(seekTimer);
-    seekTimer = setTimeout(() => film.classList.remove('seeking'), 400);
-    seek(Number(scrub.value));
+  document.querySelectorAll('#cockpit-demo .tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => { activeTab = btn.dataset.tab; renderCockpit(); });
   });
-  document.addEventListener('visibilitychange', () => { if (document.hidden) stop(); });
-  if ('IntersectionObserver' in window) {
-    new IntersectionObserver(([entry]) => { if (!entry.isIntersecting && playing) stop(); }).observe(film);
-  }
-  const motionLabel = film.querySelector('.rmnote');
-  if (motionLabel) {
-    function syncMotion() {
-      motionLabel.hidden = !reducedMotion.matches;
-      document.documentElement.classList.toggle('rm', reducedMotion.matches);
+  triageBtn.addEventListener('click', () => {
+    triageOnly = !triageOnly;
+    triageBtn.setAttribute('aria-pressed', String(triageOnly));
+    renderCockpit();
+  });
+  renderCockpit();
+
+  // ---- Harness Switcher ----
+  const HARNESSES = {
+    codex: {
+      name: 'Codex',
+      summary: 'Runs headless `codex exec --json` (or App Server transport when `--enable-steering` is set). Preserves skills, repo `AGENTS.md`, live web search, and thread-ID resumption.',
+      specs: [
+        ['Default model', 'gpt-6.1-terra (xhigh)'],
+        ['Allowed models', 'gpt-6.1-terra, gpt-6-luna, gpt-6.1-sol'],
+        ['Live steering', 'Supported via App Server (--enable-steering)'],
+        ['Read-only mode', 'Enforced read-only sandbox'],
+        ['Instruction files', 'AGENTS.md + skills (optional user config.toml)'],
+        ['Native TUI tailer', 'Paired item.id events in Rust']
+      ]
+    },
+    claude: {
+      name: 'Claude Code',
+      summary: 'Runs headless `claude -p` with stream-json events, `--output-schema` validation, context budget mode (handoff into fresh session before compaction), and isolated `--setting-sources ""`.',
+      specs: [
+        ['Default model', 'claude-haiku-5-5 (configurable via models list)'],
+        ['Reasoning effort', 'low through max (default xhigh)'],
+        ['Live steering', 'Supported via stream-json (--enable-steering)'],
+        ['Read-only mode', 'Soft-read instruction (use --require-read-only to gate)'],
+        ['Instruction files', 'Worker CLAUDE.md + workspace hierarchy + skills/MCP'],
+        ['Native TUI tailer', 'Paired tool_use id -> tool_result in Rust']
+      ]
+    },
+    pi: {
+      name: 'Pi',
+      summary: 'Runs any provider configured in Pi\'s `models.json` (`--provider NAME` or `--model provider/id`), including flash-class and free-tier routes for cost-conscious scouting and cross-family critique.',
+      specs: [
+        ['Default model', 'Inherits last explicit Pi model (initial muse-spark-1.3-contributor-free)'],
+        ['Provider management', 'claive pi provider list | add | remove | check'],
+        ['Live steering', 'RPC / message queue via claive send'],
+        ['Read-only mode', 'Soft-read instruction (Pi has no native write lock)'],
+        ['Instruction files', 'Workspace rules + Pi skills (recursion-guarded)'],
+        ['Native TUI tailer', 'Paired toolCallId events in Rust']
+      ]
+    },
+    agy: {
+      name: 'AGY',
+      summary: 'Supports the AGY 1.5.10 catalog (Gemini 3.8/4, orchestrator, Claude, and GPT-OSS models) with per-model native effort mapping, managed worktrees, and per-turn `native_cache_read_tokens`.',
+      specs: [
+        ['Default model', 'gemini-3.8-flash-high'],
+        ['Model catalog', 'gemini-3.8-flash, gemini-4-{carbon,argon,hydrogen}, claude-*, gpt-oss-120b'],
+        ['Session reuse', 'open --detach + followup resumes conversation'],
+        ['Read-only mode', 'Soft-read (use --require-read-only when hard block needed)'],
+        ['Instruction files', '~/.gemini/GEMINI.md, repo AGENTS.md/GEMINI.md, ~/.agents/skills'],
+        ['Native TUI tailer', 'Paired conversation_id:step_index + live text deltas']
+      ]
+    },
+    muse: {
+      name: 'Muse',
+      summary: 'Built-in default engine when no host config selects another harness. Preserves Muse\'s native sandbox, enforces `:read-only --disable-write` on read-only turns, and tracks cached token usage.',
+      specs: [
+        ['Default model', 'muse-spark-1.3-contributor'],
+        ['Structured output', 'Supports --output-schema and --max-model-steps'],
+        ['Session reuse', 'Preserves Muse session UUID across follow-ups'],
+        ['Read-only mode', 'Enforced (--permission-profile :read-only --disable-write)'],
+        ['Offline testing', '--provider echo transport fixture'],
+        ['TUI integration', 'Automatic fallback to claive peek --json --structured']
+      ]
     }
-    syncMotion();
-    reducedMotion.addEventListener?.('change', syncMotion);
-  }
+  };
 
-  render(0);
-  document.documentElement.classList.add('film-ready');
-
-  // The page must remain legible if an observer, animation or script is unavailable.
-  if (!reducedMotion.matches && 'IntersectionObserver' in window) {
-    const rows = [...document.querySelectorAll('.record li')];
-    const observer = new IntersectionObserver(entries => {
-      for (const entry of entries) {
-        if (!entry.isIntersecting) continue;
-        observer.unobserve(entry.target);
-        const index = rows.indexOf(entry.target);
-        entry.target.animate([
-          { opacity: .5, transform: 'translateY(10px)' },
-          { opacity: 1, transform: 'translateY(0)' }
-        ], { duration: 540, delay: index * 110, easing: 'cubic-bezier(.16, 1, .3, 1)' });
-        entry.target.querySelectorAll('.sq').forEach((sq, n) => sq.animate(
-          [{ transform: 'scaleY(0)' }, { transform: 'scaleY(1)' }],
-          { duration: 420, delay: index * 110 + 260 + n * 70, easing: 'cubic-bezier(.2, .9, .3, 1.25)', fill: 'backwards' }
-        ));
-      }
-    }, { threshold: .16 });
-    rows.forEach(row => observer.observe(row));
+  const harnessPanel = document.getElementById('harness-panel');
+  function renderHarness(key) {
+    const h = HARNESSES[key];
+    document.querySelectorAll('.h-tab').forEach(b => {
+      b.setAttribute('aria-selected', String(b.dataset.engine === key));
+    });
+    harnessPanel.innerHTML = `
+      <div>
+        <h3 style="font-size:1.3rem;margin-bottom:0.5rem">${esc(h.name)} adapter</h3>
+        <p style="margin:0;color:var(--muted);line-height:1.6">${esc(h.summary).replace(/`([^`]+)`/g, '<code>$1</code>')}</p>
+      </div>
+      <dl class="h-specs">
+        ${h.specs.map(([k, v]) => `<div class="h-spec"><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join('')}
+      </dl>
+    `;
   }
+  document.querySelectorAll('.h-tab').forEach(b => {
+    b.addEventListener('click', () => renderHarness(b.dataset.engine));
+  });
+  renderHarness('codex');
+
+  // ---- Quickstart Code Switcher ----
+  const QS = {
+    install: {
+      caption: 'Installs Python runtime + launchers into ~/.local/bin and builds the optional native Rust Ratatui dashboard.',
+      code: `git clone https://github.com/ham-zax/claive.git && cd claive
+./install.sh --dry-run                       # inspect destinations first
+just dash-build                              # build native Rust claive-tui (optional)
+./install.sh --with-tui                      # install launchers, skills & claive-tui
+claive doctor                                # verify available harnesses & config`
+    },
+    worker: {
+      caption: 'Open a reusable worker in an isolated Git worktree, bind an @alias, inspect structured steps, verify, and apply.',
+      code: `claive open --detach --engine codex --worktree --carry-dirty \\
+  --alias backend --workspace /abs/repo --prompt-file /tmp/task.md
+
+claive peek @backend --steps 12 --json --structured
+claive wait @backend                         # exit 0 done, 3 needs_parent, 124 timeout
+claive answer @backend --message "Use option B."
+claive verify @backend && claive worktree apply @backend --dry-run`
+    },
+    dash: {
+      caption: 'Read-only by default with zero locks and native incremental Rust events.jsonl tailing.',
+      code: `claive dash                                  # read-only triage cockpit
+claive dash --triage                         # show only ASK / UNWATCHED / FAIL / REVIEW
+claive dash --actions                        # enable answer / send / steer / verify / apply
+CLAIVE_TMUX_TUI=1 claive-codex               # Codex + 5-row Ratatui --compact tmux bar`
+    },
+    conv: {
+      caption: 'Run bounded multi-round discussions between reusable specialists across different engines and model families.',
+      code: `claive conversation start @proposer @critic @reviewer \\
+  --message-file /abs/design-question.md \\
+  --rounds 2 --timeout 300
+
+claive conversation show CONVERSATION_ID --json`
+    },
+    mcp: {
+      caption: 'Flat-schema stdio MCP server so Claude Code, Codex, or any MCP client drives workers without shell polling.',
+      code: `# Start the stdio MCP server (configure in your harness's MCP settings):
+claive-mcp
+
+# 10 flat-schema tools exposed:
+# claive_start · claive_peek · claive_steer · claive_wait · claive_cancel
+# claive_verify · claive_list · claive_followup · claive_apply · claive_close`
+    },
+    orch: {
+      caption: 'Use claive-orch for verifier-gated refinement, or claive serve for a durable unattended server queue.',
+      code: `# Deterministic verifier-gated arbiter (L0 -> L1 refine -> L2 breadth):
+claive-orch init --repo /abs/repo --task-file /abs/task.md \\
+  --verify 'python3 -m pytest -q' --arm D
+claive-orch next RUN && claive-orch integrate RUN
+
+# Unattended server goal queue (with systemd/claive-serve.service):
+claive goal add --title "Audit deps" --workspace /abs/repo --prompt-file /abs/goal.md
+claive serve`
+    }
+  };
+
+  const qsCode = document.getElementById('qs-code');
+  const qsCaption = document.getElementById('qs-caption');
+  const qsCopy = document.getElementById('qs-copy');
+  let activeQs = 'install';
+
+  function renderQs(key) {
+    activeQs = key;
+    document.querySelectorAll('.qs-tab').forEach(b => {
+      b.setAttribute('aria-selected', String(b.dataset.qs === key));
+    });
+    qsCode.textContent = QS[key].code;
+    qsCaption.textContent = QS[key].caption;
+    qsCopy.textContent = 'Copy';
+  }
+  document.querySelectorAll('.qs-tab').forEach(b => {
+    b.addEventListener('click', () => renderQs(b.dataset.qs));
+  });
+  qsCopy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(QS[activeQs].code);
+      qsCopy.textContent = 'Copied';
+      setTimeout(() => { qsCopy.textContent = 'Copy'; }, 1600);
+    } catch {
+      qsCopy.textContent = 'Select & copy';
+    }
+  });
+  renderQs('install');
 })();
 </script>
 </body>

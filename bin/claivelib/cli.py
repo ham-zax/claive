@@ -715,6 +715,48 @@ def _tool_detail(event):
     return ""
 
 
+def _update_progress_signals(state, kind, event):
+    """Maintain bounded live progress signals (`activity`, `last_check`, `latest_intent`)."""
+    from claivelib import intent as intent_mod
+    from claivelib import progress, redaction
+
+    if kind in {"tool_started", "tool_completed", "tool_probe", "task_warning"}:
+        tool = str(event.get("tool") or (state.get("last_tool") or {}).get("tool") or "tool")
+        info = progress.classify_tool_action(
+            tool,
+            command=event.get("command"),
+            path=event.get("path"),
+            workspace=state.get("actual_workspace") or state.get("workspace"),
+        )
+        prev = state.get("activity") if isinstance(state.get("activity"), dict) else {}
+        targets = list(prev.get("targets") or [])
+        tgt = info.get("target")
+        if tgt:
+            if tgt in targets:
+                targets.remove(tgt)
+            targets.insert(0, tgt)
+            targets = targets[:3]
+        state["activity"] = {
+            "stage": info["stage"],
+            "label": redaction.redact(info["label"])[:100],
+            "targets": targets,
+        }
+        if kind in {"tool_completed", "task_warning"} and info["category"] in {"test", "build"}:
+            status_val = "fail" if kind == "task_warning" else "pass"
+            summary = str(event.get("reason") or ("failed" if status_val == "fail" else "passed"))
+            state["last_check"] = {
+                "command": redaction.redact(info["summary"])[:100],
+                "status": status_val,
+                "summary": redaction.redact(summary)[:100],
+            }
+    elif kind in {"output_delta", "terminal_completed"}:
+        text = event.get("text")
+        if isinstance(text, str) and text.strip():
+            extracted = intent_mod.intent_from_steps([{"kind": "text", "text": text}])
+            if extracted:
+                state["latest_intent"] = redaction.redact(extracted)[:140]
+
+
 def event_update(state, event):
     if state.get("attempt_failed"):
         return
@@ -722,6 +764,10 @@ def event_update(state, event):
     state["last_event"] = event.get("native_kind", kind)
     state["last_activity"] = time.time()
     state["last_observed_activity"] = event.get("native_kind", kind)
+    try:
+        _update_progress_signals(state, kind, event)
+    except Exception:
+        pass
     command = event.get("command")
     if kind in {"task_warning", "tool_completed", "tool_probe"} and isinstance(command, str) and command:
         results = state.setdefault("turn_command_results", {})
@@ -832,7 +878,8 @@ PER_TURN_RESET_KEYS = ("ended_at", "error", "terminal", "terminal_reason", "budg
                        "time_wrap_up_error", "consecutive_truncations", "truncation_hint_sent",
                        "truncation_steering_error", "time_wrap_up_attempted", "shutdown_error",
                        "event_steps", "last_tool", "touched_files", "turn_started_at",
-                       "last_tool_interrupt", "worker_cgroup")
+                       "last_tool_interrupt", "worker_cgroup",
+                       "latest_intent", "activity", "last_check")
 
 
 def context_overflow_reason(reason):
@@ -1945,19 +1992,26 @@ def worktree_apply_command(job_id, dry_run=False, force=False, json_output=False
         contract = state.get("acceptance_contract") or {}
         owned_paths = contract.get("owned_paths")
         evidence = acceptance.view(job_dir, state)
-        if enforce_gates and not force and not dry_run:
+        gate_blockers = []
+        if enforce_gates and not force:
             violations = evidence.get("execution", {}).get("ownership_violations") or []
             if violations:
-                raise ValueError(
+                msg = (
                     f"worker {state['id']} has ownership violations ({', '.join(violations[:5])}); "
                     "adjust with claive scope or pass --force"
                 )
+                gate_blockers.append(msg)
+                if not dry_run:
+                    raise ValueError(msg)
             if contract.get("checks") and evidence.get("verification", {}).get("status") != "passed":
                 ver_status = evidence.get("verification", {}).get("status", "not_run")
-                raise ValueError(
+                msg = (
                     f"worker {state['id']} verification status is '{ver_status}'; "
                     f"run 'claive verify {state['id']}' first or pass --force"
                 )
+                gate_blockers.append(msg)
+                if not dry_run:
+                    raise ValueError(msg)
 
         candidates = set()
         if base_commit:
@@ -2060,6 +2114,7 @@ def worktree_apply_command(job_id, dry_run=False, force=False, json_output=False
             "applied": to_apply,
             "deleted": to_delete,
             "conflicts": conflicts,
+            "gate_blockers": gate_blockers,
             "dry_run": dry_run,
             "forced": bool(force and conflicts),
             "closed": closed_worker,
@@ -3808,6 +3863,69 @@ def doctor(json_output=False, live=False):
     return 0 if ok else 1
 
 
+def find_tui_binary():
+    """Locate the compiled claive-tui binary without requiring Cargo at runtime."""
+    explicit = (os.environ.get("CLAIVE_TUI_BIN") or "").strip()
+    if explicit:
+        candidate = Path(explicit)
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+        raise ValueError(f"CLAIVE_TUI_BIN is not an executable file: {explicit}")
+    candidates = []
+    if SCRIPT:
+        launcher = Path(SCRIPT).resolve()
+        candidates.append(launcher.with_name("claive-tui"))
+        repo_root = launcher.parent.parent
+        candidates.append(repo_root / "tui" / "target" / "release" / "claive-tui")
+        candidates.append(repo_root / "tui" / "target" / "debug" / "claive-tui")
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    found = shutil.which("claive-tui")
+    if found:
+        return found
+    raise ValueError(
+        "claive-tui binary not found; build it with 'just dash-build' "
+        "(or use 'claive watch' for the built-in Python view)"
+    )
+
+
+def run_dash(args, replace=False):
+    """Launch the Ratatui dashboard binary with resolved CLAIVE_DIR and CLAIVE_BIN."""
+    binary = find_tui_binary()
+    argv = [binary]
+    if getattr(args, "compact", False):
+        argv.append("--compact")
+    if getattr(args, "triage", False):
+        argv.append("--triage")
+    if getattr(args, "all", False):
+        argv.append("--all")
+    if getattr(args, "actions", False) and not getattr(args, "read_only", False):
+        argv.append("--actions")
+    if getattr(args, "read_only", False):
+        argv.append("--read-only")
+    session = getattr(args, "session", None)
+    if session:
+        argv.extend(["--session", session])
+    workspace = getattr(args, "workspace", None)
+    if workspace:
+        argv.extend(["--workspace", workspace])
+    focus = getattr(args, "focus", None)
+    if focus:
+        try:
+            focus = job_path(focus).name
+        except ValueError:
+            pass
+        argv.extend(["--focus", focus])
+    env = dict(os.environ)
+    env["CLAIVE_DIR"] = str(root(create=False))
+    if SCRIPT:
+        env["CLAIVE_BIN"] = launcher_path()
+    if replace:
+        os.execvpe(binary, argv, env)
+    return subprocess.call(argv, env=env)
+
+
 def tmux_view(arguments):
     if not shutil.which("tmux") or not shutil.which("codex"):
         raise ValueError("tmux and codex must be installed")
@@ -3815,7 +3933,14 @@ def tmux_view(arguments):
     codex_args = arguments[1:] if arguments[:1] == ["--"] else arguments
     codex_command = "exec " + shlex.join(["env", f"CLAIVE_DIR={root()}",
                                          shutil.which("codex"), *codex_args])
-    dashboard_command = "exec " + shlex.join([launcher_path(), "watch", "--compact"])
+    if os.environ.get("CLAIVE_TMUX_TUI") == "1":
+        try:
+            find_tui_binary()
+            dashboard_command = "exec " + shlex.join([launcher_path(), "dash", "--compact"])
+        except ValueError:
+            dashboard_command = "exec " + shlex.join([launcher_path(), "watch", "--compact"])
+    else:
+        dashboard_command = "exec " + shlex.join([launcher_path(), "watch", "--compact"])
     environment = {"CLAIVE_DIR": str(root())}
     try:
         created = subprocess.run(["tmux", "new-session", "-d", "-P", "-F", "#{pane_id}",
@@ -4164,6 +4289,8 @@ def parser():
     peek.add_argument("--steps", type=int, default=5)
     peek.add_argument("--start", type=int, help="first step number to show (pages forward)")
     peek.add_argument("--json", action="store_true")
+    peek.add_argument("--structured", action="store_true",
+                      help="with --json, include provider-ID-paired actions and narrative milestones")
     waiting = commands.add_parser("wait")
     waiting.add_argument("id", nargs="*")
     wait_mode = waiting.add_mutually_exclusive_group()
@@ -4304,6 +4431,22 @@ def parser():
     watch.add_argument("--once", action="store_true")
     watch.add_argument("--no-color", action="store_true")
     watch.add_argument("--compact", action="store_true", help="at most five lines; one row per worker")
+    watch.add_argument("--tui", action="store_true", help="launch the Ratatui terminal dashboard (claive-tui)")
+    watch.add_argument("--triage", action="store_true", help="with --tui, start in exception-only triage mode")
+    watch.add_argument("--session", help="with --tui, scope to a specific parent session")
+    watch.add_argument("--workspace", help="with --tui, filter to a workspace path")
+    watch.add_argument("--focus", help="with --tui, focus a worker ID or @alias on open")
+    watch.add_argument("--all", action="store_true", help="with --tui, show all sessions")
+    watch.add_argument("--actions", action="store_true", help="with --tui, enable interactive operator actions")
+    dash = commands.add_parser("dash", help="Ratatui terminal triage dashboard (claive-tui)")
+    dash.add_argument("--compact", action="store_true", help="five-row passive tmux pane layout")
+    dash.add_argument("--triage", action="store_true", help="show only actionable workers (ASK, UNWATCHED, LOST, FAIL, REVIEW)")
+    dash.add_argument("--session", help="scope to a specific parent session")
+    dash.add_argument("--workspace", help="filter to a workspace path")
+    dash.add_argument("--focus", help="focus a worker ID or @alias on open")
+    dash.add_argument("--all", action="store_true", help="show workers across all parent sessions")
+    dash.add_argument("--actions", action="store_true", help="enable interactive operator actions (answer/send/steer/park/verify/apply/cancel/close)")
+    dash.add_argument("--read-only", action="store_true", help="enforce read-only mode (overrides --actions)")
     commands.add_parser("status-line", help="one-line summary for tmux or shell status bars")
     engines_cmd = commands.add_parser("engines", help="list each engine's user policy, defaults and steering support")
     engines_cmd.add_argument("--json", action="store_true")
@@ -4316,6 +4459,9 @@ def parser():
     message = answer.add_mutually_exclusive_group(required=True)
     message.add_argument("--message")
     message.add_argument("--message-file")
+    answer.add_argument("--expected-turn", type=int, help="refuse if the worker's current turn does not match")
+    answer.add_argument("--expected-question-hash", help="refuse if SHA-256 of needs_parent.question does not match this hex prefix (>=8 chars)")
+    answer.add_argument("--idempotency-key", help="optional caller key to prevent duplicate answer queueing")
     tmux = commands.add_parser("tmux", help="open Codex with a live worker pane and status bar")
     tmux.add_argument("codex_args", nargs=argparse.REMAINDER)
     return result
@@ -4539,7 +4685,11 @@ def main(launcher=None):
         print(json.dumps(records, indent=2) if args.json else render(records, sys.stdout.isatty()))
     elif args.action == "status-line":
         print(summary(jobs()))
+    elif args.action == "dash":
+        return run_dash(args, replace=True)
     elif args.action == "watch":
+        if getattr(args, "tui", False):
+            return run_dash(args, replace=True)
         if args.interval < 0.2:
             raise ValueError("--interval must be at least 0.2 seconds")
         while True:
@@ -4574,7 +4724,7 @@ def main(launcher=None):
         print(json.dumps(state, indent=2)) if args.json else report(state)
     elif args.action == "peek":
         from claivelib import peek
-        return peek.show(args.id, args.steps, args.json, args.start)
+        return peek.show(args.id, args.steps, args.json, args.start, structured=args.structured)
     elif args.action == "steer":
         check_nested()
         path = job_path(args.id)
@@ -5157,11 +5307,8 @@ def main(launcher=None):
         print(f"Reply recorded for {args.id}")
         return 0
     elif args.action == "answer":
+        import fcntl
         path = job_path(args.id)
-        state = load(path)
-        if (not state.get("reusable") or state["status"] not in ACTIVE
-                or (path / "close.request").exists() or not state.get("needs_parent")):
-            raise ValueError("worker is not waiting for a parent decision")
         if args.message is not None:
             decision = args.message
         else:
@@ -5169,18 +5316,66 @@ def main(launcher=None):
             if not prompt.is_absolute() or not prompt.is_file() or not prompt.stat().st_size:
                 raise ValueError("--message-file must be an existing nonempty absolute file")
             decision = prompt.read_text()
-        question = state.get("needs_parent", {}).get("question", "")
-        answer_file = path / f"answer-{time.time_ns()}.md"
-        answer_file.write_text(f"Parent question was:\n{question}\n\nParent decision:\n{decision}\n\n"
-                               "Continue the assignment with this decision.\n")
-        policy = load_policy(path, state)
-        validate_turn(state.get("engine", DEFAULT_ENGINE), turn_request(
-            state, prompt_file=str(answer_file),
-            reasoning_effort=policy["reasoning_effort"], max_model_steps=policy["max_model_steps"],
-        ))
-        request = f"{time.time_ns():020}-{uuid.uuid4().hex}.json"
-        save(path / "requests" / request, dict(prompt_file=str(answer_file), label=None,
-                                               reasoning_effort=None, max_model_steps=None))
+        lock_fd = os.open(path / ".answer.lock", os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            with os.fdopen(lock_fd, "w") as lock_stream:
+                fcntl.flock(lock_stream, fcntl.LOCK_EX)
+                state = load(path)
+                if (not state.get("reusable") or state["status"] not in ACTIVE
+                        or (path / "close.request").exists() or not state.get("needs_parent")):
+                    raise ValueError("worker is not waiting for a parent decision")
+                current_turn = state.get("turn", 1)
+                expected_turn = getattr(args, "expected_turn", None)
+                if expected_turn is not None and current_turn != expected_turn:
+                    raise ValueError(
+                        f"worker turn changed (expected {expected_turn}, actual {current_turn})"
+                    )
+                question = state.get("needs_parent", {}).get("question", "")
+                expected_hash = getattr(args, "expected_question_hash", None)
+                if expected_hash is not None:
+                    norm = str(expected_hash).strip().lower()
+                    if len(norm) < 8 or not re.fullmatch(r"[0-9a-f]+", norm):
+                        raise ValueError("--expected-question-hash must be at least 8 lowercase hex characters")
+                    actual_hash = hashlib.sha256(question.encode("utf-8")).hexdigest()
+                    if not actual_hash.startswith(norm):
+                        raise ValueError(
+                            f"worker question changed (expected hash {norm}, actual {actual_hash[:len(norm)]})"
+                        )
+                idem_key = getattr(args, "idempotency_key", None)
+                req_dir = path / "requests"
+                if req_dir.is_dir():
+                    for existing_req in sorted(req_dir.glob("*.json")):
+                        try:
+                            existing = json.loads(existing_req.read_text(encoding="utf-8"))
+                        except (OSError, ValueError):
+                            continue
+                        if not isinstance(existing, dict):
+                            continue
+                        if existing.get("answer_for_turn") == current_turn:
+                            raise ValueError(f"answer already queued for turn {current_turn}")
+                        if idem_key and existing.get("idempotency_key") == idem_key:
+                            raise ValueError(f"answer already queued for idempotency key '{idem_key}'")
+                answer_file = path / f"answer-{time.time_ns()}.md"
+                answer_file.write_text(f"Parent question was:\n{question}\n\nParent decision:\n{decision}\n\n"
+                                       "Continue the assignment with this decision.\n")
+                policy = load_policy(path, state)
+                validate_turn(state.get("engine", DEFAULT_ENGINE), turn_request(
+                    state, prompt_file=str(answer_file),
+                    reasoning_effort=policy["reasoning_effort"], max_model_steps=policy["max_model_steps"],
+                ))
+                request = f"{time.time_ns():020}-{uuid.uuid4().hex}.json"
+                req_payload = dict(
+                    prompt_file=str(answer_file),
+                    label=None,
+                    reasoning_effort=None,
+                    max_model_steps=None,
+                    answer_for_turn=current_turn,
+                )
+                if idem_key:
+                    req_payload["idempotency_key"] = idem_key
+                save(req_dir / request, req_payload)
+        except Exception:
+            raise
         print(f"Answer queued for {args.id}")
     elif args.action == "tmux":
         return tmux_view(args.codex_args)

@@ -16,12 +16,14 @@ pi_skills=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills
 dry_run=false
 with_pi=false
 runtime_only=false
+with_tui=false
 for arg in "$@"; do
   case $arg in
     --dry-run) dry_run=true ;;
     --pi) with_pi=true ;;
     --runtime-only) runtime_only=true ;;
-    *) echo 'Usage: install.sh [--dry-run] [--pi] [--runtime-only]' >&2; exit 2 ;;
+    --with-tui) with_tui=true ;;
+    *) echo 'Usage: install.sh [--dry-run] [--pi] [--runtime-only] [--with-tui]' >&2; exit 2 ;;
   esac
 done
 for path in "$bin_dir" "$backup_base"; do
@@ -48,6 +50,17 @@ guards=()
 for _ in "${targets[@]}"; do
   guards+=("")
 done
+if "$with_tui"; then
+  tui_source=${CLAIVE_TUI_SOURCE:-$source_dir/tui/target/release/claive-tui}
+  [[ -f $tui_source && -x $tui_source ]] || {
+    echo "Missing built claive-tui binary: $tui_source (run 'just dash-build' first)" >&2
+    exit 1
+  }
+  sources+=("$tui_source")
+  targets+=("$bin_dir/claive-tui")
+  modes+=(755)
+  guards+=("")
+fi
 # --runtime-only syncs the package, launchers, and provenance, and skips every
 # skill check and write: Skillshare owns skill destinations, so a divergent or
 # broken managed skill link must not block a runtime repair.

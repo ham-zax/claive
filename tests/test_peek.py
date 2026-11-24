@@ -15,7 +15,7 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "bin"))
-from claivelib import cli, intent, messaging, peek, redaction
+from claivelib import cli, intent, messaging, peek, progress, redaction, status_file
 from claivelib.engines import get_engine
 
 
@@ -459,6 +459,146 @@ class EventDescriptions(unittest.TestCase):
                                  [{"kind": "event", "text": "unknown"}])
                 self.assertEqual(get_engine(name).describe_event({"type": []}),
                                  [{"kind": "event", "text": "[]"}])
+
+
+class ProgressSignalsChecks(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="progress-check-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def _write_events(self, name: str, events: list[dict]) -> Path:
+        path = self.root / name
+        path.write_text("".join(json.dumps(ev) + "\n" for ev in events), encoding="utf-8")
+        return path
+
+    def test_summarize_output_skips_package_echo_banners(self):
+        out = "> @claive/core@1.0.0 build /repo/packages/core\n> tsc -b\nBuilt in 1.2s\n"
+        self.assertEqual(progress.summarize_output(out, exit_code=0), "Built in 1.2s")
+        # Silent success with only script echo banners resolves to clean "ok".
+        self.assertEqual(progress.summarize_output("> @claive/core build /repo\n> tsc -b\n", exit_code=0), "ok")
+        # Error with only banner output still preserves the line + exit code.
+        self.assertEqual(progress.summarize_output("> @claive/core build /repo\n", exit_code=1, is_error=True),
+                         "exit 1: > @claive/core build /repo")
+
+    def test_codex_pairing_parallel_and_heredoc_target(self):
+        heredoc_cmd = (
+            "/bin/bash -lc \"python3 - <<'PY'\n"
+            "from pathlib import Path\n"
+            "Path('src/app.py').write_text('ok')\n"
+            "PY\""
+        )
+        events = [
+            {"type": "item.started", "item": {"id": "c1", "type": "command_execution", "command": heredoc_cmd}},
+            {"type": "item.started", "item": {"id": "c2", "type": "command_execution",
+                                              "command": "/bin/bash -lc 'pytest tests/test_app.py'"}},
+            {"type": "item.completed", "item": {"id": "c2", "type": "command_execution", "exit_code": 0,
+                                                "aggregated_output": "3 passed in 0.12s"}},
+            {"type": "item.completed", "item": {"id": "c1", "type": "command_execution", "exit_code": 0,
+                                                "aggregated_output": ""}},
+            {"type": "item.completed", "item": {"id": "m1", "type": "agent_message",
+                                                "text": "Updated `src/app.py` and verified."}},
+        ]
+        actions = progress.extract_structured_actions(self._write_events("codex.jsonl", events), "codex")
+        self.assertEqual(len(actions), 3)
+        self.assertEqual(actions[0]["category"], "edit")
+        self.assertEqual(actions[0]["target"], "src/app.py")
+        self.assertEqual(actions[0]["status"], "ok")
+        self.assertEqual(actions[1]["category"], "test")
+        self.assertEqual(actions[1]["target"], "tests/test_app.py")
+        self.assertEqual(actions[1]["outcome"], "3 passed in 0.12s")
+        self.assertEqual(actions[2]["kind"], "say")
+        self.assertIn("Updated", actions[2]["summary"])
+
+    def test_pi_claude_and_agy_pairing(self):
+        pi_events = [
+            {"type": "tool_execution_start", "toolCallId": "p1", "toolName": "edit",
+             "args": {"path": "lib/a.mjs", "edits": [{"old": "a", "new": "b"}]}},
+            {"type": "tool_execution_start", "toolCallId": "p2", "toolName": "bash",
+             "args": {"command": "just test-fast"}},
+            {"type": "tool_execution_end", "toolCallId": "p1", "toolName": "edit",
+             "args": {"path": "lib/a.mjs"}, "isError": False,
+             "result": {"content": [{"type": "text", "text": "applied"}]}},
+            {"type": "tool_execution_end", "toolCallId": "p2", "toolName": "bash",
+             "args": {"command": "just test-fast"}, "isError": True,
+             "result": {"content": [{"type": "text", "text": "error: Recipe failed"}]}},
+        ]
+        pi_actions = progress.extract_structured_actions(self._write_events("pi.jsonl", pi_events), "pi")
+        self.assertEqual([(a["category"], a["status"], a["target"]) for a in pi_actions], [
+            ("edit", "ok", "lib/a.mjs"),
+            ("test", "error", ""),
+        ])
+        self.assertIn("Recipe failed", pi_actions[1]["outcome"])
+
+        claude_events = [
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "tu_1", "name": "Read", "input": {"file_path": "/repo/main.py"}},
+            ]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "tu_1", "is_error": False, "content": "print('hi')"},
+            ]}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Read complete."}]}},
+        ]
+        cl_actions = progress.extract_structured_actions(
+            self._write_events("claude.jsonl", claude_events), "claude", workspace="/repo"
+        )
+        self.assertEqual(len(cl_actions), 2)
+        self.assertEqual(cl_actions[0]["category"], "read")
+        self.assertEqual(cl_actions[0]["target"], "main.py")
+        self.assertEqual(cl_actions[0]["status"], "ok")
+        self.assertEqual(cl_actions[1]["kind"], "say")
+
+        agy_events = [
+            {"event": "step_update", "step_update": {
+                "conversation_id": "conv1", "step_index": 2, "step_type": "agent_response",
+                "state": "ACTIVE", "text_delta": "Checking ",
+            }},
+            {"event": "step_update", "step_update": {
+                "conversation_id": "conv1", "step_index": 2, "step_type": "agent_response",
+                "state": "DONE", "text_delta": "files.",
+            }},
+            {"event": "step_update", "step_update": {
+                "conversation_id": "conv1", "step_index": 3, "tool_name": "run_command",
+                "state": "ACTIVE", "tool_info": {"parameters": {"CommandLine": "cargo test"}},
+            }},
+            {"event": "step_update", "step_update": {
+                "conversation_id": "conv1", "step_index": 3, "tool_name": "run_command",
+                "state": "DONE", "tool_info": {"output": "12 passed"},
+            }},
+        ]
+        agy_actions = progress.extract_structured_actions(self._write_events("agy.jsonl", agy_events), "agy")
+        self.assertEqual(len(agy_actions), 2)
+        self.assertEqual(agy_actions[0]["kind"], "say")
+        self.assertEqual(agy_actions[0]["summary"], "Checking files.")
+        self.assertEqual(agy_actions[1]["category"], "test")
+        self.assertEqual(agy_actions[1]["outcome"], "12 passed")
+
+    def test_status_file_projects_live_progress_signals(self):
+        job_dir = self.root / "abcdef012345"
+        job_dir.mkdir()
+        state = {
+            "id": "abcdef012345",
+            "engine": "codex",
+            "status": "running",
+            "turn": 1,
+            "latest_intent": "Testing token sk-a_b-a_b-a_b-a_b-",
+            "activity": {
+                "stage": "testing",
+                "label": "Test tests/test_peek.py",
+                "targets": ["a.py", "b.py", "c.py", "d.py"],
+            },
+            "last_check": {
+                "command": "pytest tests/test_peek.py",
+                "status": "passed",
+                "summary": "44 passed",
+            },
+        }
+        payload = status_file.build(job_dir, state, now=1000.0)
+        self.assertIn("[redacted]", payload["latest_intent"])
+        self.assertEqual(payload["activity"]["stage"], "testing")
+        self.assertEqual(len(payload["activity"]["targets"]), 3)
+        self.assertEqual(payload["last_check"]["status"], "passed")
+        self.assertEqual(payload["last_check"]["summary"], "44 passed")
 
 
 if __name__ == "__main__":

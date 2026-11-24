@@ -7,6 +7,29 @@ import time
 
 from claivelib import acceptance, redaction
 
+MAX_CHANGED_FILES = 64
+MAX_CHANGED_FILES_BYTES = 16 * 1024
+
+
+def _bound_changed_files(paths, max_items=MAX_CHANGED_FILES, max_bytes=MAX_CHANGED_FILES_BYTES):
+    """Bound changed_files by count and UTF-8 JSON-encoded byte budget."""
+    bounded = []
+    # Reserve 2 bytes for enclosing '[' and ']'.
+    used = 2
+    for item in paths:
+        if len(bounded) >= max_items:
+            break
+        encoded = json.dumps(item, ensure_ascii=False).encode("utf-8")
+        needed = len(encoded) + (2 if bounded else 0)
+        if bounded and used + needed > max_bytes:
+            break
+        if not bounded and used + needed > max_bytes:
+            # Always keep at most one truncated entry if even the first path exceeds the budget.
+            break
+        bounded.append(item)
+        used += needed
+    return bounded
+
 
 def _read_json(path):
     try:
@@ -70,9 +93,57 @@ def build(job_dir, state, now=None):
         workspace=state.get("actual_workspace") or state.get("workspace"),
         job_dir=job_dir,
     )
+    changed_files_total = len(changed_files)
+    changed_files = _bound_changed_files(changed_files)
+    changed_files_truncated = len(changed_files) < changed_files_total
+
+    if isinstance(report, dict):
+        report = dict(report)
+        if isinstance(report.get("changed_files"), list):
+            report_files = acceptance.filter_noise_paths(
+                list(report["changed_files"]),
+                workspace=state.get("actual_workspace") or state.get("workspace"),
+                job_dir=job_dir,
+            )
+            bounded_report_files = _bound_changed_files(report_files)
+            if len(bounded_report_files) < len(report_files):
+                report["changed_files"] = bounded_report_files
+                report["changed_files_total"] = len(report_files)
+                report["changed_files_truncated"] = True
+            else:
+                report["changed_files"] = report_files
 
     turn_usage = state.get("turn_usage") if isinstance(state.get("turn_usage"), dict) else {}
     native_cache_read = turn_usage.get("native_cache_read_tokens")
+
+    latest_intent = state.get("latest_intent")
+    if isinstance(latest_intent, str) and latest_intent.strip():
+        latest_intent = redaction.redact(latest_intent.strip())[:140]
+    else:
+        latest_intent = None
+
+    raw_activity = state.get("activity")
+    activity_payload = None
+    if isinstance(raw_activity, dict) and raw_activity.get("stage"):
+        targets = [
+            redaction.redact(str(t))[:80]
+            for t in (raw_activity.get("targets") or [])[:3]
+            if isinstance(t, str) and t.strip()
+        ]
+        activity_payload = {
+            "stage": str(raw_activity.get("stage"))[:24],
+            "label": redaction.redact(str(raw_activity.get("label") or ""))[:100],
+            "targets": targets,
+        }
+
+    raw_check = state.get("last_check")
+    last_check_payload = None
+    if isinstance(raw_check, dict) and raw_check.get("status"):
+        last_check_payload = {
+            "command": redaction.redact(str(raw_check.get("command") or ""))[:100],
+            "status": str(raw_check.get("status"))[:16],
+            "summary": redaction.redact(str(raw_check.get("summary") or ""))[:100],
+        }
 
     payload = {
         "id": worker_id,
@@ -106,6 +177,8 @@ def build(job_dir, state, now=None):
         "error": state.get("error"),
         "exit_code": state.get("exit_code"),
         "changed_files": changed_files,
+        "changed_files_total": changed_files_total,
+        "changed_files_truncated": changed_files_truncated,
         "verification_status": verification.get("status", "not_run"),
         "acceptance_status": acceptance_doc.get("status", "pending"),
         "report_state": state.get("report_state"),
@@ -114,6 +187,12 @@ def build(job_dir, state, now=None):
     }
     if native_cache_read is not None:
         payload["native_cache_read_tokens"] = native_cache_read
+    if latest_intent is not None:
+        payload["latest_intent"] = latest_intent
+    if activity_payload is not None:
+        payload["activity"] = activity_payload
+    if last_check_payload is not None:
+        payload["last_check"] = last_check_payload
     return payload
 
 
@@ -149,11 +228,14 @@ def format_preview(summary: dict) -> str:
     elapsed_str = f"{elapsed:.0f}s" if isinstance(elapsed, (int, float)) else "?s"
     steps = summary.get("step_count", 0)
     files = summary.get("changed_files") or []
-    parts = [f"{name} [{status} {elapsed_str}]", f"phase={phase}", f"steps={steps}", f"files={len(files)}"]
+    files_total = summary.get("changed_files_total")
+    if not isinstance(files_total, int) or isinstance(files_total, bool) or files_total < len(files):
+        files_total = len(files)
+    parts = [f"{name} [{status} {elapsed_str}]", f"phase={phase}", f"steps={steps}", f"files={files_total}"]
     if files:
         shown = ", ".join(strip_controls(str(f)) for f in files[:4])
-        if len(files) > 4:
-            shown += f", +{len(files) - 4} more"
+        if files_total > 4:
+            shown += f", +{files_total - 4} more"
         parts.append(f"touched=[{shown}]")
     active_tools = summary.get("active_tools") or {}
     if active_tools:

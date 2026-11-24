@@ -311,7 +311,7 @@ class ClaudeEngine(WorkerEngine):
                         result.append(entry)
                     elif block.get("type") == "text":
                         self._last_text = block.get("text", "")
-                        result.append({"type": "output_delta", "native_kind": kind})
+                        result.append({"type": "output_delta", "native_kind": kind, "text": self._last_text})
                 result = result or [{"type": "model_step", "native_kind": kind}]
             else:
                 result = [{"type": "activity", "native_kind": kind}]

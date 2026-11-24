@@ -1418,6 +1418,7 @@ Display live worker state. Stopping the view does not stop workers.
 
 ```text
 claive watch [--interval INTERVAL] [--once] [--no-color] [--compact]
+             [--tui [--triage] [--session SESSION] [--workspace PATH] [--focus ID] [--all] [--actions]]
 ```
 
 | Option | Meaning |
@@ -1426,10 +1427,37 @@ claive watch [--interval INTERVAL] [--once] [--no-color] [--compact]
 | `--once` | Run one pass |
 | `--no-color` | Disable terminal color |
 | `--compact` | at most five lines. one row per worker |
+| `--tui` | Launch the Ratatui triage dashboard (`claive-tui`), forwarding `--compact`, `--triage`, `--session`, `--workspace`, `--focus`, `--all`, and `--actions` |
 
 Exit codes: 0 on success. Common errors apply.
 
-Example: `claive watch --compact --once`.
+Example: `claive watch --compact --once` or `claive watch --tui`.
+
+## `dash`
+
+Launch the compiled Rust/Ratatui triage dashboard (`claive-tui`). Strictly read-only by default (never creates locks or prunes watchers); pass `--actions` to enable interactive operator controls (`answer`, `send`, `steer`, `park`, `verify`, `apply`, `cancel`, `close`).
+
+```text
+claive dash [--compact] [--triage] [--session SESSION] [--workspace PATH]
+            [--focus ID] [--all] [--actions] [--read-only]
+```
+
+| Option | Meaning |
+|---|---|
+| `--compact` | Passive 5-row tmux pane layout |
+| `--triage` | Show only actionable workers (`ASK`, `UNWATCHED`, `LOST`, `FAIL`, `REVIEW`) |
+| `--session` | Scope to a specific parent session |
+| `--workspace` | Filter to a workspace path |
+| `--focus` | Focus a worker ID or `@alias` on open |
+| `--all` | Show workers across all parent sessions |
+| `--actions` | Enable interactive operator modals and single-flight mutations |
+| `--read-only` | Enforce read-only mode (overrides `--actions`) |
+
+Build with `just dash-build` and install with `./install.sh --runtime-only --with-tui`.
+
+Exit codes: `claive-tui` exit code.
+
+Example: `claive dash --triage` or `claive dash --actions`.
 
 ## `status-line`
 
@@ -1553,7 +1581,7 @@ Example: `claive notifications --limit 20 --json`.
 
 ## `tmux`
 
-Open Codex above a worker pane in a separate tmux session.
+Open Codex above a worker pane in a separate tmux session. Set `CLAIVE_TMUX_TUI=1` to use `claive dash --compact` instead of `claive watch --compact` for the 5-row pane when `claive-tui` is installed.
 
 ```text
 claive tmux ...
@@ -1563,4 +1591,4 @@ Options: arguments after `--` go to Codex.
 
 Exit codes: tmux attach/switch exit code.
 
-Example: `claive tmux -- -C /abs/repo`.
+Example: `claive tmux -- -C /abs/repo` or `CLAIVE_TMUX_TUI=1 claive-codex`.

@@ -311,7 +311,7 @@ class CodexEngine(WorkerEngine):
         if kind == "item.completed":
             if item_kind == "agent_message" and isinstance(item.get("text"), str):
                 self._last_text = item["text"]
-                return [{"type": "output_delta", "native_kind": kind}]
+                return [{"type": "output_delta", "native_kind": kind, "text": item["text"]}]
             if item_kind == "command_execution" and item.get("exit_code") not in (None, 0):
                 return [{"type": "task_warning", "native_kind": kind, "tool": "shell", "tool_id": item.get("id"),
                          "command": item.get("command"), "reason": f"exit {item['exit_code']}"}]

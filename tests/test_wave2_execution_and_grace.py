@@ -221,6 +221,200 @@ class ExecutionAndStatusFilteringTests(unittest.TestCase):
         payload_touched = status_file.build(self.job, state_from_touched, now=1000.0)
         self.assertEqual(payload_touched["changed_files"], ["lib/real.py"])
 
+    def test_status_file_caps_changed_files_and_preserves_total(self):
+        many_paths = [f"src/module_{i:03d}/file_{i:03d}.py" for i in range(120)]
+        original_report = {
+            "status": "done",
+            "summary": "Large refactor",
+            "changed_files": list(many_paths),
+        }
+        state = {
+            "id": "abcdef123456",
+            "status": "completed",
+            "workspace": str(self.workspace),
+            "turn": 1,
+            "report": original_report,
+        }
+        payload = status_file.build(self.job, state, now=1000.0)
+        self.assertEqual(payload["changed_files_total"], 120)
+        self.assertTrue(payload["changed_files_truncated"])
+        self.assertEqual(len(payload["changed_files"]), status_file.MAX_CHANGED_FILES)
+        self.assertEqual(len(payload["report"]["changed_files"]), status_file.MAX_CHANGED_FILES)
+        self.assertEqual(payload["report"]["changed_files_total"], 120)
+        self.assertTrue(payload["report"]["changed_files_truncated"])
+        # Must not mutate caller's state["report"] in place.
+        self.assertEqual(len(original_report["changed_files"]), 120)
+
+        preview = status_file.format_preview(payload)
+        self.assertIn("files=120", preview)
+        self.assertIn("+116 more", preview)
+
+    def test_status_file_caps_changed_files_by_byte_budget(self):
+        long_paths = [f"deep/{'segment_' * 60}/{i:03d}.py" for i in range(60)]
+        state = {
+            "id": "123456abcdef",
+            "status": "running",
+            "workspace": str(self.workspace),
+            "turn": 1,
+            "touched_files": long_paths,
+        }
+        payload = status_file.build(self.job, state, now=1000.0)
+        encoded_size = len(json.dumps(payload["changed_files"], ensure_ascii=False).encode("utf-8"))
+        self.assertLessEqual(encoded_size, status_file.MAX_CHANGED_FILES_BYTES)
+        self.assertEqual(payload["changed_files_total"], 60)
+        self.assertTrue(payload["changed_files_truncated"])
+        self.assertLess(len(payload["changed_files"]), 60)
+
+    def test_dash_and_watch_tui_dispatch(self):
+        import os
+        import stat
+        from unittest import mock
+        from claivelib import cli
+
+        fake_bin = self.root / "fake-claive-tui"
+        out_file = self.root / "argv.json"
+        fake_bin.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            f"open({str(out_file)!r}, 'w').write(json.dumps({{'argv': sys.argv[1:], 'dir': os.environ.get('CLAIVE_DIR')}}))\n",
+            encoding="utf-8",
+        )
+        fake_bin.chmod(fake_bin.stat().st_mode | stat.S_IXUSR)
+
+        with mock.patch.dict(os.environ, {"CLAIVE_TUI_BIN": str(fake_bin), "CLAIVE_DIR": str(self.root)}):
+            args = cli.parser().parse_args(["dash", "--compact", "--triage", "--session", "claude-1", "--all", "--actions"])
+            self.assertEqual(cli.run_dash(args), 0)
+            recorded = json.loads(out_file.read_text(encoding="utf-8"))
+            self.assertEqual(recorded["dir"], str(self.root))
+            self.assertEqual(recorded["argv"], ["--compact", "--triage", "--all", "--actions", "--session", "claude-1"])
+
+            args_ro = cli.parser().parse_args(["dash", "--actions", "--read-only"])
+            self.assertEqual(cli.run_dash(args_ro), 0)
+            recorded_ro = json.loads(out_file.read_text(encoding="utf-8"))
+            self.assertEqual(recorded_ro["argv"], ["--read-only"])
+
+            args_tui = cli.parser().parse_args(["watch", "--tui", "--focus", "abcdef123456"])
+            self.assertEqual(cli.run_dash(args_tui), 0)
+            recorded2 = json.loads(out_file.read_text(encoding="utf-8"))
+            self.assertEqual(recorded2["argv"], ["--focus", "abcdef123456"])
+
+        with mock.patch.dict(os.environ, {"CLAIVE_TUI_BIN": str(self.root / "missing-bin")}):
+            with self.assertRaises(ValueError):
+                cli.find_tui_binary()
+
+    def test_answer_expected_turn_question_hash_and_duplicate_guard(self):
+        import hashlib
+        import io
+        import os
+        from unittest import mock
+        from claivelib import cli
+
+        wid = "abcd12345678"
+        jdir = self.root / wid
+        (jdir / "requests").mkdir(parents=True)
+        question = "Should fallback skip oversized docs?"
+        qhash = hashlib.sha256(question.encode("utf-8")).hexdigest()[:16]
+        state = {
+            "schema_version": 2,
+            "id": wid,
+            "reusable": True,
+            "status": "idle",
+            "engine": "pi",
+            "model": "deepseek-v4.1-flash-free",
+            "reasoning_effort": "high",
+            "session_id": "sess-1",
+            "workspace": str(self.workspace),
+            "turn": 2,
+            "supervisor_pid": os.getpid(),
+            "supervisor_identity": cli.identity(os.getpid()),
+            "needs_parent": {"kind": "needs_decision", "question": question},
+            "launch": {
+                "engine": "pi",
+                "binary": "/bin/true",
+                "provider": None,
+                "model": "deepseek-v4.1-flash-free",
+                "workspace": str(self.workspace),
+                "read_only": True,
+                "web": False,
+            },
+        }
+        (jdir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        (jdir / "policy.json").write_text(
+            json.dumps({"reasoning_effort": None, "max_model_steps": None}),
+            encoding="utf-8",
+        )
+
+        with mock.patch.dict(os.environ, {"CLAIVE_DIR": str(self.root)}), \
+             mock.patch.object(cli, "validate_turn"):
+            # Wrong turn rejected.
+            with mock.patch("sys.argv", ["claive", "answer", wid, "--message", "yes", "--expected-turn", "1"]):
+                with self.assertRaisesRegex(ValueError, "turn changed"):
+                    cli.main()
+            # Wrong question hash rejected.
+            with mock.patch("sys.argv", ["claive", "answer", wid, "--message", "yes", "--expected-question-hash", "00000000deadbeef"]):
+                with self.assertRaisesRegex(ValueError, "question changed"):
+                    cli.main()
+            # Matching turn + hash succeeds once.
+            buf = io.StringIO()
+            with mock.patch("sys.argv", [
+                "claive", "answer", wid, "--message", "yes",
+                "--expected-turn", "2", "--expected-question-hash", qhash,
+            ]), mock.patch("sys.stdout", buf):
+                cli.main()
+            self.assertIn("Answer queued", buf.getvalue())
+            # Second answer for the same turn is rejected by duplicate guard.
+            with mock.patch("sys.argv", ["claive", "answer", wid, "--message", "again"]):
+                with self.assertRaisesRegex(ValueError, "already queued for turn 2"):
+                    cli.main()
+
+    def test_apply_dry_run_reports_gate_blockers(self):
+        import io
+        import os
+        import subprocess
+        from unittest import mock
+        from claivelib import cli
+
+        repo = self.root / "gitrepo"
+        repo.mkdir()
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@example.com"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+        (repo / "a.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "a.txt"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "init"], check=True)
+        base_commit = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+        wt = self.root / "wt"
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "claive/wt1", str(wt)], check=True)
+        (wt / "a.txt").write_text("edited\n", encoding="utf-8")
+
+        wid = "fedcba987654"
+        jdir = self.root / wid
+        (jdir / "requests").mkdir(parents=True)
+        state = {
+            "schema_version": 2,
+            "id": wid,
+            "status": "completed",
+            "workspace": str(repo),
+            "retained_worktree": str(wt),
+            "turn": 1,
+            "acceptance_contract": {"checks": [{"name": "unit", "command": ["true"]}]},
+            "launch": {"isolation": {"owner": "claive", "source": str(repo), "base_commit": base_commit}},
+        }
+        (jdir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"CLAIVE_DIR": str(self.root)}), mock.patch("sys.stdout", buf):
+            rc = cli.worktree_apply_command(wid, dry_run=True, json_output=True, enforce_gates=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["applied"], ["a.txt"])
+        self.assertTrue(payload["gate_blockers"], "dry-run must report verification gate blocker")
+        self.assertIn("verification status", payload["gate_blockers"][0])
+
 
 class StreamFinishGraceTests(unittest.TestCase):
     def test_constants_and_default_compatibility(self):

@@ -113,6 +113,16 @@ claive watch
 claive watch --compact
 ```
 
+For a full Ratatui triage dashboard (read-only by default, zero locks, `inotify`-driven, with optional `--actions` operator controls):
+
+```bash
+just dash-build && ./install.sh --runtime-only --with-tui
+claive dash                 # read-only triage view
+claive dash --triage        # exception-only (ASK / UNWATCHED / LOST / FAIL / REVIEW)
+claive dash --actions       # interactive answer / send / steer / park / verify / apply / cancel / close
+CLAIVE_TMUX_TUI=1 claive-codex  # use Ratatui --compact in the 5-row tmux pane
+```
+
 The compact pane shows one row per job with its ID, label, workspace, elapsed time, warning count, and current activity. It displays up to three jobs and indicates when more are available with `claive list`. The full watch view also shows model steps observed in events. Both use the live terminal width. Running, idle, completed, failed, interrupted, and cancelled jobs have distinct states. The one-line view looks like:
 
 ```text

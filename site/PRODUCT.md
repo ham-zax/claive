@@ -2,50 +2,40 @@
 
 <!-- impeccable:product-schema 1 -->
 
-Source: answers recorded in `site/HANDOFF.md` section 9 (2026-10-07). Fields marked *(inferred)* were not stated by the user directly.
-
 ## Platform
 
 web
 
 ## Stack
 
-Plain static HTML/CSS/JS in one file, `site/index.html`. No build step, no framework. *(Decided in the handoff; the user asked to continue it.)*
+Self-contained static HTML/CSS/JS in one file, `site/index.html`. No build step, no framework, zero external JavaScript dependencies.
 
 ## Users
 
-Developers first, junior developers second. They use coding agents (Claude Code, Codex, or similar) and want to know what claive is without already knowing the jargon.
+Developers and multi-agent power users who run coding harnesses (Codex, Claude Code, Pi, AGY, Muse) and want to delegate, inspect, steer, verify, and integrate subagent work cleanly.
 
 ## Product Purpose
 
-claive is a referee for AI coding agents. One agent hands a coding job to cheaper workers, a worker from a different model family critiques the result, and each change is kept only if the user's tests say it got better. It is also an experiment: it asks whether verifier-gated refinement beats a single run and compute-matched resampling. There are no results yet.
+claive is a harness-neutral outer cloth and shared rope that wraps Codex, Claude Code, Pi, AGY, and Muse so any parent harness can drive, steer, question, verify, and connect any other harness as a subagent without stripping native tools, MCP servers, skills, or prompt caching.
 
-## Positioning
+## Core Capabilities Represented on the Site
 
-A plain-code arbiter (not a model) decides each next step, and the user's own tests, not another model's opinion, decide what is kept. A worse round is reverted automatically. The project publishes its baselines and its own null-result policy.
+1. **Multi-Harness Workers & Messaging**: `open`, `run`, `followup`, `@alias` specialists, `send`, `ask`/`reply`, live `steer`, bounded cross-engine `conversation` rounds, `batch`, `mission`, `inbox`.
+2. **Ratatui Triage Dashboard (`claive dash` / `claive-tui`)**: Dark Cockpit Rust TUI, read-only by default, zero locks, `inotify`-driven, native incremental Rust `events.jsonl` tailing with secret redaction, 3-column wide split (`Workers | Activity | Briefing`), `--actions` with dual-driver hijack confirmation, and 5-row `--compact` tmux pane.
+3. **Isolation & Evidence Gates**: Managed Git worktrees (`--worktree`, `--carry-dirty`, `--link-deps`), `systemd-run --user --scope` + subreaper containment, `claive-memcap`, atomic zero-shell `status.json`, and `claive verify` / `claive worktree apply --dry-run`.
+4. **Flat-Schema MCP Stdio Server (`claive-mcp`)**: 10 scalar-schema tools for zero-shell orchestration.
+5. **Verified Orchestration (`claive-orch`)**: Plain-code arbiter stepping L0 Direct -> L1 Cross-Family Refine (Git revert on regressions) -> L2 Selective Breadth on stall.
+6. **Unattended Goal Queue (`claive serve` / `claive goal`)**: Durable server queue with budgets, workspace allowlists, backoff, and `systemd` user unit.
 
-## Capabilities and Constraints
+## Brand Commitments & Honesty
 
-- Linux with Python 3. The default engine needs the Muse binary. Pi is the second engine. Stdlib only.
-- Public repository, MIT licence: `https://github.com/ham-zax/claive`. Author: Hamza (`ham-zax`).
-- Undecided: numeric gate thresholds and calibration-task counts. An agent is tuning them. Describe the gates in words only.
-
-## Brand Commitments
-
-Voice: plain, dry, honest about being an experiment. *(inferred from the handoff)*
-
-## Evidence on Hand
-
-One shakedown run (`bd886bb32632`): tests 6/7, critic named the defect, same session fixed it, 7/7, 245 s. One task, no repeats, not evidence. **No benchmarks, win rates, cost figures or local-model support exist; none may be shown.** Paper numbers are unverified and stay off the page.
-
-## Product Principles
-
-1. Say what it is in one plain sentence before anything else.
-2. Never claim a result. The experiment has none yet.
-3. Every number on the page traces to a file in the repo.
-4. Gloss each term once (parent, worker, critic, verifier, arbiter), then use it.
-5. The honest framing (an experiment, not a product) is the selling point.
+- Plain, grounded technical voice.
+- Every CLI command, flag, engine detail, and MCP tool traces directly to repo files.
+- No fabricated benchmarks, win rates, or cost-savings claims (TTC experiment is explicitly noted as deferred per `docs/experiment/README.md`).
+- Zero personal paths, hostnames, or secrets anywhere in `site/index.html` or `site/PRODUCT.md`.
 
 ## Accessibility & Inclusion
 
-Phone width with no sideways scroll, light and dark, reduced motion respected, real text rather than images of text.
+- Responsive from 375 px phone width to 1600 px desktop with zero horizontal overflow.
+- Light and dark themes (auto-detected via `prefers-color-scheme` with manual toggle).
+- Respects `prefers-reduced-motion`, semantic landmarks, skip link, keyboard-accessible interactive tabs and controls.

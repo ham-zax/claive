@@ -108,7 +108,7 @@ def latest_intent(path, engine, human_output=False):
     return steps_window(path, engine, 1, human_output=human_output)[2]
 
 
-def show(worker_id, count=5, json_output=False, start=None):
+def show(worker_id, count=5, json_output=False, start=None, structured=False):
     from claivelib import cli
     from claivelib.engines import DEFAULT_ENGINE, get_engine
 
@@ -123,9 +123,18 @@ def show(worker_id, count=5, json_output=False, start=None):
     result = dict(id=path.name, status=state.get("status", "unknown"),
                   phase=state.get("phase", "unknown"), turn=state.get("turn", 0),
                   last_activity_age_seconds=age, intent=None)
+    engine_name = state.get("engine", DEFAULT_ENGINE)
     result["steps"], result["total"], result["intent"] = steps_window(
-        path, get_engine(state.get("engine", DEFAULT_ENGINE)), count, start,
+        path, get_engine(engine_name), count, start,
         human_output=not json_output)
+    if structured and json_output:
+        from claivelib import progress
+        result["actions"] = progress.extract_structured_actions(
+            path / "events.jsonl",
+            engine_name,
+            count=count,
+            workspace=state.get("actual_workspace") or state.get("workspace"),
+        )
     if json_output:
         print(json.dumps(result, ensure_ascii=False))
     else:

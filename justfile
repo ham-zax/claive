@@ -13,3 +13,12 @@ lint:
     shellcheck install.sh bin/claive-worker bin/claive-codex
 
 check: lint test
+
+# Build the Ratatui terminal dashboard binary (`tui/target/release/claive-tui`).
+dash-build:
+    cargo build --release --manifest-path tui/Cargo.toml
+
+# Run Rust TUI unit and integration tests (offline/hermetic).
+dash-test:
+    cargo test --manifest-path tui/Cargo.toml
+

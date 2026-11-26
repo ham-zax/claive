@@ -1,10 +1,14 @@
 //! Dashboard application state, priority triage sorting, filtering, and key handling.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
 
 use crate::commands::{
@@ -18,7 +22,8 @@ use crate::store::{
 };
 
 pub const QUIET_THRESHOLD_SECS: f64 = 60.0;
-pub const RECENT_SETTLED_LIMIT: usize = 20;
+pub const STALE_ACTIONABLE_SECS: f64 = 6.0 * 3600.0;
+pub const RECENT_SETTLED_LIMIT: usize = 30;
 pub const TOAST_TTL: Duration = Duration::from_secs(4);
 
 #[derive(Debug, Clone)]
@@ -186,8 +191,38 @@ pub fn is_review_pending(w: &WorkerRecord) -> bool {
         && w.acceptance_status == "pending"
 }
 
+pub fn default_log_kind_for(w: &WorkerRecord) -> LogKind {
+    if w.has_result_file {
+        return LogKind::Result;
+    }
+    if matches!(classify_worker(w), TriageBadge::Fail | TriageBadge::Lost) {
+        return LogKind::Stderr;
+    }
+    LogKind::Prompt
+}
+
 pub fn is_settled_status(status: &str) -> bool {
     matches!(status, "completed" | "failed" | "interrupted" | "cancelled")
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+pub fn worker_last_updated(w: &WorkerRecord) -> Option<f64> {
+    w.last_activity
+        .or(w.ended_at)
+        .or(w.turn_started_at)
+        .or(w.started_at)
+}
+
+pub fn worker_is_stale_ask(w: &WorkerRecord, now: f64) -> bool {
+    if classify_worker(w) != TriageBadge::Ask {
+        return false;
+    }
+    worker_last_updated(w)
+        .map(|ts| (now - ts) >= STALE_ACTIONABLE_SECS)
+        .unwrap_or(false)
 }
 
 pub fn worker_sort_key(w: &WorkerRecord) -> (u8, i64, String) {
@@ -201,14 +236,41 @@ pub fn worker_sort_key(w: &WorkerRecord) -> (u8, i64, String) {
             .unwrap_or(0.0);
         (anchor * 1000.0) as i64
     } else {
-        let anchor = w
-            .last_activity
-            .or(w.ended_at)
-            .or(w.started_at)
-            .unwrap_or(0.0);
+        let anchor = worker_last_updated(w).unwrap_or(0.0);
         -((anchor * 1000.0) as i64)
     };
     (rank, ts, w.id.clone())
+}
+
+/// Forum-style recency sort:
+/// - Tier 0: Actively running turns right now (most recently updated first)
+/// - Tier 1: Everything else ordered strictly by most recently updated first (forum bump).
+pub fn worker_forum_sort_key(w: &WorkerRecord, _now: f64) -> (u8, i64, String) {
+    let updated = worker_last_updated(w).unwrap_or(0.0);
+    let tier = if w.is_active_turn() { 0 } else { 1 };
+    (tier, -((updated * 1000.0) as i64), w.id.clone())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortMode {
+    Updated,
+    Priority,
+}
+
+impl SortMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            SortMode::Updated => "Updated",
+            SortMode::Priority => "Priority",
+        }
+    }
+
+    pub fn toggle(self) -> Self {
+        match self {
+            SortMode::Updated => SortMode::Priority,
+            SortMode::Priority => SortMode::Updated,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -247,15 +309,73 @@ impl WorkspaceScope {
 pub enum ListMode {
     Recent,
     Active,
+    Archived,
 }
 
 impl ListMode {
     pub fn label(self) -> &'static str {
         match self {
-            ListMode::Recent => "recent",
+            ListMode::Recent => "all",
             ListMode::Active => "active",
+            ListMode::Archived => "archived",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusFilter {
+    Active,
+    Ask,
+    LostFail,
+    Review,
+    Parked,
+    Done,
+}
+
+impl StatusFilter {
+    pub fn label(self) -> &'static str {
+        match self {
+            StatusFilter::Active => "running",
+            StatusFilter::Ask => "ask",
+            StatusFilter::LostFail => "lost/fail",
+            StatusFilter::Review => "review",
+            StatusFilter::Parked => "parked",
+            StatusFilter::Done => "done",
+        }
+    }
+
+    pub fn matches(self, w: &WorkerRecord, badge: TriageBadge) -> bool {
+        match self {
+            StatusFilter::Active => w.is_active_turn(),
+            StatusFilter::Ask => badge == TriageBadge::Ask,
+            StatusFilter::LostFail => matches!(badge, TriageBadge::Lost | TriageBadge::Fail),
+            StatusFilter::Review => badge == TriageBadge::Review,
+            StatusFilter::Parked => badge == TriageBadge::Parked,
+            StatusFilter::Done => matches!(badge, TriageBadge::Done | TriageBadge::Stop),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClickAction {
+    SelectWorkspace(WorkspaceScope),
+    SelectListMode(ListMode),
+    ToggleStatusFilter(StatusFilter),
+    ToggleTriage,
+    ToggleSortMode,
+    ToggleGroupBySession,
+    ToggleArchiveSelected,
+    ArchiveStaleAll,
+    SelectWorkerRow(usize),
+    SelectInspectorTab(InspectorTab),
+    SelectLogKind(LogKind),
+    ToggleActivityRow(usize),
+}
+
+#[derive(Debug, Clone)]
+pub struct ClickRegion {
+    pub rect: Rect,
+    pub action: ClickAction,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -376,6 +496,9 @@ pub struct SummaryCounts {
     pub parked: usize,
     pub idle: usize,
     pub done: usize,
+    pub archived: usize,
+    pub active_total: usize,
+    pub needs_you: usize,
     pub hidden_ask: usize,
 }
 
@@ -466,10 +589,13 @@ pub struct App {
     pub session_scope: SessionScope,
     pub workspace_scope: WorkspaceScope,
     pub list_mode: ListMode,
+    pub status_filter: Option<StatusFilter>,
+    pub sort_mode: SortMode,
     pub triage_only: bool,
     pub group_by_session: bool,
     pub search_active: bool,
     pub search_query: String,
+    pub archived_ids: HashSet<String>,
 
     pub focus_pane: FocusPane,
     pub inspector_tab: InspectorTab,
@@ -478,6 +604,7 @@ pub struct App {
     pub detail_open: bool,
     pub help_open: bool,
     pub log_kind: LogKind,
+    pub log_kind_pinned: bool,
 
     pub inspector_scroll: u16,
     pub drawer_scroll: u16,
@@ -487,6 +614,12 @@ pub struct App {
     pub expanded_steps: HashSet<u64>,
     pub show_noise_steps: bool,
     pub activity_filter: ActivityFilter,
+
+    // Interactive mouse hit-test targets (rebuilt on each render).
+    pub click_regions: Vec<ClickRegion>,
+    pub workers_area: Rect,
+    pub inspector_area: Rect,
+    pub drawer_area: Rect,
 
     pub selected_id: Option<String>,
     pub table_state: TableState,
@@ -534,7 +667,13 @@ impl App {
 
         let pending_focus = config.focus.clone();
         let triage_only = config.triage;
+        let sort_mode = if config.triage || config.compact {
+            SortMode::Priority
+        } else {
+            SortMode::Updated
+        };
         let claive_dir = config.claive_dir.clone();
+        let archived_ids = load_archived_ids(&claive_dir);
 
         Self {
             config,
@@ -550,10 +689,13 @@ impl App {
             session_scope: initial_session,
             workspace_scope: initial_workspace,
             list_mode: ListMode::Recent,
+            status_filter: None,
+            sort_mode,
             triage_only,
             group_by_session: false,
             search_active: false,
             search_query: String::new(),
+            archived_ids,
             focus_pane: FocusPane::Workers,
             inspector_tab: InspectorTab::Overview,
             drawer_open: false,
@@ -561,12 +703,17 @@ impl App {
             detail_open: false,
             help_open: false,
             log_kind: LogKind::Result,
+            log_kind_pinned: false,
             inspector_scroll: 0,
             drawer_scroll: 0,
             selected_step: 0,
             expanded_steps: HashSet::new(),
             show_noise_steps: false,
             activity_filter: ActivityFilter::Actions,
+            click_regions: Vec::new(),
+            workers_area: Rect::default(),
+            inspector_area: Rect::default(),
+            drawer_area: Rect::default(),
             selected_id: None,
             table_state: TableState::default(),
             visible_workers: Vec::new(),
@@ -588,7 +735,7 @@ impl App {
 
     /// Apply a freshly ingested registry snapshot while preserving selection by canonical ID.
     pub fn apply_snapshot(&mut self, mut snapshot: RegistrySnapshot) {
-        snapshot.workers.sort_by_key(worker_sort_key);
+        self.sort_workers(&mut snapshot.workers, snapshot.refreshed_at);
 
         // Update unseen-settlement markers.
         if !self.initialized_seen {
@@ -670,6 +817,285 @@ impl App {
         }
 
         self.recompute_view();
+    }
+
+    pub fn sort_workers(&self, workers: &mut [WorkerRecord], now: f64) {
+        match self.sort_mode {
+            SortMode::Updated => workers.sort_by_key(|w| worker_forum_sort_key(w, now)),
+            SortMode::Priority => workers.sort_by_key(worker_sort_key),
+        }
+    }
+
+    pub fn resort_and_recompute(&mut self) {
+        let now = self.snapshot.refreshed_at;
+        let mode = self.sort_mode;
+        match mode {
+            SortMode::Updated => self
+                .snapshot
+                .workers
+                .sort_by_key(|w| worker_forum_sort_key(w, now)),
+            SortMode::Priority => self.snapshot.workers.sort_by_key(worker_sort_key),
+        }
+        self.recompute_view();
+    }
+
+    /// Return `(full_workspace_path, short_name, non_archived_count)` for clickable repo filter chips.
+    pub fn workspace_chips(&self) -> Vec<(String, String, usize)> {
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for w in &self.snapshot.workers {
+            if self.archived_ids.contains(&w.id) && self.list_mode != ListMode::Archived {
+                continue;
+            }
+            if let Some(ws) = &w.workspace
+                && !ws.trim().is_empty()
+            {
+                *counts.entry(ws.clone()).or_insert(0) += 1;
+            }
+        }
+        let mut out: Vec<(String, String, usize)> = counts
+            .into_iter()
+            .map(|(path, n)| {
+                let short = short_repo_name(&path);
+                (path, short, n)
+            })
+            .collect();
+        out.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
+        out
+    }
+
+    pub fn toggle_archive_selected(&mut self) {
+        let Some(w) = self.selected_worker().cloned() else {
+            return;
+        };
+        if self.archived_ids.contains(&w.id) {
+            self.archived_ids.remove(&w.id);
+            save_archived_ids(&self.config.claive_dir, &self.archived_ids);
+            self.recompute_view();
+            self.set_toast(format!("Restored {}", w.display_name()), false);
+            return;
+        }
+        if w.is_active_turn() {
+            self.set_toast(
+                format!(
+                    "Cannot archive running agent {} — wait or cancel [x] first",
+                    w.display_name()
+                ),
+                true,
+            );
+            return;
+        }
+        self.archived_ids.insert(w.id.clone());
+        save_archived_ids(&self.config.claive_dir, &self.archived_ids);
+        self.recompute_view();
+        self.set_toast(
+            format!("Archived {} (click Archived tab to restore)", w.display_name()),
+            false,
+        );
+    }
+
+    pub fn archive_stale_settled(&mut self) {
+        let now = self.snapshot.refreshed_at;
+        let mut count = 0usize;
+        let ids: Vec<String> = self
+            .snapshot
+            .workers
+            .iter()
+            .filter(|w| {
+                if self.archived_ids.contains(&w.id) || w.is_active_turn() || !self.matches_scope(w) {
+                    return false;
+                }
+                let badge = classify_worker(w);
+                matches!(
+                    badge,
+                    TriageBadge::Done | TriageBadge::Stop | TriageBadge::Lost | TriageBadge::Fail
+                ) || worker_is_stale_ask(w, now)
+            })
+            .map(|w| w.id.clone())
+            .collect();
+        for id in ids {
+            self.archived_ids.insert(id);
+            count += 1;
+        }
+        if count == 0 {
+            self.set_toast("No settled or stale agents to archive", false);
+        } else {
+            save_archived_ids(&self.config.claive_dir, &self.archived_ids);
+            self.recompute_view();
+            self.set_toast(format!("Archived {count} settled/stale agent(s)"), false);
+        }
+    }
+
+    /// Refresh live clock reference so running durations & relative ages tick every second.
+    pub fn tick_clock(&mut self) {
+        self.snapshot.refreshed_at = now_unix_secs();
+    }
+
+    pub fn handle_mouse(&mut self, ev: MouseEvent) -> bool {
+        if self.modal.is_some() || self.help_open {
+            return false;
+        }
+        let col = ev.column;
+        let row = ev.row;
+        match ev.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let hit = self
+                    .click_regions
+                    .iter()
+                    .rev()
+                    .find(|r| {
+                        col >= r.rect.x
+                            && col < r.rect.x.saturating_add(r.rect.width)
+                            && row >= r.rect.y
+                            && row < r.rect.y.saturating_add(r.rect.height)
+                    })
+                    .map(|r| r.action.clone());
+
+                if let Some(action) = hit {
+                    match action {
+                        ClickAction::SelectWorkspace(ws) => {
+                            let label = ws.label();
+                            self.workspace_scope = ws;
+                            self.recompute_view();
+                            self.set_toast(format!("Repo filter: {label}"), false);
+                        }
+                        ClickAction::SelectListMode(mode) => {
+                            self.list_mode = mode;
+                            self.triage_only = false;
+                            self.status_filter = None;
+                            self.recompute_view();
+                            self.set_toast(format!("View: {}", mode.label()), false);
+                        }
+                        ClickAction::ToggleStatusFilter(sf) => {
+                            self.list_mode = ListMode::Recent;
+                            self.triage_only = false;
+                            if self.status_filter == Some(sf) {
+                                self.status_filter = None;
+                                self.recompute_view();
+                                self.set_toast("Status filter cleared", false);
+                            } else {
+                                self.status_filter = Some(sf);
+                                self.recompute_view();
+                                self.set_toast(format!("Filter: {}", sf.label()), false);
+                            }
+                        }
+                        ClickAction::ToggleTriage => {
+                            self.list_mode = ListMode::Recent;
+                            self.status_filter = None;
+                            self.triage_only = !self.triage_only;
+                            self.recompute_view();
+                            self.set_toast(
+                                if self.triage_only {
+                                    "Showing agents needing attention"
+                                } else {
+                                    "Showing all agents"
+                                },
+                                false,
+                            );
+                        }
+                        ClickAction::ToggleSortMode => {
+                            self.sort_mode = self.sort_mode.toggle();
+                            self.resort_and_recompute();
+                            self.set_toast(format!("Sort: {}", self.sort_mode.label()), false);
+                        }
+                        ClickAction::ToggleGroupBySession => {
+                            self.group_by_session = !self.group_by_session;
+                            self.recompute_view();
+                            self.set_toast(
+                                if self.group_by_session {
+                                    "Grouped by parent session"
+                                } else {
+                                    "Flat list view"
+                                },
+                                false,
+                            );
+                        }
+                        ClickAction::ToggleArchiveSelected => {
+                            self.toggle_archive_selected();
+                        }
+                        ClickAction::ArchiveStaleAll => {
+                            self.archive_stale_settled();
+                        }
+                        ClickAction::SelectWorkerRow(row_idx) => {
+                            if let Some(DisplayRow::Worker { worker_idx, .. }) =
+                                self.display_rows.get(row_idx)
+                            {
+                                self.selected_id =
+                                    Some(self.snapshot.workers[*worker_idx].id.clone());
+                                self.table_state.select(Some(row_idx));
+                                self.focus_pane = FocusPane::Workers;
+                                self.inspector_scroll = 0;
+                                self.selected_step = 0;
+                                self.expanded_steps.clear();
+                                self.log_kind_pinned = false;
+                                if self.inspector_tab == InspectorTab::Logs {
+                                    self.auto_select_log_kind();
+                                }
+                                self.mark_selected_seen();
+                            }
+                        }
+                        ClickAction::SelectInspectorTab(tab) => {
+                            self.inspector_tab = tab;
+                            self.focus_pane = FocusPane::Inspector;
+                            self.inspector_scroll = 0;
+                            if tab == InspectorTab::Logs && !self.log_kind_pinned {
+                                self.auto_select_log_kind();
+                            }
+                        }
+                        ClickAction::SelectLogKind(kind) => {
+                            self.log_kind = kind;
+                            self.log_kind_pinned = true;
+                            self.inspector_tab = InspectorTab::Logs;
+                            self.focus_pane = FocusPane::Inspector;
+                            self.inspector_scroll = 0;
+                        }
+                        ClickAction::ToggleActivityRow(idx) => {
+                            self.focus_pane = FocusPane::Inspector;
+                            self.selected_step = idx;
+                            self.toggle_selected_step_expand();
+                        }
+                    }
+                    return true;
+                }
+                false
+            }
+            MouseEventKind::ScrollDown => {
+                if rect_contains(self.workers_area, col, row) {
+                    self.select_step(1);
+                    true
+                } else if rect_contains(self.inspector_area, col, row) {
+                    if self.inspector_tab == InspectorTab::Steps {
+                        self.step_move(1);
+                    } else {
+                        self.inspector_scroll = self.inspector_scroll.saturating_add(2);
+                    }
+                    true
+                } else if self.drawer_open && rect_contains(self.drawer_area, col, row) {
+                    self.drawer_scroll = self.drawer_scroll.saturating_add(2);
+                    true
+                } else {
+                    false
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if rect_contains(self.workers_area, col, row) {
+                    self.select_step(-1);
+                    true
+                } else if rect_contains(self.inspector_area, col, row) {
+                    if self.inspector_tab == InspectorTab::Steps {
+                        self.step_move(-1);
+                    } else {
+                        self.inspector_scroll = self.inspector_scroll.saturating_sub(2);
+                    }
+                    true
+                } else if self.drawer_open && rect_contains(self.drawer_area, col, row) {
+                    self.drawer_scroll = self.drawer_scroll.saturating_sub(2);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
     }
 
     pub fn apply_read_response(&mut self, resp: ReadResponse) {
@@ -823,15 +1249,30 @@ impl App {
         for (idx, w) in self.snapshot.workers.iter().enumerate() {
             let badge = classify_worker(w);
             let in_scope = self.matches_scope(w);
+            let is_archived = self.archived_ids.contains(&w.id);
 
             if !in_scope {
-                if badge == TriageBadge::Ask {
+                if badge == TriageBadge::Ask && !is_archived {
                     counts.hidden_ask += 1;
                 }
                 continue;
             }
 
+            if is_archived {
+                counts.archived += 1;
+                if self.list_mode == ListMode::Archived {
+                    visible.push(idx);
+                }
+                continue;
+            }
+
             counts.total += 1;
+            if w.is_active_turn() {
+                counts.active_total += 1;
+            }
+            if badge.is_actionable() {
+                counts.needs_you += 1;
+            }
             match badge {
                 TriageBadge::Ask => counts.ask += 1,
                 TriageBadge::Unwatched => counts.unwatched += 1,
@@ -846,16 +1287,27 @@ impl App {
                 TriageBadge::Done | TriageBadge::Stop => counts.done += 1,
             }
 
+            if self.list_mode == ListMode::Archived {
+                continue;
+            }
+
+            if let Some(sf) = self.status_filter
+                && !sf.matches(w, badge)
+            {
+                continue;
+            }
+
             if self.triage_only && !badge.is_actionable() {
                 continue;
             }
 
             let unresolved = badge.is_actionable() || w.is_active_turn();
-            if self.list_mode == ListMode::Active && !unresolved {
+            if self.list_mode == ListMode::Active && !w.is_active_turn() {
                 continue;
             }
 
-            if !unresolved && is_settled_status(&w.effective_status) {
+            if self.status_filter.is_none() && !unresolved && is_settled_status(&w.effective_status)
+            {
                 let is_selected = self.selected_id.as_deref() == Some(w.id.as_str());
                 if settled_kept >= RECENT_SETTLED_LIMIT && !is_selected {
                     continue;
@@ -1003,6 +1455,10 @@ impl App {
         self.inspector_scroll = 0;
         self.selected_step = 0;
         self.expanded_steps.clear();
+        self.log_kind_pinned = false;
+        if self.inspector_tab == InspectorTab::Logs {
+            self.auto_select_log_kind();
+        }
     }
 
     fn select_first(&mut self) {
@@ -1016,6 +1472,10 @@ impl App {
             self.inspector_scroll = 0;
             self.selected_step = 0;
             self.expanded_steps.clear();
+            self.log_kind_pinned = false;
+            if self.inspector_tab == InspectorTab::Logs {
+                self.auto_select_log_kind();
+            }
         }
     }
 
@@ -1035,6 +1495,16 @@ impl App {
             self.inspector_scroll = 0;
             self.selected_step = 0;
             self.expanded_steps.clear();
+            self.log_kind_pinned = false;
+            if self.inspector_tab == InspectorTab::Logs {
+                self.auto_select_log_kind();
+            }
+        }
+    }
+
+    pub fn auto_select_log_kind(&mut self) {
+        if let Some(w) = self.selected_worker() {
+            self.log_kind = default_log_kind_for(w);
         }
     }
 
@@ -1132,6 +1602,30 @@ impl App {
         }
     }
 
+    pub fn worktree_copy_command(&self, w: &WorkerRecord) -> Option<String> {
+        let dir = w
+            .retained_worktree
+            .as_deref()
+            .or(w.actual_workspace.as_deref())
+            .or(w.workspace.as_deref())?;
+        if dir.trim().is_empty() {
+            return None;
+        }
+        Some(format!("cd {}", shell_quote(dir)))
+    }
+
+    pub fn diff_copy_command(&self, w: &WorkerRecord) -> Option<String> {
+        let dir = w
+            .retained_worktree
+            .as_deref()
+            .or(w.actual_workspace.as_deref())
+            .or(w.workspace.as_deref())?;
+        if dir.trim().is_empty() {
+            return None;
+        }
+        Some(format!("git -C {} diff", shell_quote(dir)))
+    }
+
     /// Scoped inbox items matching active `session_scope`.
     pub fn scoped_inbox(&self) -> Vec<&InboxItem> {
         self.snapshot
@@ -1179,7 +1673,13 @@ impl App {
             InspectorTab::Logs => {
                 let need = force || !self.log_cache.contains_key(&(w.id.clone(), self.log_kind));
                 if need {
-                    lane.request_log(&w.id, &w.job_dir, self.log_kind, w.prompt_file.clone());
+                    lane.request_log(
+                        &w.id,
+                        &w.job_dir,
+                        self.log_kind,
+                        w.prompt_file.clone(),
+                        w.turn_prompt_file.clone(),
+                    );
                 }
             }
             InspectorTab::Evidence => {}
@@ -1530,6 +2030,9 @@ impl App {
                 } else {
                     self.inspector_tab = self.inspector_tab.prev();
                     self.inspector_scroll = 0;
+                    if self.inspector_tab == InspectorTab::Logs && !self.log_kind_pinned {
+                        self.auto_select_log_kind();
+                    }
                 }
             }
             KeyCode::Char('l') | KeyCode::Right => {
@@ -1539,6 +2042,9 @@ impl App {
                 } else {
                     self.inspector_tab = self.inspector_tab.next();
                     self.inspector_scroll = 0;
+                    if self.inspector_tab == InspectorTab::Logs && !self.log_kind_pinned {
+                        self.auto_select_log_kind();
+                    }
                 }
             }
             KeyCode::Char('1') => {
@@ -1556,6 +2062,9 @@ impl App {
             KeyCode::Char('4') => {
                 self.inspector_tab = InspectorTab::Logs;
                 self.inspector_scroll = 0;
+                if !self.log_kind_pinned {
+                    self.auto_select_log_kind();
+                }
             }
             KeyCode::Enter => {
                 if self.focus_pane == FocusPane::Inspector
@@ -1591,12 +2100,27 @@ impl App {
             KeyCode::Char('r') => {
                 self.list_mode = match self.list_mode {
                     ListMode::Recent => ListMode::Active,
-                    ListMode::Active => ListMode::Recent,
+                    ListMode::Active => ListMode::Archived,
+                    ListMode::Archived => ListMode::Recent,
                 };
+                self.triage_only = false;
+                self.status_filter = None;
                 self.recompute_view();
-                self.set_toast(format!("List mode: {}", self.list_mode.label()), false);
+                self.set_toast(format!("View: {}", self.list_mode.label()), false);
+            }
+            KeyCode::Char('o') => {
+                self.sort_mode = self.sort_mode.toggle();
+                self.resort_and_recompute();
+                self.set_toast(format!("Sort: {}", self.sort_mode.label()), false);
+            }
+            KeyCode::Char('z') => {
+                self.toggle_archive_selected();
+            }
+            KeyCode::Char('Z') => {
+                self.archive_stale_settled();
             }
             KeyCode::Char('t') => {
+                self.status_filter = None;
                 self.triage_only = !self.triage_only;
                 self.recompute_view();
                 self.set_toast(
@@ -1610,9 +2134,18 @@ impl App {
             }
             KeyCode::Char('L') => {
                 self.log_kind = self.log_kind.next();
+                self.log_kind_pinned = true;
                 self.inspector_tab = InspectorTab::Logs;
                 self.inspector_scroll = 0;
                 self.set_toast(format!("Log view: {}", self.log_kind.label()), false);
+            }
+            KeyCode::Char('P') => {
+                self.log_kind = LogKind::Prompt;
+                self.log_kind_pinned = true;
+                self.inspector_tab = InspectorTab::Logs;
+                self.focus_pane = FocusPane::Inspector;
+                self.inspector_scroll = 0;
+                self.set_toast("Log view: Prompt", false);
             }
             KeyCode::Char('R') => {
                 self.set_toast("Refreshing...", false);
@@ -1623,6 +2156,26 @@ impl App {
                     let cmd = self.remediation_command(&w);
                     self.set_toast(format!("Copied: {cmd}"), false);
                     return KeyOutcome::CopyClipboard(cmd);
+                }
+            }
+            KeyCode::Char('W') => {
+                if let Some(w) = self.selected_worker().cloned() {
+                    if let Some(cmd) = self.worktree_copy_command(&w) {
+                        self.set_toast(format!("Copied: {cmd}"), false);
+                        return KeyOutcome::CopyClipboard(cmd);
+                    } else {
+                        self.set_toast("No worktree/workspace path recorded", true);
+                    }
+                }
+            }
+            KeyCode::Char('D') => {
+                if let Some(w) = self.selected_worker().cloned() {
+                    if let Some(cmd) = self.diff_copy_command(&w) {
+                        self.set_toast(format!("Copied: {cmd}"), false);
+                        return KeyOutcome::CopyClipboard(cmd);
+                    } else {
+                        self.set_toast("No worktree/workspace path recorded", true);
+                    }
                 }
             }
             KeyCode::Char('a') => return self.open_answer_modal(),
@@ -2018,6 +2571,94 @@ pub fn short_workspace(path: &str) -> String {
         (*last).to_string()
     } else {
         path.to_string()
+    }
+}
+
+pub fn short_repo_name(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    trimmed
+        .rsplit('/')
+        .find(|p| !p.is_empty())
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
+pub fn short_session_tag(session: &str) -> String {
+    let s = session.trim();
+    if s.chars().count() <= 12 {
+        return s.to_string();
+    }
+    if let Some((head, tail)) = s.rsplit_once('-') {
+        let prefix: String = head.chars().take(6).collect();
+        let suffix: String = tail.chars().take(4).collect();
+        return format!("{prefix}-{suffix}");
+    }
+    let head: String = s.chars().take(11).collect();
+    format!("{head}…")
+}
+
+fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
+    rect.width > 0
+        && rect.height > 0
+        && col >= rect.x
+        && col < rect.x.saturating_add(rect.width)
+        && row >= rect.y
+        && row < rect.y.saturating_add(rect.height)
+}
+
+fn archive_state_file() -> Option<PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_STATE_HOME")
+        && !xdg.trim().is_empty()
+    {
+        return Some(PathBuf::from(xdg).join("claive").join("tui-archived.json"));
+    }
+    std::env::var_os("HOME").map(|h| {
+        PathBuf::from(h)
+            .join(".local")
+            .join("state")
+            .join("claive")
+            .join("tui-archived.json")
+    })
+}
+
+fn load_archived_ids(claive_dir: &Path) -> HashSet<String> {
+    let Some(path) = archive_state_file() else {
+        return HashSet::new();
+    };
+    let Ok(raw) = fs::read_to_string(path) else {
+        return HashSet::new();
+    };
+    let Ok(map) = serde_json::from_str::<HashMap<String, Vec<String>>>(&raw) else {
+        return HashSet::new();
+    };
+    let key = claive_dir.to_string_lossy().to_string();
+    map.get(&key).cloned().unwrap_or_default().into_iter().collect()
+}
+
+fn save_archived_ids(claive_dir: &Path, ids: &HashSet<String>) {
+    let Some(path) = archive_state_file() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let mut map: HashMap<String, Vec<String>> = fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    let key = claive_dir.to_string_lossy().to_string();
+    if ids.is_empty() {
+        map.remove(&key);
+    } else {
+        let mut sorted: Vec<String> = ids.iter().cloned().collect();
+        sorted.sort();
+        map.insert(key, sorted);
+    }
+    if let Ok(encoded) = serde_json::to_string_pretty(&map) {
+        let tmp = path.with_extension("json.tmp");
+        if fs::write(&tmp, encoded).is_ok() {
+            let _ = fs::rename(tmp, path);
+        }
     }
 }
 

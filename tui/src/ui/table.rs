@@ -1,7 +1,8 @@
 //! Clean, self-explanatory Workers table:
-//! `STATUS | AGENT | TASK & STATUS | LAUNCHED | RUNTIME`
-//! Every row uses predictable 2-line hierarchy (Mission on top, Live Status/Outcome underneath)
-//! and human-readable local launch timestamps + runtime durations.
+//! `STATUS | AGENT | TASK & STATUS | UPDATED | RUNTIME`
+//! - Running agents ALWAYS display `▸ RUN` and their live action (never hidden by `UNWATCHED`).
+//! - `UPDATED` shows forum-style recency (`just now`, `2m ago`, `Today 09:33`).
+//! - Clicking any worker row selects it immediately.
 
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
@@ -10,16 +11,17 @@ use ratatui::widgets::{Block, BorderType, Borders, Cell, Padding, Paragraph, Row
 use ratatui::Frame;
 
 use crate::app::{
-    format_duration, format_launched_at, format_relative_ago, short_workspace, App, DisplayRow,
-    FocusPane, TriageBadge,
+    format_duration, format_launched_at, format_relative_ago, short_repo_name, short_session_tag,
+    worker_is_stale_ask, worker_last_updated, App, ClickAction, ClickRegion, DisplayRow, FocusPane,
+    ListMode, TriageBadge,
 };
 use crate::format::{strip_inline_markdown, summarize_tool_detail};
 use crate::sanitize::clip_width;
 use crate::store::WorkerRecord;
 
 use super::{
-    badge_spans, row_text_style, COLOR_ACCENT, COLOR_ASK, COLOR_FAIL, COLOR_MUTED, COLOR_NOMINAL,
-    COLOR_REVIEW, COLOR_ROW_SEL_BG, COLOR_WARN,
+    badge_spans, row_text_style, COLOR_ACCENT, COLOR_ASK, COLOR_BRIGHT, COLOR_FAIL, COLOR_MUTED,
+    COLOR_NOMINAL, COLOR_REVIEW, COLOR_ROW_SEL_BG, COLOR_WARN,
 };
 
 fn clean_task_candidate(raw: &str) -> Option<String> {
@@ -31,7 +33,15 @@ fn clean_task_candidate(raw: &str) -> Option<String> {
     let low = clean.to_ascii_lowercase();
     if matches!(
         low.as_str(),
-        "prompt-input" | "summary" | "result" | "report" | "overview" | "output" | "mission" | "task" | "goal"
+        "prompt-input"
+            | "summary"
+            | "result"
+            | "report"
+            | "overview"
+            | "output"
+            | "mission"
+            | "task"
+            | "goal"
     ) {
         return None;
     }
@@ -42,10 +52,15 @@ fn worker_task_title(w: &WorkerRecord) -> String {
     if let Some(t) = w.mission.as_deref().and_then(clean_task_candidate) {
         return t;
     }
-    if let Some(t) = clean_task_candidate(&w.label) {
+    if !w.is_alias_like_label()
+        && let Some(t) = clean_task_candidate(&w.label)
+    {
         return t;
     }
     if let Some(t) = w.prompt_preview.as_deref().and_then(clean_task_candidate) {
+        return t;
+    }
+    if let Some(t) = clean_task_candidate(&w.label) {
         return t;
     }
     if let Some(t) = w.report_summary.as_deref().and_then(clean_task_candidate) {
@@ -57,66 +72,56 @@ fn worker_task_title(w: &WorkerRecord) -> String {
     format!("{} worker", w.engine)
 }
 
-/// Produce a clean, human-readable 2nd-line status / blocker / outcome with semantic color.
+/// Live or settled 2nd-line subtitle under the task title.
+/// Critical DX rule: an actively running worker ALWAYS shows what it is actually doing right now,
+/// never replacing live progress with a generic `UNWATCHED` scold.
 fn worker_status_subtitle(w: &WorkerRecord, badge: TriageBadge, title: &str) -> (String, Style) {
-    if let Some(ask) = &w.needs_parent {
-        return (
-            format!("? {}", ask.question),
-            Style::default().fg(COLOR_ASK),
-        );
-    }
-    if badge == TriageBadge::Unwatched {
-        return (
-            "! No live `claive wait` watching this worker".to_string(),
-            Style::default().fg(COLOR_WARN),
-        );
-    }
-    if badge == TriageBadge::WaitInTurn {
-        return (
-            "! Codex parent — wait in-turn or press [p] to park".to_string(),
-            Style::default().fg(COLOR_WARN),
-        );
-    }
-    if (badge == TriageBadge::Fail || badge == TriageBadge::Lost)
-        && let Some(err) = &w.error
-    {
-        return (format!("! {err}"), Style::default().fg(COLOR_FAIL));
-    }
-    if badge == TriageBadge::Review {
-        return (
-            format!(
-                "★ Ready for review · {} files · verify {}",
-                w.changed_files_total, w.verification_status
-            ),
-            Style::default().fg(COLOR_REVIEW),
-        );
-    }
-    if matches!(badge, TriageBadge::Run | TriageBadge::Quiet) {
+    if w.is_active_turn() {
+        let live_style = if badge == TriageBadge::Quiet {
+            Style::default().fg(COLOR_WARN)
+        } else {
+            Style::default().fg(COLOR_ACCENT)
+        };
         if let Some(act) = &w.activity {
             let text = if !act.label.is_empty() {
                 format!("▸ [{}] {}", act.stage.to_uppercase(), act.label)
             } else {
                 format!("▸ {}", act.stage)
             };
-            let style = if badge == TriageBadge::Quiet {
-                Style::default().fg(COLOR_WARN)
-            } else {
-                Style::default().fg(COLOR_ACCENT)
-            };
-            return (text, style);
-        }
-        if let Some(intent) = &w.latest_intent {
-            return (
-                format!("▸ {}", strip_inline_markdown(intent)),
-                Style::default().fg(COLOR_ACCENT),
-            );
+            return (text, live_style);
         }
         if !w.active_tools.is_empty() {
+            return (format!("▸ Running {}", w.active_tools.join(", ")), live_style);
+        }
+        if let Some(intent) = w.latest_intent.as_deref().and_then(clean_task_candidate) {
+            return (format!("▸ {intent}"), live_style);
+        }
+        if let Some(lt) = &w.last_tool {
             return (
-                format!("▸ Running {}", w.active_tools.join(", ")),
-                Style::default().fg(COLOR_ACCENT),
+                format!("▸ {}", summarize_tool_detail(&lt.tool, &lt.status, &lt.detail)),
+                live_style,
             );
         }
+        return (format!("▸ {}", w.phase), live_style);
+    }
+
+    if let Some(ask) = &w.needs_parent {
+        return (format!("? {}", ask.question), Style::default().fg(COLOR_ASK));
+    }
+    if (badge == TriageBadge::Fail || badge == TriageBadge::Lost)
+        && let Some(err) = w.best_error_summary()
+    {
+        return (format!("! {err}"), Style::default().fg(COLOR_FAIL));
+    }
+    if badge == TriageBadge::Review {
+        let f_word = if w.changed_files_total == 1 { "file" } else { "files" };
+        return (
+            format!(
+                "★ Ready for review · {} {f_word} · verify {}",
+                w.changed_files_total, w.verification_status
+            ),
+            Style::default().fg(COLOR_REVIEW),
+        );
     }
 
     // Settled / Parked / Idle: prefer clean human summary over raw tool command.
@@ -154,9 +159,10 @@ fn worker_status_subtitle(w: &WorkerRecord, badge: TriageBadge, title: &str) -> 
         return (clean, style);
     }
     if w.changed_files_total > 0 {
+        let f_word = if w.changed_files_total == 1 { "file" } else { "files" };
         return (
             format!(
-                "{} files changed · verify {}",
+                "{} {f_word} changed · verify {}",
                 w.changed_files_total, w.verification_status
             ),
             Style::default().fg(COLOR_MUTED),
@@ -165,7 +171,46 @@ fn worker_status_subtitle(w: &WorkerRecord, badge: TriageBadge, title: &str) -> 
     (w.phase.clone(), Style::default().fg(COLOR_MUTED))
 }
 
+fn status_cell_lines(w: &WorkerRecord, badge: TriageBadge, unseen: bool, now: f64) -> (Line<'static>, Line<'static>) {
+    if w.is_active_turn() {
+        let top = if badge == TriageBadge::Quiet {
+            Line::from(badge_spans(TriageBadge::Quiet, unseen))
+        } else {
+            Line::from(badge_spans(TriageBadge::Run, unseen))
+        };
+        let sub = match badge {
+            TriageBadge::Unwatched => Line::from(Span::styled(
+                "  no wait",
+                Style::default().fg(COLOR_WARN),
+            )),
+            TriageBadge::WaitInTurn => Line::from(Span::styled(
+                "  wait-turn",
+                Style::default().fg(COLOR_WARN),
+            )),
+            TriageBadge::Quiet => Line::from(Span::styled(
+                "  silent",
+                Style::default().fg(COLOR_WARN),
+            )),
+            _ if !w.watched_by.is_empty() => Line::from(Span::styled(
+                "  watched",
+                Style::default().fg(COLOR_MUTED),
+            )),
+            _ => Line::from(""),
+        };
+        return (top, sub);
+    }
+
+    let top = Line::from(badge_spans(badge, unseen));
+    let sub = if worker_is_stale_ask(w, now) {
+        Line::from(Span::styled("  stale", Style::default().fg(COLOR_MUTED)))
+    } else {
+        Line::from("")
+    };
+    (top, sub)
+}
+
 pub(super) fn render_workers_table(frame: &mut Frame, area: Rect, app: &mut App, wide: bool) {
+    app.workers_area = area;
     let focused = app.focus_pane == FocusPane::Workers;
     let border_style = if focused {
         Style::default().fg(COLOR_ACCENT)
@@ -173,11 +218,16 @@ pub(super) fn render_workers_table(frame: &mut Frame, area: Rect, app: &mut App,
         Style::default().fg(COLOR_MUTED)
     };
 
-    let title = format!(
-        " Workers ({}{}) ",
-        app.visible_workers.len(),
-        if app.triage_only { " needing attention" } else { "" }
-    );
+    let mode_tag = if app.list_mode == ListMode::Archived {
+        " archived"
+    } else if app.triage_only {
+        " needing attention"
+    } else if app.list_mode == ListMode::Active {
+        " active"
+    } else {
+        ""
+    };
+    let title = format!(" Workers ({}{}) ", app.visible_workers.len(), mode_tag);
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -186,10 +236,18 @@ pub(super) fn render_workers_table(frame: &mut Frame, area: Rect, app: &mut App,
         .border_style(border_style);
 
     if app.display_rows.is_empty() {
-        let msg = if app.triage_only {
+        let msg = if app.list_mode == ListMode::Archived {
+            "No archived agents yet. Press [z] on any settled agent (or [Z] for all old ones) to archive it."
+                .to_string()
+        } else if app.list_mode == ListMode::Active {
+            format!(
+                "No agents currently running ({} total in scope). Click [All] or press [r].",
+                app.counts.total
+            )
+        } else if app.triage_only {
             format!(
                 "All clear — {} running, {} idle, {} done. Press [t] to show all.",
-                app.counts.running, app.counts.idle, app.counts.done
+                app.counts.active_total, app.counts.idle, app.counts.done
             )
         } else if !app.search_query.is_empty() {
             format!("No agents matching '/{}'. Press Esc to clear.", app.search_query)
@@ -212,32 +270,23 @@ pub(super) fn render_workers_table(frame: &mut Frame, area: Rect, app: &mut App,
     let compact_cols = inner_w < 58;
     let roomier = inner_w >= 96;
 
-    let has_long_badge = app.display_rows.iter().any(|r| {
-        matches!(
-            r,
-            DisplayRow::Worker {
-                badge: TriageBadge::Unwatched | TriageBadge::WaitInTurn,
-                ..
-            }
-        )
-    });
-    let status_col_w: u16 = if has_long_badge { 11 } else { 9 };
+    let status_col_w: u16 = if compact_cols { 9 } else { 10 };
     let agent_col_w: u16 = if compact_cols {
         13
     } else if roomier {
-        20
+        21
     } else if show_runtime_col {
         18
     } else {
         16
     };
-    let launched_col_w: u16 = if show_runtime_col { 12 } else { 9 };
+    let updated_col_w: u16 = if show_runtime_col { 12 } else { 9 };
     let runtime_col_w: u16 = if show_runtime_col { 10 } else { 0 };
     let col_spacing: u16 = if roomier { 2 } else { 1 };
     let num_cols: u16 = if show_runtime_col { 5 } else { 4 };
     let fixed_w = status_col_w
         + agent_col_w
-        + launched_col_w
+        + updated_col_w
         + runtime_col_w
         + 2 // highlight symbol
         + col_spacing * (num_cols - 1);
@@ -247,11 +296,11 @@ pub(super) fn render_workers_table(frame: &mut Frame, area: Rect, app: &mut App,
         .fg(COLOR_MUTED)
         .add_modifier(Modifier::BOLD);
     let header_cells: Vec<&str> = if show_runtime_col {
-        vec!["STATUS", "AGENT", "TASK & STATUS", "LAUNCHED", "RUNTIME"]
+        vec!["STATUS", "AGENT", "TASK & STATUS", "UPDATED", "RUNTIME"]
     } else if compact_cols {
-        vec!["STATUS", "AGENT", "TASK", "AGO"]
+        vec!["STATUS", "AGENT", "TASK", "UPD"]
     } else {
-        vec!["STATUS", "AGENT", "TASK & STATUS", "LAUNCHED"]
+        vec!["STATUS", "AGENT", "TASK & STATUS", "UPDATED"]
     };
     let header = Row::new(
         header_cells
@@ -261,7 +310,6 @@ pub(super) fn render_workers_table(frame: &mut Frame, area: Rect, app: &mut App,
     .height(1)
     .bottom_margin(1);
 
-    // Use airy 2-line rows with breathing room whenever vertical height permits.
     let two_line_rows = area.height >= 14;
     let row_gap: u16 = if two_line_rows && area.height >= 20 { 1 } else { 0 };
     let now = app.snapshot.refreshed_at;
@@ -298,26 +346,53 @@ pub(super) fn render_workers_table(frame: &mut Frame, area: Rect, app: &mut App,
                 let (subtitle, sub_style) = worker_status_subtitle(w, *badge, &title);
                 let text_style = row_text_style(*badge);
 
-                let launch_age = w.started_at.map(|s| (now - s).max(0.0));
-                let launched_clock = format_launched_at(w.started_at, now);
-                let launched_ago = format_relative_ago(launch_age.or(w.last_event_age_s));
-                let run_dur = format_duration(w.turn_elapsed_s.or(w.elapsed_s));
+                let upd_ts = worker_last_updated(w);
+                let upd_age = upd_ts.map(|ts| (now - ts).max(0.0)).or(w.last_event_age_s);
+                let upd_ago = format_relative_ago(upd_age);
+                let upd_clock = format_launched_at(upd_ts, now);
+                let upd_ago_style = match upd_age {
+                    Some(a) if a < 120.0 => Style::default()
+                        .fg(COLOR_ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                    Some(a) if a < 3600.0 => Style::default().fg(COLOR_BRIGHT),
+                    _ => Style::default().fg(COLOR_MUTED),
+                };
 
-                let status_line1 = Line::from(badge_spans(*badge, *unseen));
+                // Live ticking runtime for active turns.
+                let live_run_secs = if w.is_active_turn() {
+                    w.turn_started_at
+                        .or(w.started_at)
+                        .map(|s| (now - s).max(0.0))
+                        .or(w.turn_elapsed_s)
+                        .or(w.elapsed_s)
+                } else {
+                    w.turn_elapsed_s.or(w.elapsed_s)
+                };
+                let run_dur = format_duration(live_run_secs);
+
+                let (status_top, status_sub) = status_cell_lines(w, *badge, *unseen, now);
 
                 if two_line_rows {
-                    let ws = w
+                    let repo = w
                         .workspace
                         .as_deref()
-                        .map(short_workspace)
+                        .map(short_repo_name)
                         .unwrap_or_default();
-                    let agent_sub = if !ws.is_empty() {
-                        format!("{ws} · {}", w.engine)
-                    } else {
-                        w.engine.clone()
+                    let sess_part = w
+                        .parent_session
+                        .as_deref()
+                        .map(short_session_tag)
+                        .filter(|s| !s.is_empty());
+                    let agent_sub = match (repo.is_empty(), sess_part) {
+                        (false, Some(s)) if agent_col_w >= 18 => {
+                            format!("{repo}·{}·{s}", w.engine)
+                        }
+                        (false, _) => format!("{repo} · {}", w.engine),
+                        (true, Some(s)) => format!("{} · {s}", w.engine),
+                        (true, None) => w.engine.clone(),
                     };
 
-                    let status_cell = Cell::from(Text::from(vec![status_line1, Line::from("")]));
+                    let status_cell = Cell::from(Text::from(vec![status_top, status_sub]));
                     let agent_cell = Cell::from(Text::from(vec![
                         Line::from(Span::styled(name, text_style)),
                         Line::from(Span::styled(
@@ -326,10 +401,7 @@ pub(super) fn render_workers_table(frame: &mut Frame, area: Rect, app: &mut App,
                         )),
                     ]));
                     let task_cell = Cell::from(Text::from(vec![
-                        Line::from(Span::styled(
-                            clip_width(&title, task_budget),
-                            text_style,
-                        )),
+                        Line::from(Span::styled(clip_width(&title, task_budget), text_style)),
                         Line::from(Span::styled(
                             clip_width(&subtitle, task_budget),
                             sub_style,
@@ -338,30 +410,20 @@ pub(super) fn render_workers_table(frame: &mut Frame, area: Rect, app: &mut App,
 
                     let mut cells = vec![status_cell, agent_cell, task_cell];
                     if show_runtime_col {
-                        let launched_cell = Cell::from(Text::from(vec![
+                        let updated_cell = Cell::from(Text::from(vec![
+                            Line::from(Span::styled(upd_ago, upd_ago_style)),
                             Line::from(Span::styled(
-                                launched_clock,
-                                Style::default().fg(COLOR_NOMINAL),
-                            )),
-                            Line::from(Span::styled(
-                                launched_ago,
+                                upd_clock,
                                 Style::default().fg(COLOR_MUTED),
                             )),
                         ]));
-                        let (rt_top, rt_top_style, rt_bot, rt_bot_style) = if w.is_active_turn() {
-                            let seen = format_relative_ago(w.last_event_age_s);
-                            let bot_s = if *badge == TriageBadge::Quiet {
-                                Style::default().fg(COLOR_WARN)
-                            } else {
-                                Style::default().fg(COLOR_MUTED)
-                            };
+                        let (rt_top, rt_top_style, rt_bot) = if w.is_active_turn() {
                             (
                                 format!("▸ {run_dur}"),
                                 Style::default()
                                     .fg(COLOR_ACCENT)
                                     .add_modifier(Modifier::BOLD),
-                                seen,
-                                bot_s,
+                                format!("turn {}", w.turn),
                             )
                         } else {
                             let meta = if w.changed_files_total > 0 {
@@ -369,27 +431,22 @@ pub(super) fn render_workers_table(frame: &mut Frame, area: Rect, app: &mut App,
                             } else {
                                 format!("turn {}", w.turn)
                             };
-                            (
-                                run_dur,
-                                Style::default().fg(COLOR_NOMINAL),
-                                meta,
-                                Style::default().fg(COLOR_MUTED),
-                            )
+                            (run_dur, Style::default().fg(COLOR_NOMINAL), meta)
                         };
                         let runtime_cell = Cell::from(Text::from(vec![
                             Line::from(Span::styled(rt_top, rt_top_style)),
-                            Line::from(Span::styled(rt_bot, rt_bot_style)),
+                            Line::from(Span::styled(rt_bot, Style::default().fg(COLOR_MUTED))),
                         ]));
-                        cells.push(launched_cell);
+                        cells.push(updated_cell);
                         cells.push(runtime_cell);
                     } else {
                         let compact_time_cell = Cell::from(Text::from(vec![
                             Line::from(Span::styled(
-                                clip_width(&launched_ago, launched_col_w as usize),
-                                Style::default().fg(COLOR_NOMINAL),
+                                clip_width(&upd_ago, updated_col_w as usize),
+                                upd_ago_style,
                             )),
                             Line::from(Span::styled(
-                                clip_width(&format!("ran {run_dur}"), launched_col_w as usize),
+                                clip_width(&run_dur, updated_col_w as usize),
                                 Style::default().fg(COLOR_MUTED),
                             )),
                         ]));
@@ -398,17 +455,17 @@ pub(super) fn render_workers_table(frame: &mut Frame, area: Rect, app: &mut App,
 
                     Row::new(cells).height(2).bottom_margin(row_gap)
                 } else {
-                    let single_task = if badge.is_anomalous() {
+                    let single_task = if badge.is_anomalous() || w.is_active_turn() {
                         format!("{title} — {subtitle}")
                     } else {
                         title
                     };
                     let mut cells = vec![
-                        Cell::from(status_line1),
+                        Cell::from(status_top),
                         Cell::from(name).style(text_style),
                         Cell::from(clip_width(&single_task, task_budget)).style(text_style),
-                        Cell::from(clip_width(&launched_ago, launched_col_w as usize))
-                            .style(Style::default().fg(COLOR_MUTED)),
+                        Cell::from(clip_width(&upd_ago, updated_col_w as usize))
+                            .style(upd_ago_style),
                     ];
                     if show_runtime_col {
                         cells.push(Cell::from(run_dur).style(Style::default().fg(COLOR_MUTED)));
@@ -423,7 +480,7 @@ pub(super) fn render_workers_table(frame: &mut Frame, area: Rect, app: &mut App,
         Constraint::Length(status_col_w),
         Constraint::Length(agent_col_w),
         Constraint::Fill(1),
-        Constraint::Length(launched_col_w),
+        Constraint::Length(updated_col_w),
     ];
     if show_runtime_col {
         widths.push(Constraint::Length(runtime_col_w));
@@ -442,6 +499,47 @@ pub(super) fn render_workers_table(frame: &mut Frame, area: Rect, app: &mut App,
         ));
 
     frame.render_stateful_widget(table, area, &mut app.table_state);
+
+    // Register clickable row regions using the rendered table scroll offset.
+    let inner_top = area.y.saturating_add(1); // top border
+    let rows_start_y = inner_top.saturating_add(2); // header(1) + bottom_margin(1)
+    let inner_bottom = area.y.saturating_add(area.height).saturating_sub(1);
+    let offset = app.table_state.offset();
+    let mut y = rows_start_y;
+    for (row_idx, row) in app.display_rows.iter().enumerate().skip(offset) {
+        if y >= inner_bottom {
+            break;
+        }
+        let h: u16 = match row {
+            DisplayRow::GroupHeader { .. } => 1,
+            DisplayRow::Worker { .. } => {
+                if two_line_rows {
+                    2
+                } else {
+                    1
+                }
+            }
+        };
+        if matches!(row, DisplayRow::Worker { .. }) {
+            let click_h = h.min(inner_bottom.saturating_sub(y));
+            if click_h > 0 {
+                app.click_regions.push(ClickRegion {
+                    rect: Rect::new(
+                        area.x.saturating_add(1),
+                        y,
+                        area.width.saturating_sub(2),
+                        click_h,
+                    ),
+                    action: ClickAction::SelectWorkerRow(row_idx),
+                });
+            }
+        }
+        let stride = match row {
+            DisplayRow::GroupHeader { .. } => 1,
+            DisplayRow::Worker { .. } => h.saturating_add(if two_line_rows { row_gap } else { 0 }),
+        };
+        y = y.saturating_add(stride);
+    }
 }
 
 #[cfg(test)]

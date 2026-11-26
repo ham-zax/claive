@@ -5,10 +5,12 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph, Tabs, Wrap};
 use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
     classify_worker, format_duration, format_launched_at, format_relative_ago, format_tokens,
-    is_review_pending, short_workspace, App, FocusPane, InspectorTab, TriageBadge,
+    is_review_pending, short_workspace, worker_last_updated, App, ClickAction, ClickRegion,
+    FocusPane, InspectorTab, TriageBadge,
 };
 use crate::commands::LogKind;
 use crate::format::{
@@ -19,8 +21,8 @@ use crate::store::WorkerRecord;
 
 use super::activity::build_steps_lines;
 use super::{
-    badge_spans, kv_line, COLOR_ACCENT, COLOR_ASK, COLOR_BRIGHT, COLOR_FAIL, COLOR_MUTED,
-    COLOR_NOMINAL, COLOR_REVIEW, COLOR_WARN,
+    badge_spans, kv_line, push_chip, COLOR_ACCENT, COLOR_ASK, COLOR_BRIGHT, COLOR_FAIL,
+    COLOR_MUTED, COLOR_NOMINAL, COLOR_REVIEW, COLOR_WARN,
 };
 
 pub(super) fn render_briefing_pane(frame: &mut Frame, area: Rect, app: &App) {
@@ -49,7 +51,8 @@ pub(super) fn render_briefing_pane(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-pub(super) fn render_inspector(frame: &mut Frame, area: Rect, app: &App) {
+pub(super) fn render_inspector(frame: &mut Frame, area: Rect, app: &mut App) {
+    app.inspector_area = area;
     let focused = app.focus_pane == FocusPane::Inspector;
     let border_style = if focused {
         Style::default().fg(COLOR_ACCENT)
@@ -98,6 +101,48 @@ pub(super) fn render_inspector(frame: &mut Frame, area: Rect, app: &App) {
         .divider("│");
     frame.render_widget(tabs, chunks[0]);
 
+    // Register mouse click regions for each Inspector tab (Tabs renders ` label ` + `│`).
+    let mut tab_x = chunks[0].x;
+    let tab_max_x = chunks[0].x.saturating_add(chunks[0].width);
+    for (idx, tab) in InspectorTab::ALL.iter().enumerate() {
+        let w = (tab.label().width() as u16).saturating_add(2);
+        if tab_x >= tab_max_x {
+            break;
+        }
+        let clamped_w = w.min(tab_max_x.saturating_sub(tab_x));
+        app.click_regions.push(ClickRegion {
+            rect: Rect::new(tab_x, chunks[0].y, clamped_w, 1),
+            action: ClickAction::SelectInspectorTab(*tab),
+        });
+        tab_x = tab_x.saturating_add(w);
+        if idx + 1 < InspectorTab::ALL.len() {
+            tab_x = tab_x.saturating_add(1); // divider
+        }
+    }
+
+    if app.inspector_tab == InspectorTab::Logs {
+        if app.selected_worker().is_none() {
+            let empty = Paragraph::new("Select a worker to inspect.")
+                .style(Style::default().fg(COLOR_MUTED));
+            frame.render_widget(empty, chunks[1]);
+            return;
+        }
+        let log_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .split(chunks[1]);
+        render_log_selector_bar(frame, log_chunks[0], app);
+        let Some(w) = app.selected_worker() else {
+            return;
+        };
+        let body_lines = build_logs_lines(app, w);
+        let body = Paragraph::new(body_lines)
+            .wrap(Wrap { trim: false })
+            .scroll((app.inspector_scroll, 0));
+        frame.render_widget(body, log_chunks[1]);
+        return;
+    }
+
     let Some(w) = app.selected_worker() else {
         let empty = Paragraph::new("Select a worker to inspect.")
             .style(Style::default().fg(COLOR_MUTED));
@@ -111,13 +156,43 @@ pub(super) fn render_inspector(frame: &mut Frame, area: Rect, app: &App) {
         InspectorTab::Overview => (build_overview_lines(app, w, body_width), app.inspector_scroll),
         InspectorTab::Evidence => (build_evidence_lines(w), app.inspector_scroll),
         InspectorTab::Steps => build_steps_lines(app, w, body_width, body_height),
-        InspectorTab::Logs => (build_logs_lines(app, w), app.inspector_scroll),
+        InspectorTab::Logs => unreachable!(),
     };
 
     let body = Paragraph::new(body_lines)
         .wrap(Wrap { trim: false })
         .scroll((effective_scroll, 0));
     frame.render_widget(body, chunks[1]);
+}
+
+fn render_log_selector_bar(frame: &mut Frame, area: Rect, app: &mut App) {
+    let mut spans = Vec::new();
+    let mut cx = area.x;
+    let max_x = area.x.saturating_add(area.width);
+    for kind in LogKind::ALL {
+        let active = app.log_kind == kind;
+        let accent = match kind {
+            LogKind::Stderr => COLOR_FAIL,
+            LogKind::Prompt => COLOR_ACCENT,
+            _ => COLOR_NOMINAL,
+        };
+        push_chip(
+            &mut spans,
+            &mut cx,
+            area.y,
+            max_x,
+            kind.short_label().to_string(),
+            active,
+            accent,
+            ClickAction::SelectLogKind(kind),
+            &mut app.click_regions,
+        );
+    }
+    let hint = " [L] cycle · [P] prompt";
+    if cx.saturating_add(hint.width() as u16) <= max_x {
+        spans.push(Span::styled(hint, Style::default().fg(COLOR_MUTED)));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn build_overview_lines(app: &App, w: &WorkerRecord, body_width: usize) -> Vec<Line<'static>> {
@@ -152,22 +227,44 @@ fn build_overview_lines(app: &App, w: &WorkerRecord, body_width: usize) -> Vec<L
     lines.push(Line::from(id_spans));
 
     let now = app.snapshot.refreshed_at;
+    let upd_ts = worker_last_updated(w);
+    let upd_ago = format_relative_ago(upd_ts.map(|t| (now - t).max(0.0)).or(w.last_event_age_s));
+    let upd_clock = format_launched_at(upd_ts, now);
     let launched_str = format_launched_at(w.started_at, now);
-    let launched_ago = format_relative_ago(w.started_at.map(|s| (now - s).max(0.0)));
-    let run_str = format_duration(w.turn_elapsed_s.or(w.elapsed_s));
-    let timing_line = if w.is_active_turn() {
-        format!(
-            "Launched {launched_str} ({launched_ago}) · Running {run_str} · Last event {} · Turn {}",
-            format_relative_ago(w.last_event_age_s),
-            w.turn
-        )
+    let live_run_secs = if w.is_active_turn() {
+        w.turn_started_at
+            .or(w.started_at)
+            .map(|s| (now - s).max(0.0))
+            .or(w.turn_elapsed_s)
+            .or(w.elapsed_s)
     } else {
-        format!("Launched {launched_str} ({launched_ago}) · Ran {run_str} · Turn {}", w.turn)
+        w.turn_elapsed_s.or(w.elapsed_s)
+    };
+    let run_str = format_duration(live_run_secs);
+    let timing_line = if w.is_active_turn() {
+        format!("Updated {upd_ago} ({upd_clock}) · Launched {launched_str} · Running {run_str} · Turn {}", w.turn)
+    } else {
+        format!("Updated {upd_ago} ({upd_clock}) · Launched {launched_str} · Ran {run_str} · Turn {}", w.turn)
     };
     lines.push(Line::from(Span::styled(
         timing_line,
         Style::default().fg(COLOR_MUTED),
     )));
+
+    if let Some(sess) = &w.parent_session {
+        let watch_note = if !w.watched_by.is_empty() {
+            format!(" · watched by {}", w.watched_by.join(", "))
+        } else if w.is_active_turn() && !w.parked {
+            " · unwatched".to_string()
+        } else {
+            String::new()
+        };
+        lines.push(kv_line(
+            "Session",
+            format!("{sess}{watch_note}"),
+            Style::default().fg(COLOR_NOMINAL),
+        ));
+    }
 
     // 2. Blocker / Attention banner (ASK, UNWATCHED, WAIT-IN-TURN, Error, Drain).
     if let Some(ask) = &w.needs_parent {
@@ -205,36 +302,69 @@ fn build_overview_lines(app: &App, w: &WorkerRecord, body_width: usize) -> Vec<L
             Style::default().fg(COLOR_WARN),
         )));
     }
-    if let Some(err) = &w.error {
+    if let Some(best_err) = w.best_error_summary() {
         lines.push(Line::from(Span::styled(
             format!(
-                "[!] ERROR ({}): {err}",
+                "[!] ERROR ({}): {best_err}",
                 w.failure_kind.as_deref().unwrap_or("error")
             ),
             Style::default().fg(COLOR_FAIL).add_modifier(Modifier::BOLD),
         )));
+        if let Some(raw_err) = &w.error
+            && raw_err != &best_err
+        {
+            lines.push(Line::from(Span::styled(
+                format!("    ({raw_err} · [4] stderr)"),
+                Style::default().fg(COLOR_MUTED),
+            )));
+        }
     }
 
-    // 3. Mission.
+    // 3. Mission & Initial Prompt snippet.
     let mission_text = w
         .mission
         .as_deref()
         .filter(|s| !s.is_empty())
-        .or_else(|| {
-            (!w.label.is_empty() && !w.label.eq_ignore_ascii_case("prompt-input"))
-                .then_some(w.label.as_str())
-        })
-        .or(w.prompt_preview.as_deref());
+        .or_else(|| (!w.is_alias_like_label()).then_some(w.label.as_str()))
+        .or(w.prompt_preview.as_deref())
+        .or_else(|| (!w.label.is_empty()).then_some(w.label.as_str()));
     if let Some(m) = mission_text {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Mission",
-            Style::default().fg(COLOR_MUTED).add_modifier(Modifier::BOLD),
-        )));
+        lines.push(Line::from(vec![
+            Span::styled(
+                "Mission",
+                Style::default().fg(COLOR_MUTED).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ([P] full prompt)", Style::default().fg(COLOR_MUTED)),
+        ]));
         lines.push(Line::from(Span::styled(
             strip_inline_markdown(m),
             Style::default().fg(COLOR_BRIGHT),
         )));
+    }
+    // Show a compact 3-line prompt preview when the prompt has additional detail beyond Mission.
+    let mut prompt_lines: Vec<&str> = Vec::new();
+    if let Some(prev) = w.prompt_preview.as_deref()
+        && mission_text != Some(prev)
+    {
+        prompt_lines.push(prev);
+    }
+    for ex in &w.prompt_excerpt {
+        if prompt_lines.len() >= 3 {
+            break;
+        }
+        if mission_text != Some(ex.as_str()) {
+            prompt_lines.push(ex.as_str());
+        }
+    }
+    if !prompt_lines.is_empty() {
+        let cap = body_width.saturating_sub(2).max(32);
+        for pl in prompt_lines {
+            lines.push(Line::from(Span::styled(
+                clip_width(&strip_inline_markdown(pl), cap),
+                Style::default().fg(COLOR_NOMINAL),
+            )));
+        }
     }
 
     // 4. Now & Area.
@@ -286,22 +416,31 @@ fn build_overview_lines(app: &App, w: &WorkerRecord, body_width: usize) -> Vec<L
         ));
     }
     if let Some(chk) = &w.last_check {
-        let chk_style = if chk.status == "passed" {
+        let passed = matches!(chk.status.to_ascii_lowercase().as_str(), "pass" | "passed" | "ok");
+        let chk_style = if passed {
             Style::default().fg(COLOR_REVIEW)
         } else {
             Style::default().fg(COLOR_FAIL)
         };
-        let detail = if !chk.summary.is_empty() {
-            format!("{} — {}", chk.status, chk.summary)
+        let icon = if passed { "✓" } else { "✖" };
+        let sum_trimmed = chk.summary.trim();
+        let cmd_trimmed = chk.command.trim();
+        let redundant = sum_trimmed.eq_ignore_ascii_case(&chk.status)
+            || (passed && matches!(sum_trimmed.to_ascii_lowercase().as_str(), "pass" | "passed" | "ok"));
+        let detail = if !sum_trimmed.is_empty() && !redundant {
+            format!("{icon} {sum_trimmed}")
+        } else if !cmd_trimmed.is_empty() && !cmd_trimmed.eq_ignore_ascii_case(&chk.status) {
+            format!("{icon} {} ({cmd_trimmed})", if passed { "passed" } else { chk.status.as_str() })
         } else {
-            format!("{} — {}", chk.status, chk.command)
+            format!("{icon} {}", if passed { "passed" } else { chk.status.as_str() })
         };
         lines.push(kv_line("Last check", detail, chk_style));
     }
+    let f_word = if w.changed_files_total == 1 { "file" } else { "files" };
     lines.push(kv_line(
         "Workspace",
         format!(
-            "{} files · verify={} · accept={}{}",
+            "{} {f_word} · verify={} · accept={}{}",
             w.changed_files_total,
             w.verification_status,
             w.acceptance_status,
@@ -398,11 +537,43 @@ fn build_overview_lines(app: &App, w: &WorkerRecord, body_width: usize) -> Vec<L
         }
     }
 
-    if let Some(cache) = w.native_cache_read_tokens {
+    let mut usage_parts: Vec<String> = Vec::new();
+    if let Some(inp) = w.input_tokens
+        && inp > 0
+    {
+        usage_parts.push(format!("in {}", format_tokens(inp)));
+    }
+    if let Some(out) = w.output_tokens
+        && out > 0
+    {
+        usage_parts.push(format!("out {}", format_tokens(out)));
+    }
+    if let Some(rsn) = w.reasoning_tokens
+        && rsn > 0
+    {
+        usage_parts.push(format!("think {}", format_tokens(rsn)));
+    }
+    if let Some(cache) = w.native_cache_read_tokens
+        && (cache > 0 || !usage_parts.is_empty() || w.step_count > 0)
+    {
+        let pct = w
+            .input_tokens
+            .filter(|&i| i > 0)
+            .map(|i| format!(" ({}%)", ((cache * 100) / (i + cache)).min(100)))
+            .unwrap_or_default();
+        usage_parts.push(format!("cache {}{pct}", format_tokens(cache)));
+    }
+    if let Some(ctx) = w.context_tokens
+        && ctx > 0
+    {
+        usage_parts.push(format!("ctx {}", format_tokens(ctx)));
+    }
+    if !usage_parts.is_empty() || w.step_count > 0 {
+        usage_parts.push(format!("{} steps", w.step_count));
         lines.push(Line::from(""));
         lines.push(kv_line(
-            "Cache read",
-            format!("{} tokens · {} steps", format_tokens(cache), w.step_count),
+            "Usage",
+            usage_parts.join(" · "),
             Style::default().fg(COLOR_MUTED),
         ));
     }
@@ -460,6 +631,18 @@ fn build_evidence_lines(w: &WorkerRecord) -> Vec<Line<'static>> {
 
     if let Some(wt) = &w.retained_worktree {
         lines.push(kv_line("Worktree", wt.clone(), Style::default().fg(COLOR_NOMINAL)));
+        lines.push(kv_line(
+            "Shortcuts",
+            "[W] copy cd worktree · [D] copy git diff",
+            Style::default().fg(COLOR_ACCENT),
+        ));
+    } else if let Some(ws) = w.actual_workspace.as_deref().or(w.workspace.as_deref()) {
+        lines.push(kv_line("Workspace", ws.to_string(), Style::default().fg(COLOR_NOMINAL)));
+        lines.push(kv_line(
+            "Shortcuts",
+            "[W] copy cd workspace · [D] copy git diff",
+            Style::default().fg(COLOR_ACCENT),
+        ));
     }
     if let Some(branch) = &w.worktree_branch {
         lines.push(kv_line("Branch", branch.clone(), Style::default().fg(COLOR_NOMINAL)));
@@ -470,6 +653,40 @@ fn build_evidence_lines(w: &WorkerRecord) -> Vec<Line<'static>> {
             base.chars().take(12).collect::<String>(),
             Style::default().fg(COLOR_MUTED),
         ));
+    }
+
+    if w.delta_added.is_some() || w.delta_deleted.is_some() || w.delta_untracked.is_some() {
+        let mut dparts = Vec::new();
+        if let Some(a) = w.delta_added {
+            dparts.push(format!("+{a} added"));
+        }
+        if let Some(d) = w.delta_deleted {
+            dparts.push(format!("-{d} deleted"));
+        }
+        if let Some(u) = w.delta_untracked {
+            dparts.push(format!("{u} untracked"));
+        }
+        lines.push(kv_line("Delta", dparts.join(" · "), Style::default().fg(COLOR_NOMINAL)));
+    }
+
+    if !w.owned_paths.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("Owned paths ({}):", w.owned_paths.len()),
+            Style::default().fg(COLOR_MUTED).add_modifier(Modifier::BOLD),
+        )));
+        for pat in w.owned_paths.iter().take(12) {
+            lines.push(Line::from(Span::styled(
+                format!("  {pat}"),
+                Style::default().fg(COLOR_MUTED),
+            )));
+        }
+        if w.owned_paths.len() > 12 {
+            lines.push(Line::from(Span::styled(
+                format!("  ... +{} more", w.owned_paths.len() - 12),
+                Style::default().fg(COLOR_MUTED),
+            )));
+        }
     }
 
     lines.push(Line::from(""));
@@ -493,10 +710,20 @@ fn build_evidence_lines(w: &WorkerRecord) -> Vec<Line<'static>> {
         )));
     } else {
         for path in &w.changed_files {
-            lines.push(Line::from(Span::styled(
-                format!("  {path}"),
-                Style::default().fg(COLOR_NOMINAL),
-            )));
+            if w.is_path_in_owned_scope(path) {
+                lines.push(Line::from(Span::styled(
+                    format!("  {path}"),
+                    Style::default().fg(COLOR_NOMINAL),
+                )));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {path}"), Style::default().fg(COLOR_WARN)),
+                    Span::styled(
+                        "  [OUT OF SCOPE]",
+                        Style::default().fg(COLOR_WARN).add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            }
         }
         if w.changed_files_total > w.changed_files.len() {
             lines.push(Line::from(Span::styled(
@@ -509,26 +736,39 @@ fn build_evidence_lines(w: &WorkerRecord) -> Vec<Line<'static>> {
         }
     }
 
+    if let Some(ds) = &w.diff_stat {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Diff stat:",
+            Style::default().fg(COLOR_MUTED).add_modifier(Modifier::BOLD),
+        )));
+        for line in ds.lines().take(12) {
+            lines.push(Line::from(Span::styled(
+                format!("  {line}"),
+                Style::default().fg(COLOR_NOMINAL),
+            )));
+        }
+    }
+
     lines
 }
 
 fn build_logs_lines(app: &App, w: &WorkerRecord) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(Span::styled(
-        format!(
-            "View: {}  ([L] cycle Summary/Prompt/Stderr/Supervisor · [Tab] focus to scroll)",
-            app.log_kind.label()
-        ),
-        Style::default().fg(COLOR_ACCENT),
-    ))];
+    let mut lines = Vec::new();
 
     if let Some(log) = app.log_cache.get(&(w.id.clone(), app.log_kind)) {
         if log.truncated {
+            let note = if app.log_kind == LogKind::Prompt {
+                "(showing bounded head -- first 64 KiB)"
+            } else {
+                "(showing bounded tail -- last 64 KiB)"
+            };
             lines.push(Line::from(Span::styled(
-                "(showing bounded tail -- last 64 KiB)",
+                note,
                 Style::default().fg(COLOR_MUTED),
             )));
+            lines.push(Line::from(""));
         }
-        lines.push(Line::from(""));
         if log.content.is_empty() {
             lines.push(Line::from(Span::styled(
                 "(empty or file does not exist yet)",
@@ -554,7 +794,7 @@ fn build_logs_lines(app: &App, w: &WorkerRecord) -> Vec<Line<'static>> {
         }
     } else {
         lines.push(Line::from(Span::styled(
-            "Loading bounded log tail...",
+            "Loading bounded log...",
             Style::default().fg(COLOR_MUTED),
         )));
     }

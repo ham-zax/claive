@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+};
+use ratatui::crossterm::execute;
 
 use claive_tui::app::{App, AppConfig, KeyOutcome};
 use claive_tui::commands::{resolve_claive_bin, MutationLane, MutationRequest, ReadLane};
@@ -130,8 +133,22 @@ fn main() -> ExitCode {
         app.apply_snapshot(initial);
     }
     let in_tmux = env::var_os("TMUX").is_some();
+    let enable_mouse = !app.config.compact;
+
+    struct MouseGuard(bool);
+    impl Drop for MouseGuard {
+        fn drop(&mut self) {
+            if self.0 {
+                let _ = execute!(io::stdout(), DisableMouseCapture);
+            }
+        }
+    }
 
     let result = ratatui::run(|terminal| -> io::Result<()> {
+        if enable_mouse {
+            let _ = execute!(io::stdout(), EnableMouseCapture);
+        }
+        let _mouse_guard = MouseGuard(enable_mouse);
         let mut dirty = true;
         let mut last_tick = Instant::now();
         terminal.clear()?;
@@ -170,6 +187,7 @@ fn main() -> ExitCode {
 
             if last_tick.elapsed() >= Duration::from_secs(1) {
                 last_tick = Instant::now();
+                app.tick_clock();
                 dirty = true;
             }
 
@@ -183,6 +201,11 @@ fn main() -> ExitCode {
                     Event::Resize(_, _) => {
                         terminal.clear()?;
                         dirty = true;
+                    }
+                    Event::Mouse(mouse) if enable_mouse => {
+                        if app.handle_mouse(mouse) {
+                            dirty = true;
+                        }
                     }
                     Event::Key(key)
                         if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>

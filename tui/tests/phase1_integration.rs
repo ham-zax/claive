@@ -433,6 +433,8 @@ fn triage_priority_costimulated_quiet_selection_stability_and_test_backend_views
 
     let snap = load_snapshot(&root, now);
     let mut app = make_app(root.clone(), false, false, None);
+    // Switch to Priority sort mode to verify strict triage priority ordering.
+    app.sort_mode = claive_tui::app::SortMode::Priority;
     app.apply_snapshot(snap);
 
     let ordered_badges: Vec<(&str, TriageBadge)> = app
@@ -483,7 +485,7 @@ fn triage_priority_costimulated_quiet_selection_stability_and_test_backend_views
     let wide_txt = buffer_text(&wide_term);
     assert!(wide_txt.contains("CLAIVE"));
     assert!(wide_txt.contains("@parser"));
-    assert!(wide_txt.contains("UNWATCHED"));
+    assert!(wide_txt.contains("no wait") || wide_txt.contains("UNWATCHED"));
     assert!(wide_txt.contains("Drawer:"));
 
     // 2. Help modal
@@ -721,7 +723,7 @@ fn slices_2_3_4_briefing_structured_activity_wide_split_and_prompt_log() {
     let mut term = Terminal::new(TestBackend::new(160, 40)).unwrap();
     term.draw(|f| ui::render(f, &mut app)).unwrap();
     let txt = buffer_text(&term);
-    assert!(txt.contains("TASK") && (txt.contains("LAUNCHED") || txt.contains("AGO")));
+    assert!(txt.contains("TASK") && (txt.contains("UPDATED") || txt.contains("UPD")));
     assert!(txt.contains("Briefing:"));
     let header_line = txt.lines().find(|l| l.contains("Briefing:")).unwrap();
     assert!(
@@ -731,12 +733,118 @@ fn slices_2_3_4_briefing_structured_activity_wide_split_and_prompt_log() {
     assert!(txt.contains("37 passed"));
     assert!(txt.contains("Finished ui.rs update"));
 
-    // Standard 2-column wide layout (160x40 on Briefing tab) shows explicit LAUNCHED & RUNTIME columns.
+    // Standard 2-column wide layout (160x40 on Briefing tab) shows explicit UPDATED & RUNTIME columns.
     app.inspector_tab = InspectorTab::Overview;
     term.draw(|f| ui::render(f, &mut app)).unwrap();
     let wide_txt = buffer_text(&term);
-    assert!(wide_txt.contains("LAUNCHED") && wide_txt.contains("RUNTIME"));
+    assert!(wide_txt.contains("UPDATED") && wide_txt.contains("RUNTIME"));
     assert!(wide_txt.contains("TASK & STATUS"));
+}
+
+#[test]
+fn forum_sort_live_activity_repo_click_and_archive_dx() {
+    use claive_tui::app::{ClickAction, ListMode, WorkspaceScope};
+    use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().to_path_buf();
+    let my_pid = std::process::id() as i32;
+    let my_ident = pid_identity(my_pid).unwrap();
+    let now = now_unix_secs();
+
+    // 1. Stale ASK from 2 days ago in repo/satori
+    let id_stale_ask = "111111111111";
+    write_json(
+        &root.join(id_stale_ask).join("state.json"),
+        &serde_json::json!({
+            "id": id_stale_ask, "label": "Old question", "engine": "codex",
+            "workspace": "/home/user/repo/satori", "parent_session": "codex-old",
+            "status": "idle", "phase": "waiting", "turn": 1,
+            "started_at": now - 172_800.0, "last_activity": now - 172_800.0,
+            "needs_parent": {"kind": "needs_decision", "question": "Old question from 2 days ago?"},
+        }),
+    );
+
+    // 2. Live running unwatched worker in repo/satori (started 5m ago, updated 2s ago)
+    let id_live = "222222222222";
+    write_json(
+        &root.join(id_live).join("state.json"),
+        &serde_json::json!({
+            "id": id_live, "label": "Phase 1 replay", "engine": "pi",
+            "workspace": "/home/user/repo/satori", "parent_session": "claude-live",
+            "status": "running", "phase": "running", "turn": 1,
+            "started_at": now - 300.0, "last_activity": now - 2.0,
+            "activity": {"stage": "editing", "label": "Edit ergonomics-scorer.mjs", "targets": ["ergonomics-scorer.mjs"]},
+            "supervisor_pid": my_pid, "supervisor_identity": my_ident,
+        }),
+    );
+
+    // 3. Old worker in repo/claive launched 3 days ago, but UPDATED 30s ago (forum bump!)
+    let id_bumped = "333333333333";
+    write_json(
+        &root.join(id_bumped).join("state.json"),
+        &serde_json::json!({
+            "id": id_bumped, "label": "Long-running claive specialist", "engine": "codex",
+            "workspace": "/home/user/repo/claive", "parent_session": "claude-live",
+            "status": "completed", "phase": "done", "turn": 4,
+            "started_at": now - 259_200.0, "ended_at": now - 30.0, "last_activity": now - 30.0,
+        }),
+    );
+
+    let snap = load_snapshot(&root, now);
+    let mut app = make_app(root.clone(), false, false, None);
+    app.apply_snapshot(snap);
+
+    // Default Forum-Updated sort: live running FIRST, then bumped recent worker, then 2-day-old stale ASK!
+    let ordered_ids: Vec<&str> = app
+        .visible_workers
+        .iter()
+        .map(|&i| app.snapshot.workers[i].id.as_str())
+        .collect();
+    assert_eq!(ordered_ids, vec![id_live, id_bumped, id_stale_ask]);
+
+    // Render 160x40 and verify live running unwatched worker shows `RUN` + its real `[EDITING]` action (not hidden by watcher warning)
+    let mut term = Terminal::new(TestBackend::new(160, 40)).unwrap();
+    term.draw(|f| ui::render(f, &mut app)).unwrap();
+    let txt = buffer_text(&term);
+    assert!(txt.contains("▸ RUN"));
+    assert!(txt.contains("Edit ergonomics-scorer.mjs"));
+    assert!(txt.contains("Repos:"));
+    assert!(txt.contains("satori 2") && txt.contains("claive 1"));
+
+    // Click the `claive 1` repo filter chip via MouseEvent -> only `id_bumped` remains visible!
+    let claive_chip = app
+        .click_regions
+        .iter()
+        .find(|r| {
+            matches!(
+                &r.action,
+                ClickAction::SelectWorkspace(WorkspaceScope::Specific(p)) if p.ends_with("/claive")
+            )
+        })
+        .expect("clickable claive repo chip")
+        .rect;
+    let handled = app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: claive_chip.x + 1,
+        row: claive_chip.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(handled);
+    assert_eq!(app.visible_workers.len(), 1);
+    assert_eq!(app.selected_id.as_deref(), Some(id_bumped));
+
+    // Archive the selected completed worker (`z`) -> disappears from All, appears in Archived view!
+    app.handle_key(key(KeyCode::Char('z')));
+    assert!(app.visible_workers.is_empty());
+    assert_eq!(app.counts.archived, 1);
+
+    // Switch to Archived view and restore it (`z`).
+    app.list_mode = ListMode::Archived;
+    app.recompute_view();
+    assert_eq!(app.visible_workers.len(), 1);
+    app.handle_key(key(KeyCode::Char('z')));
+    assert_eq!(app.counts.archived, 0);
 }
 
 #[test]
@@ -794,4 +902,211 @@ fn read_lane_uses_native_events_tailer_without_cli() {
     assert_eq!(res.actions[0].outcome.as_deref(), Some("30 passed"));
     assert_eq!(res.actions[1].kind, "say");
     assert_eq!(res.intent.as_deref(), Some("All tests green."));
+}
+
+#[test]
+fn prompt_visibility_stderr_root_cause_status_chips_evidence_and_copy_shortcuts() {
+    use claive_tui::app::{ClickAction, StatusFilter};
+    use claive_tui::commands::{read_log_tail_with_prompts, LogKind};
+    use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let tmp = TempDir::new().unwrap();
+    let now = 1_795_646_600.0;
+
+    // 1. Failed worker whose label echoes its alias, with AGY_ERROR in stderr.log,
+    //    multi-turn prompts, full token usage, owned_paths, and workspace_delta.
+    let id_fail = "aeb38c4d8652";
+    let dir_fail = tmp.path().join(id_fail);
+    fs::create_dir_all(&dir_fail).unwrap();
+    fs::write(
+        dir_fail.join("prompt-0001.md"),
+        "# Lane 1 — Context intelligence & continuity\n\
+         You are a Claive AGY worker in its assigned isolated worktree.\n\
+         Deliver deterministic context retrieval and turn continuity.\n\
+         Keep provider labels honest.\n",
+    )
+    .unwrap();
+    fs::write(
+        dir_fail.join("prompt-0002.md"),
+        "# Follow-up Turn 2\nFinish cancellation barrier tests.\n",
+    )
+    .unwrap();
+    fs::write(
+        dir_fail.join("stderr.log"),
+        "error: Individual quota reached.\n\
+         AGY_ERROR: {\"short_error\":\"RESOURCE_EXHAUSTED (code 429): Individual quota reached.\"}\n",
+    )
+    .unwrap();
+    fs::write(dir_fail.join("result.txt"), "").unwrap();
+    fs::write(
+        dir_fail.join("state.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "id": id_fail,
+            "label": "tessera-m3-context",
+            "engine": "agy",
+            "model": "gemini-4-hydrogen-high",
+            "workspace": "/home/hamza/repo/tessera",
+            "retained_worktree": "/tmp/wt/tessera-m3-context",
+            "status": "failed",
+            "phase": "failed",
+            "exit_code": 3,
+            "error": "exit=3; terminal=failed; malformed events=0; error",
+            "failure_kind": "worker",
+            "started_at": now - 60.0,
+            "ended_at": now - 10.0,
+            "prompt_file": dir_fail.join("prompt-0001.md").to_string_lossy(),
+            "turn_prompt_file": dir_fail.join("prompt-0002.md").to_string_lossy(),
+            "turn_usage": {
+                "input_tokens": 12400,
+                "output_tokens": 3100,
+                "reasoning_tokens": 900,
+                "native_cache_read_tokens": 9200,
+                "total_tokens": 25600
+            },
+            "context_tokens": 42000,
+            "acceptance_contract": {
+                "owned_paths": ["packages/agent-runtime/src/**", "apps/web/src/App.tsx"]
+            },
+            "workspace_delta": {
+                "added": 2,
+                "deleted": 1,
+                "untracked": 1,
+                "diff_stat": " packages/agent-runtime/src/ctx.ts | 14 ++++\n apps/api/src/leak.ts | 3 +++"
+            },
+            "touched_files": [
+                "packages/agent-runtime/src/ctx.ts",
+                "apps/api/src/leak.ts"
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // 2. Completed worker with a non-empty result.txt.
+    let id_done = "deadbeef1111";
+    let dir_done = tmp.path().join(id_done);
+    fs::create_dir_all(&dir_done).unwrap();
+    fs::write(dir_done.join("prompt-0001.md"), "# Implement ticket 2A\nAdd ledger.\n").unwrap();
+    fs::write(dir_done.join("result.txt"), "Ticket 2A complete.").unwrap();
+    fs::write(
+        dir_done.join("state.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "id": id_done,
+            "label": "tessera-2a",
+            "engine": "pi",
+            "workspace": "/home/hamza/repo/tessera",
+            "status": "completed",
+            "phase": "completed",
+            "started_at": now - 120.0,
+            "ended_at": now - 20.0,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    fs::write(
+        tmp.path().join("aliases.json"),
+        serde_json::to_string(&serde_json::json!({
+            "tessera-m3-context": id_fail,
+            "tessera-2a": id_done
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let snap = load_snapshot(tmp.path(), now);
+    let mut app = make_app(tmp.path().to_path_buf(), false, false, None);
+    app.apply_snapshot(snap);
+    let mut term = Terminal::new(TestBackend::new(150, 42)).unwrap();
+
+    // #1: Alias-like label is skipped in table & briefing; prompt title & excerpt are loaded.
+    term.draw(|f| ui::render(f, &mut app)).unwrap();
+    let rendered = buffer_text(&term);
+    assert!(
+        rendered.contains("Lane 1 — Context intelligence & continuity"),
+        "expected prompt title instead of alias echo:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Deliver deterministic context retrieval"),
+        "expected prompt excerpt in Briefing:\n{rendered}"
+    );
+    // #3: Stderr AGY_ERROR short_error replaces generic wrapper exit=3 in both table and Briefing.
+    assert!(
+        rendered.contains("RESOURCE_EXHAUSTED (code 429):")
+            && rendered.contains("Individual quota reached."),
+        "expected parsed stderr root cause:\n{rendered}"
+    );
+    // #5: Usage strip in Briefing shows full token breakdown.
+    assert!(
+        rendered.contains("in 12.4k") && rendered.contains("out 3.1k") && rendered.contains("cache 9.2k"),
+        "expected full usage tokens in Briefing:\n{rendered}"
+    );
+
+    // #1: Multi-turn prompt log reads head + appends latest turn prompt.
+    let w_fail = app.selected_worker().unwrap().clone();
+    let (prompt_log, truncated) = read_log_tail_with_prompts(
+        &w_fail.job_dir,
+        LogKind::Prompt,
+        w_fail.prompt_file.as_deref(),
+        w_fail.turn_prompt_file.as_deref(),
+    );
+    assert!(!truncated);
+    assert!(prompt_log.contains("Lane 1 — Context intelligence"));
+    assert!(prompt_log.contains("Latest Turn Prompt (prompt-0002.md)"));
+    assert!(prompt_log.contains("Finish cancellation barrier tests."));
+
+    // #2: Opening Tab 4 on a failed worker with empty result.txt auto-selects Stderr;
+    //     pressing [P] jumps directly to Prompt.
+    app.handle_key(key(KeyCode::Char('4')));
+    assert_eq!(app.inspector_tab, InspectorTab::Logs);
+    assert_eq!(app.log_kind, LogKind::Stderr);
+    app.handle_key(key(KeyCode::Char('P')));
+    assert_eq!(app.log_kind, LogKind::Prompt);
+
+    // #5: Evidence tab shows Delta, Owned paths, Diff stat, and flags out-of-scope file.
+    app.handle_key(key(KeyCode::Char('2')));
+    term.draw(|f| ui::render(f, &mut app)).unwrap();
+    let ev_render = buffer_text(&term);
+    assert!(ev_render.contains("+2 added · -1 deleted · 1 untracked"), "missing delta:\n{ev_render}");
+    assert!(ev_render.contains("Owned paths (2):"), "missing owned paths:\n{ev_render}");
+    assert!(ev_render.contains("OUT OF SCOPE"), "expected out-of-scope flag for apps/api/src/leak.ts:\n{ev_render}");
+    assert!(ev_render.contains("Diff stat:"), "missing diff stat:\n{ev_render}");
+
+    // #6: [W] copies cd worktree, [D] copies git -C worktree diff.
+    assert_eq!(
+        app.handle_key(key(KeyCode::Char('W'))),
+        KeyOutcome::CopyClipboard("cd '/tmp/wt/tessera-m3-context'".to_string())
+    );
+    assert_eq!(
+        app.handle_key(key(KeyCode::Char('D'))),
+        KeyOutcome::CopyClipboard("git -C '/tmp/wt/tessera-m3-context' diff".to_string())
+    );
+
+    // #4: Clickable top-bar `lost/fail` chip filters to only the failed worker, and clicking again clears it.
+    let fail_chip = app
+        .click_regions
+        .iter()
+        .find(|r| r.action == ClickAction::ToggleStatusFilter(StatusFilter::LostFail))
+        .expect("lost/fail top-bar chip")
+        .rect;
+    let handled = app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: fail_chip.x + 1,
+        row: fail_chip.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(handled);
+    assert_eq!(app.status_filter, Some(StatusFilter::LostFail));
+    assert_eq!(app.visible_workers.len(), 1);
+    assert_eq!(app.selected_id.as_deref(), Some(id_fail));
+
+    // Clicking the active chip again clears the filter and restores both workers.
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: fail_chip.x + 1,
+        row: fail_chip.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(app.status_filter, None);
+    assert_eq!(app.visible_workers.len(), 2);
 }

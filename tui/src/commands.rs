@@ -39,12 +39,28 @@ pub enum LogKind {
 }
 
 impl LogKind {
+    pub const ALL: [LogKind; 4] = [
+        LogKind::Result,
+        LogKind::Prompt,
+        LogKind::Stderr,
+        LogKind::Supervisor,
+    ];
+
     pub fn filename(self) -> &'static str {
         match self {
             LogKind::Result => "result.txt",
             LogKind::Prompt => "prompt-0001.md",
             LogKind::Stderr => "stderr.log",
             LogKind::Supervisor => "supervisor.log",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            LogKind::Result => "Summary",
+            LogKind::Prompt => "Prompt",
+            LogKind::Stderr => "Stderr",
+            LogKind::Supervisor => "Supervisor",
         }
     }
 
@@ -146,6 +162,7 @@ pub enum ReadRequest {
         job_dir: PathBuf,
         kind: LogKind,
         prompt_file: Option<String>,
+        turn_prompt_file: Option<String>,
     },
     ApplyDryRun {
         worker_id: String,
@@ -589,40 +606,78 @@ pub fn read_log_tail_with_prompt(
     kind: LogKind,
     prompt_file: Option<&str>,
 ) -> (String, bool) {
-    let path = if kind == LogKind::Prompt {
-        resolve_prompt_path(job_dir, prompt_file)
-    } else {
-        job_dir.join(kind.filename())
-    };
+    read_log_tail_with_prompts(job_dir, kind, prompt_file, None)
+}
+
+fn read_bounded_file(path: &Path, max_bytes: u64, from_head: bool) -> Result<(String, bool), String> {
     let display_name = path
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or(kind.filename());
-    let Ok(mut file) = File::open(&path) else {
-        return (format!("({display_name} not present yet)"), false);
-    };
-    let Ok(meta) = file.metadata() else {
-        return (format!("(cannot stat {display_name})"), false);
-    };
+        .unwrap_or("file");
+    let mut file = File::open(path).map_err(|_| format!("({display_name} not present yet)"))?;
+    let meta = file
+        .metadata()
+        .map_err(|_| format!("(cannot stat {display_name})"))?;
     let len = meta.len();
     if len == 0 {
-        return (format!("({display_name} is empty)"), false);
+        return Err(format!("({display_name} is empty)"));
     }
-    let truncated = len > MAX_LOG_TAIL_BYTES;
-    if truncated && file.seek(SeekFrom::Start(len - MAX_LOG_TAIL_BYTES)).is_err() {
-        return (format!("(cannot seek {display_name})"), false);
+    let truncated = len > max_bytes;
+    if truncated && !from_head && file.seek(SeekFrom::Start(len - max_bytes)).is_err() {
+        return Err(format!("(cannot seek {display_name})"));
     }
-    let mut buf = Vec::with_capacity(len.min(MAX_LOG_TAIL_BYTES) as usize);
-    if file.take(MAX_LOG_TAIL_BYTES).read_to_end(&mut buf).is_err() {
-        return (format!("(cannot read {display_name})"), false);
+    let mut buf = Vec::with_capacity(len.min(max_bytes) as usize);
+    if file.take(max_bytes).read_to_end(&mut buf).is_err() {
+        return Err(format!("(cannot read {display_name})"));
     }
     let raw = String::from_utf8_lossy(&buf);
-    let trimmed = if truncated {
+    let trimmed = if truncated && !from_head {
         raw.split_once('\n').map(|(_, rest)| rest).unwrap_or(&raw)
     } else {
         &raw
     };
-    (multiline(trimmed), truncated)
+    Ok((multiline(trimmed), truncated))
+}
+
+pub fn read_log_tail_with_prompts(
+    job_dir: &Path,
+    kind: LogKind,
+    prompt_file: Option<&str>,
+    turn_prompt_file: Option<&str>,
+) -> (String, bool) {
+    if kind == LogKind::Prompt {
+        let initial_path = resolve_prompt_path(job_dir, prompt_file);
+        let (mut content, mut truncated) =
+            match read_bounded_file(&initial_path, MAX_LOG_TAIL_BYTES, true) {
+                Ok(v) => v,
+                Err(msg) => return (msg, false),
+            };
+        if let Some(tpf) = turn_prompt_file.map(str::trim).filter(|s| !s.is_empty()) {
+            let turn_path = resolve_prompt_path(job_dir, Some(tpf));
+            if turn_path != initial_path && turn_path.is_file() {
+                let remaining = (MAX_LOG_TAIL_BYTES as usize)
+                    .saturating_sub(content.len())
+                    .max(4096) as u64;
+                if let Ok((turn_text, turn_trunc)) = read_bounded_file(&turn_path, remaining, true)
+                {
+                    let turn_name = turn_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("turn-prompt.md");
+                    content.push_str(&format!("\n\n---\n### Latest Turn Prompt ({turn_name})\n\n"));
+                    content.push_str(&turn_text);
+                    truncated |= turn_trunc;
+                }
+            }
+        }
+        return (content, truncated);
+    }
+
+    let path = job_dir.join(kind.filename());
+    match read_bounded_file(&path, MAX_LOG_TAIL_BYTES, false) {
+        Ok(v) => v,
+        Err(msg) => (msg, false),
+    }
 }
 
 /// Off-thread read lane with per-worker peek cooldown + events_sig deduplication.
@@ -695,9 +750,14 @@ impl ReadLane {
                             job_dir,
                             kind,
                             prompt_file,
+                            turn_prompt_file,
                         } => {
-                            let (content, truncated) =
-                                read_log_tail_with_prompt(&job_dir, kind, prompt_file.as_deref());
+                            let (content, truncated) = read_log_tail_with_prompts(
+                                &job_dir,
+                                kind,
+                                prompt_file.as_deref(),
+                                turn_prompt_file.as_deref(),
+                            );
                             let _ = resp_tx.try_send(ReadResponse::Log(LogResult {
                                 worker_id,
                                 kind,
@@ -792,12 +852,14 @@ impl ReadLane {
         job_dir: &Path,
         kind: LogKind,
         prompt_file: Option<String>,
+        turn_prompt_file: Option<String>,
     ) {
         let _ = self.tx.try_send(ReadRequest::ReadLog {
             worker_id: worker_id.to_string(),
             job_dir: job_dir.to_path_buf(),
             kind,
             prompt_file,
+            turn_prompt_file,
         });
     }
 

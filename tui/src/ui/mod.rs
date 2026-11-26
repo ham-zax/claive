@@ -1,5 +1,6 @@
 //! Responsive Ratatui 0.30.2 renderer with calm Dark Cockpit visual discipline.
-//! Handles >=150x32 3-col split, >=110x32 wide, >=80x24 medium, narrow single-pane, and <6-row `--compact`.
+//! Supports interactive mouse clicks (repo filters, view filters, worker rows, inspector tabs),
+//! >=150x32 3-col split, >=110x32 wide, >=80x24 medium, narrow single-pane, and <6-row `--compact`.
 
 mod activity;
 mod briefing;
@@ -11,10 +12,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph};
 use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
-    classify_worker, format_duration, format_relative_ago, App, DrawerTab, FocusPane, InspectorTab,
-    TriageBadge,
+    classify_worker, format_duration, App, ClickAction, ClickRegion, DrawerTab, FocusPane,
+    InspectorTab, ListMode, StatusFilter, TriageBadge, WorkspaceScope,
 };
 use crate::sanitize::clip_width;
 use crate::store::WorkerRecord;
@@ -29,9 +31,16 @@ pub(super) const COLOR_WARN: Color = Color::Yellow;
 pub(super) const COLOR_FAIL: Color = Color::Red;
 pub(super) const COLOR_REVIEW: Color = Color::Green;
 pub(super) const COLOR_ROW_SEL_BG: Color = Color::Indexed(235);
+pub(super) const COLOR_CHIP_ACTIVE_BG: Color = Color::Indexed(24);
+pub(super) const COLOR_CHIP_BG: Color = Color::Indexed(236);
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    app.click_regions.clear();
+    app.workers_area = Rect::default();
+    app.inspector_area = Rect::default();
+    app.drawer_area = Rect::default();
+
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -78,12 +87,13 @@ pub(super) fn badge_style(badge: TriageBadge) -> Style {
             .fg(COLOR_ACCENT)
             .add_modifier(Modifier::BOLD),
         TriageBadge::Parked => Style::default().fg(COLOR_WARN),
-        TriageBadge::Done => Style::default().fg(COLOR_MUTED),
-        TriageBadge::Idle | TriageBadge::Stop => Style::default().fg(COLOR_MUTED),
+        TriageBadge::Done | TriageBadge::Idle | TriageBadge::Stop => {
+            Style::default().fg(COLOR_MUTED)
+        }
     }
 }
 
-/// Format a status badge as crisp `icon LABEL` spans (for table cells and Briefing strip).
+/// Format a status badge as crisp `icon LABEL` spans (for Briefing strip & compact views).
 pub(super) fn badge_spans(badge: TriageBadge, unseen: bool) -> Vec<Span<'static>> {
     let icon_style = match badge {
         TriageBadge::Done => Style::default().fg(COLOR_REVIEW),
@@ -120,6 +130,40 @@ pub(super) fn kv_line(k: &str, v: impl Into<String>, val_style: Style) -> Line<'
     ])
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_chip(
+    spans: &mut Vec<Span<'static>>,
+    cursor_x: &mut u16,
+    row_y: u16,
+    max_x: u16,
+    text: String,
+    active: bool,
+    accent: Color,
+    action: ClickAction,
+    regions: &mut Vec<ClickRegion>,
+) {
+    let label = format!(" {text} ");
+    let w = label.width() as u16;
+    if *cursor_x + w > max_x {
+        return;
+    }
+    let style = if active {
+        Style::default()
+            .fg(COLOR_BRIGHT)
+            .bg(COLOR_CHIP_ACTIVE_BG)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(accent).bg(COLOR_CHIP_BG)
+    };
+    regions.push(ClickRegion {
+        rect: Rect::new(*cursor_x, row_y, w, 1),
+        action,
+    });
+    spans.push(Span::styled(label, style));
+    spans.push(Span::raw(" "));
+    *cursor_x = cursor_x.saturating_add(w + 1);
+}
+
 fn render_compact(frame: &mut Frame, area: Rect, app: &App) {
     let width = area.width as usize;
     let max_rows = area.height as usize;
@@ -154,9 +198,9 @@ fn render_compact(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(COLOR_FAIL).add_modifier(Modifier::BOLD),
         ));
     }
-    if app.counts.running > 0 {
+    if app.counts.active_total > 0 {
         header_spans.push(Span::styled(
-            format!(" · ▸ {} running", app.counts.running),
+            format!(" · ▸ {} running", app.counts.active_total),
             Style::default().fg(COLOR_ACCENT),
         ));
     }
@@ -224,6 +268,17 @@ fn render_compact(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn compact_detail(w: &WorkerRecord, badge: TriageBadge) -> String {
+    if w.is_active_turn() {
+        if let Some(act) = &w.activity
+            && !act.label.is_empty()
+        {
+            return format!("[{}] {}", act.stage.to_uppercase(), act.label);
+        }
+        if let Some(tool) = w.active_tools.first() {
+            return format!("Running {tool} · {}", format_duration(w.turn_elapsed_s));
+        }
+        return format!("{} · {}", w.phase, format_duration(w.turn_elapsed_s));
+    }
     match badge {
         TriageBadge::Ask => w
             .needs_parent
@@ -231,38 +286,16 @@ fn compact_detail(w: &WorkerRecord, badge: TriageBadge) -> String {
             .map(|n| n.question.clone())
             .filter(|q| !q.is_empty())
             .unwrap_or_else(|| "Needs parent decision".to_string()),
-        TriageBadge::Unwatched => format!(
-            "Running · last event {}",
-            format_relative_ago(w.last_event_age_s)
-        ),
-        TriageBadge::WaitInTurn => format!(
-            "Codex wait-in-turn · {}",
-            format_duration(w.turn_elapsed_s)
-        ),
         TriageBadge::Lost => w
-            .error
-            .clone()
+            .best_error_summary()
             .unwrap_or_else(|| "Supervisor lost".to_string()),
         TriageBadge::Fail => w
-            .error
-            .clone()
+            .best_error_summary()
             .unwrap_or_else(|| format!("exit {}", w.exit_code.unwrap_or(1))),
         TriageBadge::Review => format!(
             "{} files · verify:{}",
             w.changed_files_total, w.verification_status
         ),
-        TriageBadge::Quiet => format!(
-            "Quiet {} · {}",
-            format_duration(w.last_event_age_s),
-            w.phase
-        ),
-        TriageBadge::Run => {
-            if let Some(tool) = w.active_tools.first() {
-                format!("Running {tool} · {}", format_duration(w.turn_elapsed_s))
-            } else {
-                format!("{} · {}", w.phase, format_duration(w.turn_elapsed_s))
-            }
-        }
         _ => {
             if !w.label.is_empty() && !w.label.eq_ignore_ascii_case("prompt-input") {
                 w.label.clone()
@@ -276,7 +309,7 @@ fn compact_detail(w: &WorkerRecord, badge: TriageBadge) -> String {
 }
 
 fn render_wide(frame: &mut Frame, area: Rect, app: &mut App) {
-    let mut constraints = vec![Constraint::Length(2), Constraint::Min(10)];
+    let mut constraints = vec![Constraint::Length(3), Constraint::Min(10)];
     if app.drawer_open {
         constraints.push(Constraint::Length(7));
     }
@@ -287,7 +320,7 @@ fn render_wide(frame: &mut Frame, area: Rect, app: &mut App) {
         .constraints(constraints)
         .split(area);
 
-    render_header(frame, vertical[0], app, true);
+    render_header(frame, vertical[0], app, 3);
 
     if area.width >= 150 && area.height >= 32 && app.inspector_tab == InspectorTab::Steps {
         let cols = Layout::default()
@@ -306,7 +339,7 @@ fn render_wide(frame: &mut Frame, area: Rect, app: &mut App) {
         let main_cols = Layout::default()
             .direction(Direction::Horizontal)
             .spacing(1)
-            .constraints([Constraint::Percentage(56), Constraint::Percentage(44)])
+            .constraints([Constraint::Percentage(57), Constraint::Percentage(43)])
             .split(vertical[1]);
 
         table::render_workers_table(frame, main_cols[0], app, true);
@@ -326,14 +359,14 @@ fn render_medium(frame: &mut Frame, area: Rect, app: &mut App) {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
+            Constraint::Length(3),
             Constraint::Percentage(58),
             Constraint::Min(8),
             Constraint::Length(1),
         ])
         .split(area);
 
-    render_header(frame, vertical[0], app, true);
+    render_header(frame, vertical[0], app, 3);
     table::render_workers_table(frame, vertical[1], app, true);
     if app.drawer_open {
         render_drawer(frame, vertical[2], app);
@@ -349,7 +382,7 @@ fn render_narrow(frame: &mut Frame, area: Rect, app: &mut App) {
         .constraints([Constraint::Length(1), Constraint::Min(4), Constraint::Length(1)])
         .split(area);
 
-    render_header(frame, vertical[0], app, false);
+    render_header(frame, vertical[0], app, 1);
     if app.drawer_open {
         render_drawer(frame, vertical[1], app);
     } else if app.detail_open {
@@ -360,173 +393,305 @@ fn render_narrow(frame: &mut Frame, area: Rect, app: &mut App) {
     render_footer(frame, vertical[2], app);
 }
 
-fn render_header(frame: &mut Frame, area: Rect, app: &App, two_lines: bool) {
-    let c = &app.counts;
-    let sep = || Span::styled("  ·  ", Style::default().fg(COLOR_MUTED));
+fn render_header(frame: &mut Frame, area: Rect, app: &mut App, max_lines: u16) {
+    let c = app.counts.clone();
+    let max_x = area.x.saturating_add(area.width);
+    let sep = || Span::styled(" · ", Style::default().fg(COLOR_MUTED));
 
-    let mut line1 = vec![
-        Span::styled(
-            " ◆ CLAIVE",
-            Style::default()
-                .fg(COLOR_ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("   ", Style::default()),
-    ];
+    // Line 1: Live status summary + clickable utility actions (Sort, Group, Archive).
+    let mut line1: Vec<Span<'static>> = vec![Span::styled(
+        " ◆ CLAIVE  ",
+        Style::default()
+            .fg(COLOR_ACCENT)
+            .add_modifier(Modifier::BOLD),
+    )];
+    let mut x1 = area.x.saturating_add(11);
 
-    let mut has_alert = false;
+    let mut push_stat_chip =
+        |text: String, accent: Color, filter: StatusFilter, need_sep: &mut bool| {
+            let active = app.status_filter == Some(filter);
+            if *need_sep && !active {
+                line1.push(sep());
+                x1 = x1.saturating_add(3);
+            } else if *need_sep {
+                line1.push(Span::raw(" "));
+                x1 = x1.saturating_add(1);
+            }
+            let label = if active {
+                format!(" {text} ")
+            } else {
+                text
+            };
+            let w = label.width() as u16;
+            if x1 + w <= max_x {
+                let style = if active {
+                    Style::default()
+                        .fg(COLOR_BRIGHT)
+                        .bg(COLOR_CHIP_ACTIVE_BG)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD)
+                };
+                app.click_regions.push(ClickRegion {
+                    rect: Rect::new(x1, area.y, w, 1),
+                    action: ClickAction::ToggleStatusFilter(filter),
+                });
+                line1.push(Span::styled(label, style));
+                x1 = x1.saturating_add(w);
+                *need_sep = true;
+            }
+        };
+
+    let mut need_sep = false;
+    if c.active_total > 0 {
+        push_stat_chip(
+            format!("▸ {} running", c.active_total),
+            COLOR_ACCENT,
+            StatusFilter::Active,
+            &mut need_sep,
+        );
+    }
     if c.ask > 0 {
-        line1.push(Span::styled(
-            format!("● {} need input", c.ask),
-            Style::default().fg(COLOR_ASK).add_modifier(Modifier::BOLD),
-        ));
-        has_alert = true;
-    }
-    if c.unwatched > 0 {
-        if has_alert {
-            line1.push(sep());
-        }
-        line1.push(Span::styled(
-            format!("▲ {} unwatched", c.unwatched),
-            Style::default().fg(COLOR_WARN).add_modifier(Modifier::BOLD),
-        ));
-        has_alert = true;
-    }
-    if c.wait_in_turn > 0 {
-        if has_alert {
-            line1.push(sep());
-        }
-        line1.push(Span::styled(
-            format!("▲ {} wait-turn", c.wait_in_turn),
-            Style::default().fg(COLOR_WARN).add_modifier(Modifier::BOLD),
-        ));
-        has_alert = true;
+        push_stat_chip(
+            format!("● {} ask", c.ask),
+            COLOR_ASK,
+            StatusFilter::Ask,
+            &mut need_sep,
+        );
     }
     if c.lost + c.fail > 0 {
-        if has_alert {
-            line1.push(sep());
-        }
-        line1.push(Span::styled(
-            format!("✖ {} failed/lost", c.lost + c.fail),
-            Style::default().fg(COLOR_FAIL).add_modifier(Modifier::BOLD),
-        ));
-        has_alert = true;
+        push_stat_chip(
+            format!("✖ {} lost/fail", c.lost + c.fail),
+            COLOR_FAIL,
+            StatusFilter::LostFail,
+            &mut need_sep,
+        );
     }
     if c.review > 0 {
-        if has_alert {
-            line1.push(sep());
-        }
-        line1.push(Span::styled(
+        push_stat_chip(
             format!("★ {} review", c.review),
-            Style::default()
-                .fg(COLOR_REVIEW)
-                .add_modifier(Modifier::BOLD),
-        ));
-        has_alert = true;
+            COLOR_REVIEW,
+            StatusFilter::Review,
+            &mut need_sep,
+        );
     }
-    if c.quiet > 0 {
-        if has_alert {
-            line1.push(sep());
-        }
-        line1.push(Span::styled(
-            format!("◷ {} quiet", c.quiet),
-            Style::default().fg(COLOR_WARN).add_modifier(Modifier::BOLD),
-        ));
-        has_alert = true;
+    if c.parked > 0 {
+        push_stat_chip(
+            format!("{} parked", c.parked),
+            COLOR_MUTED,
+            StatusFilter::Parked,
+            &mut need_sep,
+        );
     }
-
-    if has_alert {
-        line1.push(sep());
+    if c.done > 0 {
+        push_stat_chip(
+            format!("{} done", c.done),
+            COLOR_MUTED,
+            StatusFilter::Done,
+            &mut need_sep,
+        );
     }
-    if c.running > 0 {
-        line1.push(Span::styled(
-            format!("▸ {} running", c.running),
-            Style::default()
-                .fg(COLOR_ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ));
-        line1.push(sep());
-    }
-    line1.push(Span::styled(
-        format!(
-            "{} idle · {} parked · {} done",
-            c.idle, c.parked, c.done
-        ),
-        Style::default().fg(COLOR_MUTED),
-    ));
 
     if c.hidden_ask > 0 {
-        line1.push(Span::raw("   "));
+        let msg = format!("  ({} ask hidden)", c.hidden_ask);
+        x1 = x1.saturating_add(msg.width() as u16);
         line1.push(Span::styled(
-            format!("({} need input hidden by filter)", c.hidden_ask),
+            msg,
             Style::default().fg(COLOR_ASK).add_modifier(Modifier::BOLD),
         ));
     }
-
     if app.snapshot.stale_reason.is_some() {
-        line1.push(Span::raw("   "));
+        let msg = "  ✖ STALE";
+        x1 = x1.saturating_add(msg.width() as u16);
         line1.push(Span::styled(
-            "✖ STALE SNAPSHOT",
+            msg,
             Style::default().fg(COLOR_FAIL).add_modifier(Modifier::BOLD),
         ));
+    }
+
+    if max_lines >= 2 && x1 + 24 < max_x {
+        line1.push(Span::raw("   "));
+        x1 = x1.saturating_add(3);
+        let sort_label = format!("Sort:{}", app.sort_mode.label());
+        push_chip(
+            &mut line1,
+            &mut x1,
+            area.y,
+            max_x,
+            sort_label,
+            false,
+            COLOR_NOMINAL,
+            ClickAction::ToggleSortMode,
+            &mut app.click_regions,
+        );
+        push_chip(
+            &mut line1,
+            &mut x1,
+            area.y,
+            max_x,
+            "Group".to_string(),
+            app.group_by_session,
+            COLOR_NOMINAL,
+            ClickAction::ToggleGroupBySession,
+            &mut app.click_regions,
+        );
+        let arch_label = if app.list_mode == ListMode::Archived {
+            "Restore [z]"
+        } else {
+            "Archive [z]"
+        };
+        push_chip(
+            &mut line1,
+            &mut x1,
+            area.y,
+            max_x,
+            arch_label.to_string(),
+            false,
+            COLOR_ACCENT,
+            ClickAction::ToggleArchiveSelected,
+            &mut app.click_regions,
+        );
+        if app.list_mode != ListMode::Archived {
+            push_chip(
+                &mut line1,
+                &mut x1,
+                area.y,
+                max_x,
+                "Clear old [Z]".to_string(),
+                false,
+                COLOR_MUTED,
+                ClickAction::ArchiveStaleAll,
+                &mut app.click_regions,
+            );
+        }
     }
 
     let mut lines = vec![Line::from(line1)];
 
-    if two_lines {
-        let sess = if app.session_scope.label() == "all" {
-            "All sessions".to_string()
-        } else {
-            format!("Session {}", app.session_scope.label())
-        };
-        let ws = if app.workspace_scope.label() == "all" {
-            "All repos".to_string()
-        } else {
-            app.workspace_scope.label()
-        };
-        let mode = match app.list_mode.label() {
-            "active" => "Active only",
-            _ => "Recent",
-        };
-        let mut line2 = vec![
-            Span::styled(format!(" {sess}"), Style::default().fg(COLOR_MUTED)),
-            Span::styled(" · ", Style::default().fg(COLOR_MUTED)),
-            Span::styled(ws, Style::default().fg(COLOR_MUTED)),
-            Span::styled(" · ", Style::default().fg(COLOR_MUTED)),
-            Span::styled(mode, Style::default().fg(COLOR_MUTED)),
-        ];
-        if app.triage_only {
-            line2.push(Span::styled(
-                " · Actionable only",
-                Style::default().fg(COLOR_WARN).add_modifier(Modifier::BOLD),
-            ));
+    // Line 2: Clickable Repo Filter Bar.
+    if max_lines >= 2 {
+        let y2 = area.y.saturating_add(1);
+        let mut line2: Vec<Span<'static>> = vec![Span::styled(
+            " Repos: ",
+            Style::default().fg(COLOR_MUTED),
+        )];
+        let mut x2 = area.x.saturating_add(8);
+
+        let all_non_arch = app
+            .snapshot
+            .workers
+            .iter()
+            .filter(|w| !app.archived_ids.contains(&w.id) || app.list_mode == ListMode::Archived)
+            .count();
+        push_chip(
+            &mut line2,
+            &mut x2,
+            y2,
+            max_x,
+            format!("All {all_non_arch}"),
+            app.workspace_scope == WorkspaceScope::All,
+            COLOR_NOMINAL,
+            ClickAction::SelectWorkspace(WorkspaceScope::All),
+            &mut app.click_regions,
+        );
+
+        for (full_path, short_name, count) in app.workspace_chips() {
+            let active = matches!(&app.workspace_scope, WorkspaceScope::Specific(p) if *p == full_path);
+            push_chip(
+                &mut line2,
+                &mut x2,
+                y2,
+                max_x,
+                format!("{short_name} {count}"),
+                active,
+                COLOR_NOMINAL,
+                ClickAction::SelectWorkspace(WorkspaceScope::Specific(full_path)),
+                &mut app.click_regions,
+            );
         }
-        if app.group_by_session {
-            line2.push(Span::styled(
-                " · Grouped",
-                Style::default().fg(COLOR_ACCENT),
-            ));
-        }
+        lines.push(Line::from(line2));
+    }
+
+    // Line 3: Clickable View Filter Bar (Active / Needs You / All / Archived) + Session/Mode metadata.
+    if max_lines >= 3 {
+        let y3 = area.y.saturating_add(2);
+        let mut line3: Vec<Span<'static>> = vec![Span::styled(
+            " View:  ",
+            Style::default().fg(COLOR_MUTED),
+        )];
+        let mut x3 = area.x.saturating_add(8);
+
+        push_chip(
+            &mut line3,
+            &mut x3,
+            y3,
+            max_x,
+            format!("Active {}", c.active_total),
+            app.list_mode == ListMode::Active && !app.triage_only,
+            COLOR_ACCENT,
+            ClickAction::SelectListMode(ListMode::Active),
+            &mut app.click_regions,
+        );
+        push_chip(
+            &mut line3,
+            &mut x3,
+            y3,
+            max_x,
+            format!("Needs You {}", c.needs_you),
+            app.triage_only && app.list_mode != ListMode::Archived,
+            COLOR_WARN,
+            ClickAction::ToggleTriage,
+            &mut app.click_regions,
+        );
+        push_chip(
+            &mut line3,
+            &mut x3,
+            y3,
+            max_x,
+            format!("All {}", c.total),
+            app.list_mode == ListMode::Recent && !app.triage_only && app.status_filter.is_none(),
+            COLOR_NOMINAL,
+            ClickAction::SelectListMode(ListMode::Recent),
+            &mut app.click_regions,
+        );
+        push_chip(
+            &mut line3,
+            &mut x3,
+            y3,
+            max_x,
+            format!("Archived {}", c.archived),
+            app.list_mode == ListMode::Archived,
+            COLOR_MUTED,
+            ClickAction::SelectListMode(ListMode::Archived),
+            &mut app.click_regions,
+        );
+
+        let sess_label = if app.session_scope.label() == "all" {
+            "all".to_string()
+        } else {
+            app.session_scope.label()
+        };
+        line3.push(Span::styled(
+            format!(" · Session: {sess_label}"),
+            Style::default().fg(COLOR_MUTED),
+        ));
         if app.config.actions_enabled() {
-            line2.push(Span::styled(
+            line3.push(Span::styled(
                 " · Actions ON",
                 Style::default()
                     .fg(COLOR_REVIEW)
                     .add_modifier(Modifier::BOLD),
             ));
         } else {
-            line2.push(Span::styled(" · Read-only", Style::default().fg(COLOR_MUTED)));
-        }
-        if !app.snapshot.live_watchers.is_empty() {
-            line2.push(Span::styled(
-                format!(" · {} watcher(s)", app.snapshot.live_watchers.len()),
-                Style::default().fg(COLOR_ACCENT),
+            line3.push(Span::styled(
+                " · Read-only",
+                Style::default().fg(COLOR_MUTED),
             ));
         }
         if app.search_active || !app.search_query.is_empty() {
-            line2.push(Span::styled(
+            line3.push(Span::styled(
                 format!(
-                    " · Filter: {}{}",
+                    " · /{}{}",
                     app.search_query,
                     if app.search_active { "_" } else { "" }
                 ),
@@ -535,13 +700,14 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, two_lines: bool) {
                     .add_modifier(Modifier::BOLD),
             ));
         }
-        lines.push(Line::from(line2));
+        lines.push(Line::from(line3));
     }
 
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn render_drawer(frame: &mut Frame, area: Rect, app: &App) {
+fn render_drawer(frame: &mut Frame, area: Rect, app: &mut App) {
+    app.drawer_area = area;
     let focused = app.focus_pane == FocusPane::Drawer;
     let border_style = if focused {
         Style::default().fg(COLOR_ACCENT)
@@ -736,23 +902,22 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         let mut spans = vec![Span::raw(" ")];
         if app.config.actions_enabled() {
             push_key_hint(&mut spans, "j/k", "move");
-            push_key_hint(&mut spans, "1-4", "tabs");
+            push_key_hint(&mut spans, "z/Z", "archive");
+            push_key_hint(&mut spans, "o", "sort");
+            push_key_hint(&mut spans, "w", "repo");
             push_key_hint(&mut spans, "a", "answer");
-            push_key_hint(&mut spans, "m", "send");
             push_key_hint(&mut spans, "S", "steer");
             push_key_hint(&mut spans, "v", "verify");
             push_key_hint(&mut spans, "A", "apply");
-            push_key_hint(&mut spans, "t", "actionable");
-            push_key_hint(&mut spans, "/", "find");
             push_key_hint(&mut spans, "?", "help");
             push_key_hint(&mut spans, "q", "quit");
         } else {
-            push_key_hint(&mut spans, "j/k", "move");
-            push_key_hint(&mut spans, "Tab", "focus");
+            push_key_hint(&mut spans, "click/jk", "select");
+            push_key_hint(&mut spans, "z/Z", "archive");
+            push_key_hint(&mut spans, "o", "sort");
+            push_key_hint(&mut spans, "w", "repo");
+            push_key_hint(&mut spans, "g", "sessions");
             push_key_hint(&mut spans, "1-4", "tabs");
-            push_key_hint(&mut spans, "t", "actionable");
-            push_key_hint(&mut spans, "g", "group");
-            push_key_hint(&mut spans, "i", "inbox");
             push_key_hint(&mut spans, "y", "copy cmd");
             push_key_hint(&mut spans, "/", "find");
             push_key_hint(&mut spans, "?", "help");

@@ -171,22 +171,36 @@ pub struct WorkerRecord {
     pub activity: Option<ActivityInfo>,
     pub last_check: Option<LastCheckInfo>,
     pub prompt_file: Option<String>,
+    pub turn_prompt_file: Option<String>,
     pub prompt_preview: Option<String>,
+    pub prompt_excerpt: Vec<String>,
+    pub has_result_file: bool,
     pub task_failures: u64,
     pub needs_parent: Option<NeedsParentInfo>,
     pub ask_eligible: bool,
     pub failure_kind: Option<String>,
     pub error: Option<String>,
+    pub stderr_hint: Option<String>,
     pub exit_code: Option<i64>,
     pub changed_files: Vec<String>,
     pub changed_files_total: usize,
     pub changed_files_truncated: bool,
+    pub owned_paths: Vec<String>,
+    pub delta_added: Option<usize>,
+    pub delta_deleted: Option<usize>,
+    pub delta_untracked: Option<usize>,
+    pub diff_stat: Option<String>,
     pub verification_status: String,
     pub acceptance_status: String,
     pub report_state: Option<String>,
     pub report_summary: Option<String>,
     pub report_risks: Vec<String>,
     pub native_cache_read_tokens: Option<u64>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub context_tokens: Option<u64>,
     pub watched_by: Vec<String>,
     pub status_projection_stale: bool,
     pub events_sig: Option<(u64, i64)>,
@@ -214,6 +228,97 @@ impl WorkerRecord {
             .map(|s| s.starts_with("codex-"))
             .unwrap_or(false)
     }
+
+    /// True when `label` is empty, generic `"prompt-input"`, or just echoes the worker's alias/id.
+    pub fn is_alias_like_label(&self) -> bool {
+        let trimmed = self.label.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("prompt-input") {
+            return true;
+        }
+        let norm = trimmed.strip_prefix('@').unwrap_or(trimmed);
+        if norm.eq_ignore_ascii_case(&self.id) {
+            return true;
+        }
+        if let Some(a) = self.alias.as_deref() {
+            let a_norm = a.trim().strip_prefix('@').unwrap_or(a.trim());
+            if !a_norm.is_empty() && norm.eq_ignore_ascii_case(a_norm) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Prefer the parsed `stderr.log` root cause when `self.error` is just a generic wrapper exit string.
+    pub fn best_error_summary(&self) -> Option<String> {
+        let is_generic = self
+            .error
+            .as_deref()
+            .map(|e| e.starts_with("exit=") || e.contains("terminal=failed"))
+            .unwrap_or(true);
+        if is_generic && let Some(ref hint) = self.stderr_hint {
+            return Some(hint.clone());
+        }
+        self.error.clone().or_else(|| self.stderr_hint.clone())
+    }
+
+    /// True if `rel_path` matches at least one pattern in `owned_paths` (or if no `owned_paths` are declared).
+    pub fn is_path_in_owned_scope(&self, rel_path: &str) -> bool {
+        if self.owned_paths.is_empty() {
+            return true;
+        }
+        let clean_path = rel_path.trim().trim_start_matches("./");
+        self.owned_paths
+            .iter()
+            .any(|pat| glob_match(pat.trim().trim_start_matches("./"), clean_path))
+    }
+}
+
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    glob_match_slice(&p, &t)
+}
+
+fn glob_match_slice(p: &[char], t: &[char]) -> bool {
+    if p.is_empty() {
+        return t.is_empty();
+    }
+    if p.len() >= 2 && p[0] == '*' && p[1] == '*' {
+        let mut rest = &p[2..];
+        if rest.first() == Some(&'/') {
+            rest = &rest[1..];
+        }
+        if glob_match_slice(rest, t) {
+            return true;
+        }
+        for i in 1..=t.len() {
+            if glob_match_slice(rest, &t[i..]) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if p[0] == '*' {
+        if glob_match_slice(&p[1..], t) {
+            return true;
+        }
+        for (i, ch) in t.iter().enumerate() {
+            if *ch == '/' {
+                break;
+            }
+            if glob_match_slice(&p[1..], &t[i + 1..]) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if t.is_empty() {
+        return false;
+    }
+    if p[0] == '?' || p[0] == t[0] {
+        return glob_match_slice(&p[1..], &t[1..]);
+    }
+    false
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -342,6 +447,7 @@ struct RawState {
     activity: Option<Value>,
     last_check: Option<Value>,
     prompt_file: Option<String>,
+    turn_prompt_file: Option<String>,
     turn_task_failures: Option<u64>,
     task_failures: Option<u64>,
     needs_parent: Option<Value>,
@@ -352,6 +458,9 @@ struct RawState {
     report_state: Option<String>,
     report: Option<Value>,
     turn_usage: Option<Value>,
+    context_tokens: Option<u64>,
+    acceptance_contract: Option<Value>,
+    workspace_delta: Option<Value>,
     launch: Option<Value>,
 }
 
@@ -977,9 +1086,84 @@ struct CachedWorkerFiles {
     status: Option<RawStatus>,
     prompt_preview_loaded: bool,
     prompt_preview: Option<String>,
+    prompt_excerpt: Vec<String>,
+    stderr_sig: Option<FileSig>,
+    stderr_hint: Option<String>,
 }
 
-fn read_prompt_preview(job_dir: &Path, prompt_file: Option<&str>) -> Option<String> {
+fn read_stderr_hint(path: &Path) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len == 0 {
+        return None;
+    }
+    let max_bytes: u64 = 4096;
+    if len > max_bytes {
+        file.seek(SeekFrom::Start(len - max_bytes)).ok()?;
+    }
+    let mut buf = Vec::with_capacity(len.min(max_bytes) as usize);
+    file.take(max_bytes).read_to_end(&mut buf).ok()?;
+    let raw = String::from_utf8_lossy(&buf);
+
+    // 1. Prefer structured AGY_ERROR JSON `short_error` / `message` if present.
+    for line in raw.lines().rev() {
+        if let Some((_, json_part)) = line.split_once("AGY_ERROR:")
+            && let Ok(val) = serde_json::from_str::<Value>(json_part.trim())
+            && let Some(msg) = val
+                .get("short_error")
+                .or_else(|| val.get("message"))
+                .and_then(|v| v.as_str())
+        {
+            let clean = single_line(msg);
+            if !clean.is_empty() {
+                return Some(clean);
+            }
+        }
+    }
+
+    // 2. Otherwise scan from bottom for a high-signal error line.
+    let mut last_non_empty: Option<String> = None;
+    for line in raw.lines().rev() {
+        let clean = single_line(line);
+        if clean.is_empty() {
+            continue;
+        }
+        if last_non_empty.is_none() {
+            last_non_empty = Some(clean.clone());
+        }
+        let low = clean.to_ascii_lowercase();
+        if low.contains("error")
+            || low.contains("exception")
+            || low.contains("fatal")
+            || low.contains("failed")
+            || low.contains("panic")
+            || low.contains("quota")
+            || low.contains("exhausted")
+            || low.contains("denied")
+            || low.contains("timeout")
+            || low.contains("cannot find")
+            || low.contains("enoent")
+        {
+            return Some(clean);
+        }
+    }
+    last_non_empty
+}
+
+fn is_prompt_boilerplate(low: &str) -> bool {
+    low.starts_with("you are a worker")
+        || low.starts_with("you are a claive")
+        || low.starts_with("read /")
+        || low.starts_with("do not commit")
+        || low.starts_with("end your final answer with")
+        || low.starts_with("use needs_decision instead of guessing")
+        || matches!(
+            low,
+            "mission" | "task" | "goal" | "summary" | "result" | "overview" | "context"
+        )
+}
+
+fn read_prompt_summary(job_dir: &Path, prompt_file: Option<&str>) -> (Option<String>, Vec<String>) {
     let path = prompt_file
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -989,7 +1173,11 @@ fn read_prompt_preview(job_dir: &Path, prompt_file: Option<&str>) -> Option<Stri
         })
         .filter(|p| p.is_file())
         .unwrap_or_else(|| job_dir.join("prompt-0001.md"));
-    let raw = read_capped_string(&path, 2048)?;
+    let Some(raw) = read_capped_string(&path, 4096) else {
+        return (None, Vec::new());
+    };
+    let mut title: Option<String> = None;
+    let mut excerpt: Vec<String> = Vec::new();
     for raw_line in raw.lines() {
         let line = single_line(raw_line);
         let trimmed = line.trim_start_matches('#').trim();
@@ -997,15 +1185,7 @@ fn read_prompt_preview(job_dir: &Path, prompt_file: Option<&str>) -> Option<Stri
             continue;
         }
         let low = trimmed.to_ascii_lowercase();
-        // Skip generic worker preamble or boilerplate heading lines to reach the actual task title.
-        if low.starts_with("you are a worker")
-            || low.starts_with("read /")
-            || low.starts_with("do not commit")
-            || matches!(
-                low.as_str(),
-                "mission" | "task" | "goal" | "summary" | "result" | "overview" | "context"
-            )
-        {
+        if is_prompt_boilerplate(&low) {
             continue;
         }
         let cleaned = trimmed
@@ -1014,11 +1194,18 @@ fn read_prompt_preview(job_dir: &Path, prompt_file: Option<&str>) -> Option<Stri
             .or_else(|| trimmed.strip_prefix("Mission:"))
             .map(str::trim)
             .unwrap_or(trimmed);
-        if !cleaned.is_empty() {
-            return Some(cleaned.to_string());
+        if cleaned.is_empty() {
+            continue;
+        }
+        if title.is_none() {
+            title = Some(cleaned.to_string());
+        } else if excerpt.len() < 4 {
+            excerpt.push(cleaned.to_string());
+        } else {
+            break;
         }
     }
-    None
+    (title, excerpt)
 }
 
 /// Stateful read-only registry scanner with per-worker `(ino, len, mtime)` caching
@@ -1101,6 +1288,9 @@ impl RegistryReader {
                     status: None,
                     prompt_preview_loaded: false,
                     prompt_preview: None,
+                    prompt_excerpt: Vec::new(),
+                    stderr_sig: None,
+                    stderr_hint: None,
                 });
 
             // Re-read state.json only when (ino, len, mtime) changes.
@@ -1127,26 +1317,32 @@ impl RegistryReader {
                 continue;
             }
 
-            // Lazily read a 1-line prompt title once for workers whose label is empty or "prompt-input".
+            // Always lazily load the initial prompt title & compact excerpt once per worker.
             if !cached.prompt_preview_loaded {
-                let raw_label = cached
-                    .state
-                    .as_ref()
-                    .and_then(|s| s.label.as_deref())
-                    .or_else(|| cached.status.as_ref().and_then(|s| s.label.as_deref()))
-                    .unwrap_or("")
-                    .trim();
-                let has_mission = cached
-                    .state
-                    .as_ref()
-                    .and_then(|s| s.mission.as_deref())
-                    .map(|m| !m.trim().is_empty())
-                    .unwrap_or(false);
-                if !has_mission && (raw_label.is_empty() || raw_label.eq_ignore_ascii_case("prompt-input")) {
-                    let pf = cached.state.as_ref().and_then(|s| s.prompt_file.as_deref());
-                    cached.prompt_preview = read_prompt_preview(&job_dir, pf);
-                }
+                let pf = cached.state.as_ref().and_then(|s| s.prompt_file.as_deref());
+                let (preview, excerpt) = read_prompt_summary(&job_dir, pf);
+                cached.prompt_preview = preview;
+                cached.prompt_excerpt = excerpt;
                 cached.prompt_preview_loaded = true;
+            }
+
+            // Lazily read a root-cause hint from stderr.log for failed/errored workers when stderr changes.
+            let has_failure = cached
+                .state
+                .as_ref()
+                .map(|s| {
+                    matches!(s.status.as_deref(), Some("failed" | "interrupted"))
+                        || s.exit_code.map(|c| c != 0).unwrap_or(false)
+                        || s.error.is_some()
+                })
+                .unwrap_or(false);
+            if has_failure {
+                let stderr_path = job_dir.join("stderr.log");
+                let cur_stderr_sig = fs::metadata(&stderr_path).ok().map(|m| FileSig::from_meta(&m));
+                if cur_stderr_sig != cached.stderr_sig {
+                    cached.stderr_sig = cur_stderr_sig;
+                    cached.stderr_hint = cur_stderr_sig.and_then(|_| read_stderr_hint(&stderr_path));
+                }
             }
 
             let record = build_worker_record(
@@ -1155,6 +1351,8 @@ impl RegistryReader {
                 cached.state.as_ref(),
                 cached.status.as_ref(),
                 cached.prompt_preview.clone(),
+                cached.prompt_excerpt.clone(),
+                cached.stderr_hint.clone(),
                 &aliases,
                 &live_watchers,
                 active_worktrees.get(id),
@@ -1190,6 +1388,8 @@ fn build_worker_record(
     state: Option<&RawState>,
     status: Option<&RawStatus>,
     prompt_preview: Option<String>,
+    prompt_excerpt: Vec<String>,
+    stderr_hint: Option<String>,
     aliases: &HashMap<String, String>,
     live_watchers: &[WatcherRecord],
     wt_entry: Option<&WorktreeEntry>,
@@ -1362,7 +1562,21 @@ fn build_worker_record(
         })
         .unwrap_or(0);
 
-    let end_ref = ended_at.unwrap_or(now);
+    let is_settled_or_lost = liveness_lost
+        || matches!(
+            effective_status.as_str(),
+            "completed" | "failed" | "interrupted" | "cancelled"
+        );
+    let end_ref = ended_at.unwrap_or_else(|| {
+        if is_settled_or_lost {
+            last_activity
+                .or(turn_started_at)
+                .or(started_at)
+                .unwrap_or(now)
+        } else {
+            now
+        }
+    });
     let elapsed_s = started_at
         .map(|s| (end_ref - s).max(0.0))
         .or_else(|| sp.and_then(|s| s.elapsed_s));
@@ -1488,6 +1702,53 @@ fn build_worker_record(
                 .and_then(|v| v.as_u64())
         });
 
+    let turn_usage = state.and_then(|s| s.turn_usage.as_ref());
+    let input_tokens = turn_usage
+        .and_then(|u| u.get("input_tokens"))
+        .and_then(|v| v.as_u64());
+    let output_tokens = turn_usage
+        .and_then(|u| u.get("output_tokens"))
+        .and_then(|v| v.as_u64());
+    let reasoning_tokens = turn_usage
+        .and_then(|u| u.get("reasoning_tokens"))
+        .and_then(|v| v.as_u64());
+    let total_tokens = turn_usage
+        .and_then(|u| u.get("total_tokens"))
+        .and_then(|v| v.as_u64());
+    let context_tokens = state.and_then(|s| s.context_tokens);
+
+    let owned_paths: Vec<String> = state
+        .and_then(|s| s.acceptance_contract.as_ref())
+        .and_then(|c| c.get("owned_paths"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.as_str().map(single_line))
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let delta = state.and_then(|s| s.workspace_delta.as_ref());
+    let delta_added = delta
+        .and_then(|d| d.get("added"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
+    let delta_deleted = delta
+        .and_then(|d| d.get("deleted"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
+    let delta_untracked = delta
+        .and_then(|d| d.get("untracked"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
+    let diff_stat = delta
+        .and_then(|d| d.get("diff_stat"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
     let watched_by: Vec<String> = live_watchers
         .iter()
         .filter(|w| w.covers(id, parent_session.as_deref()))
@@ -1497,6 +1758,15 @@ fn build_worker_record(
     let events_sig = fs::metadata(job_dir.join("events.jsonl"))
         .ok()
         .map(|m| (m.len(), m.mtime()));
+
+    let turn_prompt_file = state
+        .and_then(|s| s.turn_prompt_file.as_deref())
+        .map(single_line)
+        .filter(|s| !s.is_empty());
+
+    let has_result_file = fs::metadata(job_dir.join("result.txt"))
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false);
 
     WorkerRecord {
         id: id.to_string(),
@@ -1545,7 +1815,10 @@ fn build_worker_record(
         activity,
         last_check,
         prompt_file,
+        turn_prompt_file,
         prompt_preview,
+        prompt_excerpt,
+        has_result_file,
         task_failures: sp
             .and_then(|s| s.task_failures)
             .or_else(|| state.and_then(|s| s.turn_task_failures.or(s.task_failures)))
@@ -1564,12 +1837,18 @@ fn build_worker_record(
                 .or_else(|| sp.and_then(|s| s.error.as_deref()))
                 .map(single_line)
         }),
+        stderr_hint,
         exit_code: state
             .and_then(|s| s.exit_code)
             .or_else(|| sp.and_then(|s| s.exit_code)),
         changed_files,
         changed_files_total,
         changed_files_truncated,
+        owned_paths,
+        delta_added,
+        delta_deleted,
+        delta_untracked,
+        diff_stat,
         verification_status,
         acceptance_status,
         report_state: sp
@@ -1579,6 +1858,11 @@ fn build_worker_record(
         report_summary,
         report_risks,
         native_cache_read_tokens,
+        input_tokens,
+        output_tokens,
+        reasoning_tokens,
+        total_tokens,
+        context_tokens,
         watched_by,
         status_projection_stale,
         events_sig,

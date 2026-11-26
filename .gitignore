@@ -4,3 +4,4 @@ __pycache__/
 .pi/
 scratch/
 tui/target/
+site/node_modules/

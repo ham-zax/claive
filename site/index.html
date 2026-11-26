@@ -1,654 +1,815 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>claive — Multi-harness coding agent orchestration &amp; triage</title>
-<meta name="description" content="claive is a harness-neutral outer cloth that wraps Codex, Claude Code, Pi, AGY, and Muse with isolated Git worktrees, a Ratatui triage dashboard, flat-schema MCP tools, verifier-gated orchestration, and an unattended server queue. MIT licensed.">
+<title>claive | Stop babysitting five coding agent tabs</title>
+<meta name="description" content="Drive Codex, Claude Code, Pi, AGY, and Muse from one control plane. Isolated Git worktrees, native Rust triage cockpit, flat-schema MCP tools, and test-gated merges — without stripping native agent tools.">
 <meta name="color-scheme" content="dark light">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%230d1117'/%3E%3Crect x='4' y='4' width='6' height='16' rx='1.5' fill='%2338bdf8'/%3E%3Crect x='13' y='4' width='7' height='7' rx='1.5' fill='%2334d399'/%3E%3Crect x='13' y='13' width='7' height='7' rx='1.5' fill='%23e879f9'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%230b0b0c'/%3E%3Crect x='4' y='4' width='6' height='16' rx='1.5' fill='%23e5553b'/%3E%3Crect x='13' y='4' width='7' height='7' rx='1.5' fill='%23edeae3'/%3E%3Crect x='13' y='13' width='7' height='7' rx='1.5' fill='%2334d399'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400..600;1,6..72,400&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,500..700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
 <style>
+@layer ui-sdk;
+
 :root {
-  --bg: #f6f2e8;
-  --surface: #ece6d8;
-  --surface-2: #e3dccb;
-  --ink: #171512;
-  --muted: #595244;
-  --rule: #cfc7b4;
-  --accent: #0c628c;
-  --accent-soft: rgba(12, 98, 140, 0.11);
-  --ok: #156d43;
-  --ok-soft: rgba(21, 109, 67, 0.12);
-  --warn: #9a5b04;
-  --warn-soft: rgba(154, 91, 4, 0.13);
-  --ask: #8e248a;
-  --ask-soft: rgba(142, 36, 138, 0.12);
-  --fail: #b2321e;
-  --fail-soft: rgba(178, 50, 30, 0.12);
-  /* Always-dark cockpit terminal tokens */
-  --term-bg: #0c1017;
-  --term-surface: #131923;
-  --term-row-sel: #1c2535;
-  --term-border: #253042;
-  --term-ink: #e5ecf4;
-  --term-muted: #7f8ea3;
-  --term-cyan: #38bdf8;
-  --term-green: #34d399;
-  --term-yellow: #fbbf24;
-  --term-magenta: #e879f9;
-  --term-red: #f87171;
-  --serif: "Newsreader", Charter, Georgia, serif;
-  --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --radius: 8px;
-  --shadow: 0 14px 40px rgba(0, 0, 0, 0.10);
-  color-scheme: light dark;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg: #0b0e14;
-    --surface: #121721;
-    --surface-2: #181f2d;
-    --ink: #ecf1f8;
-    --muted: #93a1b5;
-    --rule: #232d3f;
-    --accent: #38bdf8;
-    --accent-soft: rgba(56, 189, 248, 0.12);
-    --ok: #34d399;
-    --ok-soft: rgba(52, 211, 153, 0.13);
-    --warn: #fbbf24;
-    --warn-soft: rgba(251, 191, 36, 0.14);
-    --ask: #e879f9;
-    --ask-soft: rgba(232, 121, 249, 0.14);
-    --fail: #f87171;
-    --fail-soft: rgba(248, 113, 113, 0.14);
-    --shadow: 0 20px 55px rgba(0, 0, 0, 0.45);
-  }
-}
-
-:root[data-theme="dark"] {
-  --bg: #0b0e14;
-  --surface: #121721;
-  --surface-2: #181f2d;
-  --ink: #ecf1f8;
-  --muted: #93a1b5;
-  --rule: #232d3f;
-  --accent: #38bdf8;
-  --accent-soft: rgba(56, 189, 248, 0.12);
+  --bg: #0b0b0c;
+  --surface: #121316;
+  --surface-2: #181a1f;
+  --line: rgba(237, 234, 227, 0.10);
+  --line-strong: rgba(237, 234, 227, 0.20);
+  --ink: #edeae3;
+  --muted: #a19d94;
+  --soft: #78746c;
+  --accent: #e5553b;
+  --accent-hi: #f06a51;
+  --accent-soft: rgba(229, 85, 59, 0.13);
+  --accent-ink: #0b0b0c;
   --ok: #34d399;
-  --ok-soft: rgba(52, 211, 153, 0.13);
   --warn: #fbbf24;
-  --warn-soft: rgba(251, 191, 36, 0.14);
-  --ask: #e879f9;
-  --ask-soft: rgba(232, 121, 249, 0.14);
   --fail: #f87171;
-  --fail-soft: rgba(248, 113, 113, 0.14);
-  --shadow: 0 20px 55px rgba(0, 0, 0, 0.45);
+  --ask: #f59e0b;
+  --link: #739fdf;
+  --term-bg: #0c0d10;
+  --term-surface: #13151a;
+  --term-sel: #1c2029;
+  --term-line: #252a35;
+  --term-ink: #edeae3;
+  --term-muted: #8a8f9a;
+  --display: "Bricolage Grotesque", system-ui, sans-serif;
+  --sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   color-scheme: dark;
 }
 
 :root[data-theme="light"] {
+  --bg: #f6f3ec;
+  --surface: #ede8dc;
+  --surface-2: #e4ded0;
+  --line: rgba(22, 23, 26, 0.12);
+  --line-strong: rgba(22, 23, 26, 0.24);
+  --ink: #16171a;
+  --muted: #565249;
+  --soft: #6d685e;
+  --accent: #c93f27;
+  --accent-hi: #b5341e;
+  --accent-soft: rgba(201, 63, 39, 0.11);
+  --accent-ink: #ffffff;
+  --ok: #15803d;
+  --warn: #b45309;
+  --fail: #b91c1c;
+  --ask: #b45309;
+  --link: #2558a8;
   color-scheme: light;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
-html {
-  -webkit-text-size-adjust: 100%;
-  scroll-padding-top: 4.5rem;
-}
-@media (prefers-reduced-motion: no-preference) {
-  html { scroll-behavior: smooth; }
-}
+html { -webkit-text-size-adjust: 100%; scroll-padding-top: 4.5rem; }
+@media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
 body {
   margin: 0;
-  background: var(--bg);
+  background-color: var(--bg);
+  background-image: radial-gradient(ellipse 68% 42% at 80% -6%, var(--accent-soft) 0%, transparent 64%);
   color: var(--ink);
-  font: 400 1rem/1.62 var(--sans);
+  font: 400 1rem/1.6 var(--sans);
   -webkit-font-smoothing: antialiased;
 }
-::selection { background: var(--accent); color: #071018; }
+::selection { background: var(--accent); color: var(--accent-ink); }
 a { color: inherit; text-underline-offset: 0.2em; }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
-code, pre, .mono { font-family: var(--mono); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+code, pre { font-family: var(--mono); }
 
 .skip {
-  position: absolute; top: -5rem; left: 1rem; z-index: 200;
-  background: var(--ink); color: var(--bg);
-  padding: 0.6rem 1rem; font: 500 0.85rem var(--mono); border-radius: 4px;
+  position: absolute; top: -4rem; left: 1rem; z-index: 200;
+  background: var(--accent); color: var(--accent-ink);
+  padding: 0.5rem 0.9rem; font: 600 0.8rem var(--mono); border-radius: 999px; text-decoration: none;
 }
 .skip:focus { top: 0.75rem; }
 
 .wrap {
   max-width: 76rem;
   margin-inline: auto;
-  padding-inline: max(1rem, env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px));
+  padding-inline: max(1.1rem, env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px));
 }
 
 /* Header */
-.site-header {
+.topbar {
   position: sticky; top: 0; z-index: 100;
-  background: color-mix(in srgb, var(--bg) 88%, transparent);
-  backdrop-filter: blur(10px);
-  border-bottom: 1px solid var(--rule);
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
 }
-.header-inner {
+.topbar-in {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
   gap: 0.5rem 1.25rem; min-height: 3.75rem; padding-block: 0.35rem;
 }
 .brand {
   display: inline-flex; align-items: center; gap: 0.6rem;
-  font: 600 1.15rem var(--mono); text-decoration: none; letter-spacing: -0.02em;
-  min-height: 2.5rem;
+  font: 700 1.15rem var(--display); letter-spacing: -0.02em; text-decoration: none;
 }
-.brand-mark {
-  display: inline-grid; grid-template-columns: 5px 5px; gap: 2px;
-}
-.brand-mark i { display: block; border-radius: 1px; }
-.brand-mark i:nth-child(1) { grid-row: 1 / 3; height: 14px; background: var(--accent); }
-.brand-mark i:nth-child(2) { height: 6px; background: var(--ok); }
-.brand-mark i:nth-child(3) { height: 6px; background: var(--ask); }
-
-.nav-links {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 1.15rem;
-  font-size: 0.92rem;
-}
-.nav-links a {
-  text-decoration: none; color: var(--muted); padding-block: 0.45rem;
-  white-space: nowrap; transition: color 0.15s ease;
-}
-.nav-links a:hover { color: var(--ink); }
-
-.header-actions { display: flex; align-items: center; gap: 0.5rem; }
-.icon-btn {
-  display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem;
-  min-height: 2.25rem; padding: 0.3rem 0.7rem;
+.brand-seal { width: 10px; height: 10px; border-radius: 2px; background: var(--accent); display: inline-block; }
+.nav { display: flex; align-items: center; gap: 1.4rem; font-size: 0.92rem; }
+.nav a { text-decoration: none; color: var(--muted); padding-block: 0.4rem; transition: color 140ms ease; }
+.nav a:hover { color: var(--ink); }
+.top-acts { display: flex; align-items: center; gap: 0.5rem; }
+.pill-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 2.2rem; padding: 0.25rem 0.85rem;
   font: 500 0.8rem var(--mono); color: var(--ink);
-  background: var(--surface); border: 1px solid var(--rule); border-radius: 6px;
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: 999px;
   cursor: pointer; text-decoration: none;
+  transition: border-color 140ms ease, transform 120ms var(--ease-out);
 }
-.icon-btn:hover { border-color: var(--accent); color: var(--accent); }
+.pill-btn:hover { border-color: var(--accent); color: var(--accent); }
+.pill-btn:active { transform: scale(0.97); }
 
 @media (max-width: 44rem) {
-  .nav-links {
-    order: 3; flex: 1 0 100%; justify-content: space-between; gap: 0.25rem;
-    border-top: 1px solid var(--rule); padding-top: 0.35rem; font-size: 0.84rem;
+  .nav {
+    order: 3; flex: 1 0 100%; justify-content: space-between; gap: 0.2rem;
+    border-top: 1px solid var(--line); padding-top: 0.3rem; font-size: 0.84rem;
   }
 }
 
-/* Typography & Sections */
-section { padding-block: clamp(3.2rem, 7vw, 5.2rem) 0; }
-h1, h2, h3 { margin: 0; font-weight: 500; text-wrap: balance; }
-h1 {
-  font: 500 clamp(2.35rem, 5.8vw, 4.15rem)/1.05 var(--serif);
-  letter-spacing: -0.025em;
-}
-h2 {
-  font: 500 clamp(1.7rem, 3.6vw, 2.45rem)/1.14 var(--serif);
-  letter-spacing: -0.015em; margin-bottom: 0.75rem;
-}
-h3 { font: 600 1.08rem/1.3 var(--sans); }
-.eyebrow {
-  display: inline-flex; align-items: center; gap: 0.5rem;
-  font: 500 0.76rem var(--mono); text-transform: uppercase; letter-spacing: 0.08em;
-  color: var(--accent); margin-bottom: 0.75rem;
-}
-.eyebrow::before {
-  content: ""; width: 0.48rem; height: 0.48rem; border-radius: 2px; background: var(--accent);
-}
-.section-lede {
-  color: var(--muted); max-width: 64ch; margin: 0 0 1.75rem; font-size: 1.04rem;
-}
-
-/* Hero */
+/* Hero (Satori-calibrated energy: visceral pain + copyable install pill + live With/Without compare) */
 .hero {
-  display: grid; gap: 2.25rem; padding-block: clamp(2.4rem, 6vw, 4.5rem) 0;
+  display: grid; gap: 2.5rem;
+  padding-block: clamp(2.6rem, 6vw, 4.8rem) clamp(2rem, 4vw, 3.2rem);
   align-items: center;
 }
 @media (min-width: 62rem) {
-  .hero { grid-template-columns: 1.06fr 0.94fr; gap: 3rem; }
+  .hero { grid-template-columns: 1.04fr 0.96fr; gap: 3.2rem; }
+}
+.hero-kicker {
+  margin: 0 0 0.85rem; font: 500 0.84rem var(--mono); color: var(--accent);
+}
+h1 {
+  margin: 0;
+  font: 700 clamp(2.6rem, 5.6vw, 4.35rem)/1.02 var(--display);
+  letter-spacing: -0.035em; text-wrap: balance;
+}
+.seal-dot {
+  display: inline-block; width: 0.2em; height: 0.2em; margin-left: 0.08em;
+  border-radius: 2px; background: var(--accent); vertical-align: baseline;
+  transform-origin: center;
+  animation: seal-stamp 420ms cubic-bezier(0.34, 1.56, 0.64, 1) 180ms both;
+}
+@keyframes seal-stamp {
+  from { opacity: 0; transform: scale(2.1); }
+  to { opacity: 1; transform: scale(1); }
 }
 .hero-lede {
-  font-size: clamp(1.06rem, 1.8vw, 1.2rem); line-height: 1.58;
-  color: var(--muted); max-width: 56ch; margin: 1.15rem 0 1.4rem;
+  margin: 1.15rem 0 1.5rem; font-size: clamp(1.04rem, 1.6vw, 1.16rem);
+  color: var(--muted); max-width: 52ch; line-height: 1.56;
 }
 .hero-lede strong { color: var(--ink); font-weight: 600; }
-.meta-pills { display: flex; flex-wrap: wrap; gap: 0.45rem; margin-bottom: 1.5rem; }
-.pill {
-  display: inline-flex; align-items: center; gap: 0.4rem;
-  font: 500 0.76rem var(--mono); padding: 0.28rem 0.65rem;
-  border: 1px solid var(--rule); background: var(--surface);
-  border-radius: 999px; color: var(--muted);
+
+.hero-actions {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.7rem;
 }
-.pill .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
-.cta-row { display: flex; flex-wrap: wrap; gap: 0.7rem; }
 .btn {
-  display: inline-flex; align-items: center; gap: 0.5rem;
-  min-height: 2.7rem; padding: 0.5rem 1.15rem;
-  font: 500 0.88rem var(--mono); text-decoration: none;
-  border-radius: 6px; border: 1.5px solid var(--ink);
-  background: var(--ink); color: var(--bg); cursor: pointer;
-  transition: transform 0.12s ease, background 0.15s ease, border-color 0.15s ease;
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.45rem;
+  min-height: 2.8rem; padding: 0.55rem 1.25rem;
+  font: 600 0.88rem var(--sans); text-decoration: none; border-radius: 999px;
+  border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink);
+  cursor: pointer; transition: transform 120ms var(--ease-out), border-color 140ms ease, background 140ms ease;
 }
-.btn:hover { background: var(--accent); border-color: var(--accent); color: #061018; }
-.btn.alt { background: transparent; color: var(--ink); border-color: var(--rule); }
-.btn.alt:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.btn:hover { border-color: var(--ink); }
+.btn:active { transform: scale(0.97); }
+.btn.primary {
+  background: var(--accent); border-color: var(--accent); color: var(--accent-ink);
+}
+.btn.primary:hover { background: var(--accent-hi); border-color: var(--accent-hi); }
 
-/* Hero Rope Topology Card */
-.topology {
-  background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius);
-  padding: 1.25rem; box-shadow: var(--shadow);
+.install-pill {
+  display: inline-flex; align-items: center; gap: 0.55rem;
+  min-height: 2.8rem; padding: 0.25rem 0.35rem 0.25rem 0.9rem;
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: 999px;
+  font: 500 0.78rem var(--mono); max-width: 100%;
 }
-.topo-title {
-  display: flex; justify-content: space-between; align-items: center; gap: 0.5rem;
-  font: 500 0.74rem var(--mono); text-transform: uppercase; letter-spacing: 0.07em;
-  color: var(--muted); padding-bottom: 0.75rem; border-bottom: 1px solid var(--rule);
-  margin-bottom: 0.9rem;
+.install-pill code { overflow-x: auto; white-space: nowrap; color: var(--ink); }
+.install-prompt { color: var(--accent); font-weight: 700; }
+.copy-chip {
+  font: 600 0.74rem var(--mono); padding: 0.35rem 0.75rem;
+  background: var(--surface-2); color: var(--ink);
+  border: 1px solid var(--line-strong); border-radius: 999px; cursor: pointer;
 }
-.topo-tier { display: grid; gap: 0.5rem; }
-.topo-label {
-  font: 600 0.7rem var(--mono); text-transform: uppercase; letter-spacing: 0.07em;
-  color: var(--muted);
+.copy-chip:hover { border-color: var(--accent); color: var(--accent); }
+
+.hero-proof {
+  margin: 1.25rem 0 0; font-size: 0.88rem; color: var(--muted); max-width: 56ch;
 }
-.topo-nodes { display: flex; flex-wrap: wrap; gap: 0.4rem; }
-.topo-node {
-  font: 500 0.78rem var(--mono); padding: 0.34rem 0.62rem;
-  border: 1px solid var(--rule); background: var(--bg); border-radius: 5px;
+.hero-proof strong { color: var(--ink); font-weight: 600; }
+
+/* Hero Interactive Compare Card (With Claive vs 5 tmux tabs, animated trace) */
+.compare-card {
+  margin: 0; background: var(--term-bg); color: var(--term-ink);
+  border: 1px solid var(--term-line); border-radius: 14px; overflow: hidden;
+  font-family: var(--mono); min-width: 0; max-width: 100%;
 }
-.topo-connector {
-  display: flex; align-items: center; gap: 0.6rem;
-  margin-block: 0.65rem; font: 500 0.72rem var(--mono); color: var(--accent);
+ui-tabs#hero-compare { display: block; min-width: 0; max-width: 100%; }
+ui-tabs#hero-compare ui-tabs-list {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem;
+  padding: 0.65rem 0.9rem; background: var(--term-surface);
+  border-bottom: 1px solid var(--term-line);
 }
-.topo-connector::before, .topo-connector::after {
-  content: ""; flex: 1; height: 1px; background: var(--rule);
+.cmp-tab-group { display: inline-flex; gap: 0.35rem; }
+ui-tabs#hero-compare ui-tabs-tab button {
+  font: 600 0.75rem var(--mono); padding: 0.34rem 0.8rem; border-radius: 999px;
+  background: transparent; color: var(--term-muted); border: 1px solid transparent; cursor: pointer;
+  transition: color 150ms ease, background 150ms ease, border-color 150ms ease, transform 120ms var(--ease-out);
 }
-.topo-rope {
-  background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--rule));
-  border-radius: 6px; padding: 0.85rem;
+ui-tabs#hero-compare ui-tabs-tab button:hover { color: var(--term-ink); }
+ui-tabs#hero-compare ui-tabs-tab button:active { transform: scale(0.97); }
+ui-tabs#hero-compare ui-tabs-tab button[data-selected] {
+  background: var(--accent-soft); color: var(--term-ink); border-color: var(--accent);
 }
-.topo-rope-grid {
-  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.45rem 0.75rem;
-  margin-top: 0.45rem; font: 500 0.76rem var(--mono);
+.cmp-stat {
+  font-size: 0.7rem; font-weight: 600; color: #34d399;
+  transition: color 180ms ease;
 }
-.topo-rope-grid span { display: flex; align-items: center; gap: 0.38rem; }
-.topo-rope-grid span::before {
-  content: ""; width: 5px; height: 5px; border-radius: 1px; background: var(--accent); flex: none;
+.compare-card[data-mode="manual-tabs"] .cmp-stat { color: #f87171; }
+
+.cmp-goal-bar {
+  margin: 0.85rem 0.95rem 0; padding: 0.55rem 0.75rem;
+  background: var(--term-surface); border: 1px solid var(--term-line);
+  border-radius: 8px; font-size: 0.74rem;
+  display: flex; align-items: baseline; gap: 0.5rem; min-width: 0;
+}
+.cmp-goal-lbl { color: var(--accent); font-weight: 600; flex: none; }
+.cmp-goal-text { color: var(--term-ink); min-width: 0; }
+.cmp-caret {
+  display: inline-block; width: 0.48em; height: 1em; margin-left: 2px;
+  background: var(--accent); vertical-align: -0.14em; opacity: 0;
+}
+.compare-card.is-typing .cmp-caret {
+  opacity: 1; animation: cmp-blink 0.9s steps(1) infinite;
+}
+@keyframes cmp-blink { 50% { opacity: 0; } }
+
+ui-tabs#hero-compare ui-tabs-panel {
+  display: block; padding: 0.75rem 0.95rem 0.85rem; font-size: 0.74rem;
+  min-width: 0; max-width: 100%;
+}
+ui-tabs#hero-compare ui-tabs-panel[hidden] { display: none; }
+
+.cmp-stages {
+  list-style: none; margin: 0 0 0.7rem; padding: 0;
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.45rem;
+}
+.cmp-stages li {
+  position: relative; padding-bottom: 0.42rem;
+  font-size: 0.67rem; font-weight: 600; color: var(--term-muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  transition: color 220ms var(--ease-out);
+}
+.cmp-stages li::before,
+.cmp-stages li::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; border-radius: 2px;
+}
+.cmp-stages li::before { background: var(--term-line); }
+.cmp-stages li::after {
+  background: #34d399; transform-origin: left center; transform: scaleX(1);
+  transition: transform 340ms var(--ease-out);
+}
+.cmp-stages.is-bad li::after { background: #f87171; }
+
+.cmp-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.42rem; min-width: 0; }
+.cmp-list li {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.65rem;
+  padding: 0.48rem 0.68rem; border-radius: 6px; min-width: 0; max-width: 100%;
+  background: rgba(237, 234, 227, 0.03); border: 1px solid var(--term-line);
+  transition: opacity 280ms var(--ease-out), transform 300ms var(--ease-out), border-color 240ms ease, background 240ms ease;
+}
+.cmp-list li.is-good { border-color: rgba(52, 211, 153, 0.34); background: rgba(52, 211, 153, 0.06); }
+.cmp-list li.is-bad { border-color: rgba(248, 113, 113, 0.40); background: rgba(248, 113, 113, 0.07); }
+.cmp-list li.is-warn { border-color: rgba(251, 191, 36, 0.38); background: rgba(251, 191, 36, 0.06); }
+.cmp-cmd {
+  flex: 1 1 0; min-width: 0;
+  color: var(--term-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cmp-tag {
+  flex: 0 0 auto; white-space: nowrap; font-size: 0.69rem; font-weight: 600;
+  transition: opacity 220ms var(--ease-out) 80ms, transform 240ms var(--ease-out) 80ms;
+}
+.cmp-tag.ok { color: #34d399; }
+.cmp-tag.ask { color: #fb923c; }
+.cmp-tag.fail { color: #f87171; }
+.cmp-tag.warn { color: #fbbf24; }
+
+/* Armed choreography states (only active when motion is allowed) */
+@media (prefers-reduced-motion: no-preference) {
+  .compare-card.is-armed .cmp-stages li::after { transform: scaleX(0); }
+  .compare-card.is-armed .cmp-list li { opacity: 0; transform: translateY(7px); }
+  .compare-card.is-armed .cmp-list li .cmp-tag { opacity: 0; transform: scale(0.92); }
+
+  .compare-card.is-armed.step-1 .cmp-stages li[data-st="1"],
+  .compare-card.is-armed.step-2 .cmp-stages li[data-st="2"],
+  .compare-card.is-armed.step-3 .cmp-stages li[data-st="3"],
+  .compare-card.is-armed.step-4 .cmp-stages li[data-st="4"] { color: var(--term-ink); }
+
+  .compare-card.is-armed.step-1 .cmp-stages li[data-st="1"]::after,
+  .compare-card.is-armed.step-2 .cmp-stages li[data-st="2"]::after,
+  .compare-card.is-armed.step-3 .cmp-stages li[data-st="3"]::after,
+  .compare-card.is-armed.step-4 .cmp-stages li[data-st="4"]::after { transform: scaleX(1); }
+
+  .compare-card.is-armed.step-1 .cmp-list li[data-row="1"],
+  .compare-card.is-armed.step-2 .cmp-list li[data-row="2"],
+  .compare-card.is-armed.step-3 .cmp-list li[data-row="3"],
+  .compare-card.is-armed.step-4 .cmp-list li[data-row="4"] {
+    opacity: 1; transform: translateY(0);
+  }
+  .compare-card.is-armed.step-1 .cmp-list li[data-row="1"] .cmp-tag,
+  .compare-card.is-armed.step-2 .cmp-list li[data-row="2"] .cmp-tag,
+  .compare-card.is-armed.step-3 .cmp-list li[data-row="3"] .cmp-tag,
+  .compare-card.is-armed.step-4 .cmp-list li[data-row="4"] .cmp-tag {
+    opacity: 1; transform: scale(1);
+  }
+
+  .compare-card.is-armed .cmp-meter-fill { transform: scaleX(0); }
+  .compare-card.is-armed.step-2 .cmp-meter-row.is-claive .cmp-meter-fill { transform: scaleX(1); }
+  .compare-card.is-armed.step-4 .cmp-meter-row.is-manual .cmp-meter-fill { transform: scaleX(1); }
 }
 
-/* Interactive Dark Cockpit Simulator */
-.cockpit-shell {
+.cmp-meters {
+  padding: 0.65rem 0.95rem 0.7rem; border-top: 1px solid var(--term-line);
+  display: grid; gap: 0.42rem; font-size: 0.69rem;
+}
+.cmp-meter-row {
+  display: grid; grid-template-columns: 5.2rem 1fr auto; align-items: center; gap: 0.65rem;
+}
+.cmp-meter-name { color: var(--term-muted); font-weight: 600; }
+.cmp-meter-track {
+  height: 5px; border-radius: 999px; background: var(--term-surface); overflow: hidden;
+}
+.cmp-meter-fill {
+  display: block; height: 100%; width: var(--w, 100%); border-radius: 999px;
+  transform-origin: left center; transition: transform 480ms var(--ease-out);
+}
+.cmp-meter-row.is-claive .cmp-meter-fill { background: #34d399; }
+.cmp-meter-row.is-manual .cmp-meter-fill { background: #e5553b; }
+.cmp-meter-val { color: var(--term-ink); font-weight: 500; white-space: nowrap; }
+.cmp-meter-row.is-claive .cmp-meter-val { color: #34d399; }
+.cmp-meter-row.is-manual .cmp-meter-val { color: var(--term-muted); }
+
+.cmp-foot {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem;
+  padding: 0.55rem 0.95rem; border-top: 1px solid var(--term-line);
+  background: var(--term-surface); font-size: 0.7rem; color: var(--term-muted);
+}
+.cmp-live { display: inline-flex; align-items: center; gap: 0.45rem; }
+.cmp-foot .live-dot {
+  position: relative; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: #34d399;
+}
+.cmp-foot .live-dot::after {
+  content: ""; position: absolute; inset: -3px; border-radius: 50%;
+  border: 1.5px solid #34d399; opacity: 0;
+  animation: live-pulse 2.2s var(--ease-out) infinite;
+}
+@keyframes live-pulse {
+  0% { transform: scale(0.7); opacity: 0.7; }
+  75%, 100% { transform: scale(2); opacity: 0; }
+}
+.cmp-replay-btn {
+  font: 600 0.69rem var(--mono); padding: 0.2rem 0.6rem; border-radius: 999px;
   background: var(--term-bg); color: var(--term-ink);
-  border: 1px solid var(--term-border); border-radius: 10px;
-  overflow: hidden; box-shadow: var(--shadow);
-  font-family: var(--mono);
+  border: 1px solid var(--term-line); cursor: pointer;
+  transition: border-color 140ms ease, color 140ms ease, transform 120ms var(--ease-out);
 }
-.cockpit-chrome {
+.cmp-replay-btn:hover { border-color: var(--accent); color: var(--accent-hi); }
+.cmp-replay-btn:active { transform: scale(0.96); }
+
+/* Works-with strip */
+.works-strip {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1.1rem;
+  padding-block: 1.05rem; border-block: 1px solid var(--line);
+  font-size: 0.84rem; color: var(--muted);
+}
+.works-strip strong { color: var(--ink); font: 600 0.78rem var(--mono); }
+.works-strip ul {
+  list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.35rem 0.9rem;
+}
+.works-strip li { color: var(--ink); font-weight: 500; }
+.works-note { margin-left: auto; font: 400 0.78rem var(--mono); color: var(--muted); }
+
+/* Sections */
+.section { padding-block: clamp(3rem, 7vw, 5.2rem) 0; }
+h2 {
+  margin: 0 0 0.7rem;
+  font: 700 clamp(1.8rem, 3.8vw, 2.75rem)/1.08 var(--display);
+  letter-spacing: -0.03em; text-wrap: balance;
+}
+.section-intro {
+  margin: 0 0 1.8rem; color: var(--muted); font-size: 1.04rem; max-width: 60ch;
+}
+
+/* Proof metrics + Receipts contrast (Satori #plain rhythm) */
+.metrics {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 0.9rem; margin: 0 0 1.5rem;
+}
+.metric {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+  padding: 1.1rem 1.2rem;
+}
+.metric dt { font: 500 0.78rem var(--mono); color: var(--muted); margin-bottom: 0.35rem; }
+.metric dd { margin: 0; display: grid; gap: 0.22rem; }
+.metric-fig { font: 700 1.75rem/1.1 var(--display); color: var(--ink); letter-spacing: -0.02em; }
+.metric-sub { font-size: 0.85rem; color: var(--muted); }
+
+.receipts { display: grid; gap: 1rem; }
+@media (min-width: 52rem) { .receipts { grid-template-columns: 1fr 1fr; } }
+.receipt {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+  padding: 1.25rem 1.35rem;
+}
+.receipt.is-claive {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: linear-gradient(180deg, var(--accent-soft), var(--surface) 42%);
+}
+.receipt-head {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
-  gap: 0.5rem 1rem; padding: 0.6rem 0.9rem;
-  background: #080b10; border-bottom: 1px solid var(--term-border);
-  font-size: 0.76rem; color: var(--term-muted);
+  gap: 0.5rem; padding-bottom: 0.75rem; margin-bottom: 0.85rem;
+  border-bottom: 1px solid var(--line);
 }
-.chrome-dots { display: inline-flex; gap: 0.38rem; align-items: center; }
-.chrome-dots i { width: 9px; height: 9px; border-radius: 50%; display: block; background: #2c374b; }
-.chrome-title { color: var(--term-ink); font-weight: 500; }
-.chrome-controls { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
-.term-toggle {
-  font: 500 0.72rem var(--mono); padding: 0.22rem 0.55rem;
+.receipt-head strong { font: 700 1rem var(--display); }
+.receipt-head code {
+  font-size: 0.76rem; padding: 0.2rem 0.55rem; border-radius: 999px;
+  background: var(--surface-2); color: var(--muted);
+}
+.receipt.is-claive .receipt-head code { color: var(--accent); }
+.receipt ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.65rem; }
+.receipt li { font-size: 0.93rem; color: var(--muted); line-height: 1.5; }
+.receipt li b { color: var(--ink); font-weight: 600; }
+
+/* Diagram-Design Verified Architecture Schematic */
+.diagram-frame {
+  background: #111215; border: 1px solid var(--line-strong); border-radius: 14px;
+  padding: 1.1rem; overflow-x: auto;
+}
+.diagram-frame svg { width: 100%; min-width: 900px; display: block; }
+.arch-strip {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 0.85rem; margin-top: 1rem;
+}
+.arch-item {
+  border-top: 1px solid var(--line-strong); padding-top: 0.75rem;
+}
+.arch-item h3 { margin: 0 0 0.25rem; font: 600 0.95rem var(--display); }
+.arch-item p { margin: 0; font-size: 0.88rem; color: var(--muted); }
+
+/* Live Rust Cockpit (@ui-sdk/web) */
+.cockpit {
+  background: var(--term-bg); color: var(--term-ink);
+  border: 1px solid var(--term-line); border-radius: 14px;
+  overflow: hidden; font-family: var(--mono);
+}
+.ck-bar {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 0.5rem 1rem; padding: 0.65rem 0.95rem;
+  background: #08090c; border-bottom: 1px solid var(--term-line); font-size: 0.75rem;
+}
+.ck-counts { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; }
+.hdr-brand { color: var(--accent-hi); font-weight: 700; }
+.hdr-ask { color: #fb923c; font-weight: 600; }
+.hdr-review { color: #34d399; font-weight: 600; }
+.hdr-run { color: #38bdf8; font-weight: 600; }
+.hdr-muted { color: var(--term-muted); }
+
+.ck-tools { display: flex; flex-wrap: wrap; gap: 0.45rem; }
+.term-btn {
+  font: 500 0.72rem var(--mono); padding: 0.28rem 0.7rem;
   background: var(--term-surface); color: var(--term-muted);
-  border: 1px solid var(--term-border); border-radius: 4px; cursor: pointer;
+  border: 1px solid var(--term-line); border-radius: 999px; cursor: pointer;
+  transition: border-color 140ms ease, color 140ms ease, transform 120ms var(--ease-out);
 }
-.term-toggle:hover, .term-toggle[aria-pressed="true"] {
-  border-color: var(--term-cyan); color: var(--term-cyan);
-}
+.term-btn:hover, .term-btn[data-pressed] { color: var(--term-ink); border-color: var(--accent); }
+.term-btn:active { transform: scale(0.97); }
 
-.cockpit-status-bar {
-  padding: 0.55rem 0.9rem; border-bottom: 1px solid var(--term-border);
-  font-size: 0.76rem; display: grid; gap: 0.25rem; background: #0e131c;
-}
-.status-row-1 { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; }
-.status-row-2 { color: var(--term-muted); font-size: 0.72rem; }
-.t-badge {
-  display: inline-block; padding: 0.08rem 0.42rem; border-radius: 3px;
-  font-weight: 600; font-size: 0.7rem; letter-spacing: 0.03em;
-}
-.t-badge.brand-b { background: var(--term-cyan); color: #051018; }
-.t-badge.ask { background: var(--term-magenta); color: #16041a; }
-.t-badge.run { background: #1e293b; color: #f8fafc; border: 1px solid #475569; }
-.t-badge.review { background: var(--term-green); color: #041911; }
-.t-badge.done { background: transparent; color: var(--term-muted); border: 1px solid var(--term-border); }
-.t-badge.warn { background: var(--term-yellow); color: #1a1102; }
-.t-badge.fail { background: var(--term-red); color: #1d0404; }
-
-.cockpit-grid {
-  display: grid; gap: 0; grid-template-columns: 1fr;
-}
+.ck-grid { display: grid; grid-template-columns: 1fr; }
+@media (min-width: 64rem) { .ck-grid { grid-template-columns: 1.05fr 1.25fr 0.9fr; } }
+.pane { border-bottom: 1px solid var(--term-line); display: flex; flex-direction: column; min-width: 0; }
 @media (min-width: 64rem) {
-  .cockpit-grid { grid-template-columns: 1.05fr 1.25fr 0.95fr; }
-}
-.pane {
-  border-bottom: 1px solid var(--term-border);
-  display: flex; flex-direction: column; min-width: 0;
-}
-@media (min-width: 64rem) {
-  .pane { border-bottom: 0; border-right: 1px solid var(--term-border); min-height: 25rem; }
+  .pane { border-bottom: 0; border-right: 1px solid var(--term-line); min-height: 25rem; }
   .pane:last-child { border-right: 0; }
 }
-.pane-head {
-  display: flex; justify-content: space-between; align-items: center; gap: 0.5rem;
-  padding: 0.45rem 0.75rem; background: var(--term-surface);
-  border-bottom: 1px solid var(--term-border);
-  font-size: 0.73rem; color: var(--term-cyan); font-weight: 600;
+.pane-top {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 0.45rem 0.85rem; background: var(--term-surface);
+  border-bottom: 1px solid var(--term-line); font-size: 0.72rem; color: var(--term-muted);
 }
-.pane-head .sub { color: var(--term-muted); font-weight: 400; }
+.pane-top strong { color: var(--term-ink); }
 
-/* Workers Table inside Cockpit */
-.worker-list { list-style: none; margin: 0; padding: 0; }
-.worker-item {
-  width: 100%; text-align: left; background: transparent; border: 0;
-  border-bottom: 1px solid rgba(37, 48, 66, 0.55);
-  color: inherit; font: inherit; padding: 0.55rem 0.7rem; cursor: pointer;
-  display: grid; gap: 0.22rem;
+ui-listbox#worker-listbox { display: flex; flex-direction: column; gap: 4px; padding: 0.45rem; outline: none; }
+ui-listbox#worker-listbox ui-listbox-item {
+  display: block; padding: 0.56rem 0.68rem; cursor: pointer;
+  border: 1px solid transparent; border-radius: 8px; outline: none;
+  transition: background 120ms ease, border-color 120ms ease;
 }
-.worker-item:hover { background: rgba(28, 37, 53, 0.55); }
-.worker-item[aria-selected="true"] {
-  background: var(--term-row-sel);
-  box-shadow: inset 3px 0 0 var(--term-cyan);
+ui-listbox#worker-listbox ui-listbox-item:hover,
+ui-listbox#worker-listbox ui-listbox-item[data-highlighted] { background: rgba(28, 32, 41, 0.58); }
+ui-listbox#worker-listbox ui-listbox-item[data-selected] {
+  background: var(--term-sel); border-color: var(--accent);
 }
-.worker-top {
-  display: flex; align-items: center; gap: 0.45rem; font-size: 0.75rem;
-}
-.worker-name { color: var(--term-ink); font-weight: 600; }
-.worker-seen { margin-left: auto; color: var(--term-muted); font-size: 0.7rem; }
-.worker-now {
-  font-size: 0.74rem; color: #cbd5e1;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.worker-sub {
-  font-size: 0.69rem; color: var(--term-muted);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
+.w-row { display: grid; gap: 0.22rem; }
+.w-top { display: flex; align-items: center; gap: 0.45rem; font-size: 0.72rem; }
+.st-pill { font-weight: 600; }
+.st-ask { color: #fb923c; }
+.st-run { color: #38bdf8; }
+.st-review { color: #34d399; }
+.st-done { color: var(--term-muted); }
+.w-name { color: var(--term-ink); font-weight: 600; }
+.w-time { margin-left: auto; color: var(--term-muted); font-size: 0.67rem; }
+.w-mission { font-size: 0.74rem; color: #f8fafc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.w-sub { font-size: 0.69rem; color: var(--term-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.w-sub.sub-ask { color: #fb923c; }
+.w-sub.sub-run { color: #38bdf8; }
+.w-sub.sub-review { color: #34d399; }
 
-/* Inspector Pane */
-.tab-bar {
-  display: flex; flex-wrap: wrap; gap: 0.15rem; padding: 0.35rem 0.55rem;
-  border-bottom: 1px solid var(--term-border); background: #0e131c;
+ui-tabs#inspector-tabs { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+ui-tabs#inspector-tabs ui-tabs-list {
+  display: flex; flex-wrap: wrap; gap: 0.2rem; padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--term-line); background: #0e1015;
 }
-.tab-btn {
+ui-tabs#inspector-tabs ui-tabs-tab button {
   background: transparent; border: 0; border-bottom: 2px solid transparent;
-  color: var(--term-muted); font: 500 0.72rem var(--mono);
-  padding: 0.28rem 0.48rem; cursor: pointer;
+  color: var(--term-muted); font: 500 0.72rem var(--mono); padding: 0.28rem 0.48rem; cursor: pointer;
 }
-.tab-btn:hover { color: var(--term-ink); }
-.tab-btn[aria-selected="true"] {
-  color: var(--term-cyan); border-bottom-color: var(--term-cyan);
-}
-.pane-body {
-  padding: 0.7rem 0.8rem; font-size: 0.75rem; line-height: 1.5;
-  overflow-x: auto; flex: 1;
-}
-.filter-strip {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem;
-  margin-bottom: 0.6rem; font-size: 0.7rem; color: var(--term-muted);
-}
-.filter-pill {
-  font: 500 0.69rem var(--mono); padding: 0.15rem 0.45rem;
-  background: transparent; color: var(--term-muted);
-  border: 1px solid var(--term-border); border-radius: 4px; cursor: pointer;
-}
-.filter-pill[aria-pressed="true"] {
-  background: rgba(56, 189, 248, 0.15); color: var(--term-cyan); border-color: var(--term-cyan);
-}
-.act-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.28rem; }
-.act-row { border: 1px solid transparent; border-radius: 4px; }
-.act-btn {
-  width: 100%; text-align: left; background: transparent; border: 0;
-  color: inherit; font: inherit; padding: 0.28rem 0.35rem; cursor: pointer;
-  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.35rem;
-  border-radius: 4px;
-}
-.act-btn:hover { background: rgba(28, 37, 53, 0.65); }
-.act-row.open { background: rgba(19, 25, 35, 0.9); border-color: var(--term-border); }
-.cat-tag { font-weight: 600; min-width: 3.3rem; font-size: 0.7rem; }
-.cat-test { color: var(--term-green); }
-.cat-build, .cat-read, .cat-run { color: var(--term-cyan); }
-.cat-edit { color: var(--term-yellow); }
-.cat-say { color: #ffffff; }
-.cat-err { color: var(--term-red); }
-.act-sum { color: var(--term-ink); flex: 1 1 11rem; min-width: 0; }
-.act-out { font-size: 0.72rem; }
-.act-out.ok { color: var(--term-green); }
-.act-out.err { color: var(--term-red); }
-.act-out.running { color: var(--term-yellow); }
-.act-detail {
-  padding: 0.45rem 0.65rem 0.55rem 1.35rem;
-  border-top: 1px dashed var(--term-border);
-  font-size: 0.71rem; color: #cbd5e1; white-space: pre-wrap; word-break: break-word;
-}
-.act-detail .cmd { color: var(--term-cyan); }
-.act-detail .exit-err { color: var(--term-red); }
+ui-tabs#inspector-tabs ui-tabs-tab button:hover { color: var(--term-ink); }
+ui-tabs#inspector-tabs ui-tabs-tab button[data-selected] { color: var(--term-ink); border-bottom-color: var(--accent); }
+ui-tabs#inspector-tabs ui-tabs-panel { padding: 0.75rem 0.85rem; font-size: 0.74rem; flex: 1; }
+ui-tabs#inspector-tabs ui-tabs-panel[hidden] { display: none; }
 
-/* Briefing Pane styling */
-.brief-block { margin-bottom: 0.75rem; }
-.brief-h {
-  font-size: 0.69rem; text-transform: uppercase; letter-spacing: 0.06em;
-  color: var(--term-muted); font-weight: 600; margin-bottom: 0.22rem;
+.seg-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 0.5rem; margin-bottom: 0.6rem; font-size: 0.7rem; color: var(--term-muted);
 }
+.ck-seg {
+  position: relative; display: inline-flex; padding: 2px;
+  border: 1px solid var(--term-line); border-radius: 999px; background: #08090c; isolation: isolate;
+}
+.ck-seg ui-segmented-control-indicator {
+  position: absolute; z-index: -1; border-radius: 999px;
+  background: var(--term-sel); border: 1px solid var(--accent);
+  top: var(--segmented-control-indicator-top);
+  left: var(--segmented-control-indicator-left);
+  width: var(--segmented-control-indicator-width);
+  height: var(--segmented-control-indicator-height);
+  transition: left 150ms var(--ease-out), width 150ms var(--ease-out);
+}
+.ck-seg ui-segmented-control-indicator[data-activation-direction="none"] { transition: none; }
+.ck-seg ui-segmented-control-item {
+  padding: 0.16rem 0.55rem; font: 500 0.68rem var(--mono);
+  color: var(--term-muted); cursor: pointer; user-select: none;
+}
+.ck-seg ui-segmented-control-item[data-checked] { color: var(--term-ink); }
+
+ui-accordion#activity-accordion { display: grid; gap: 0.26rem; }
+ui-accordion#activity-accordion ui-accordion-item { border: 1px solid transparent; border-radius: 6px; }
+ui-accordion#activity-accordion ui-accordion-item[data-open] {
+  background: var(--term-surface); border-color: var(--term-line);
+}
+ui-accordion#activity-accordion ui-accordion-header h4 { margin: 0; font: inherit; }
+.act-btn {
+  width: 100%; text-align: left; background: transparent; border: 0; color: inherit;
+  font: inherit; padding: 0.28rem 0.4rem; cursor: pointer;
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.35rem;
+}
+.act-chev::before { content: "+"; color: var(--accent-hi); font-weight: 700; }
+.act-btn[data-open] .act-chev::before { content: "−"; }
+.cat-tag { font-weight: 600; min-width: 2.9rem; font-size: 0.69rem; }
+.cat-test { color: #34d399; }
+.cat-build, .cat-read, .cat-run { color: #38bdf8; }
+.cat-edit { color: #fbbf24; }
+.cat-say { color: #ffffff; }
+.act-sum { color: var(--term-ink); flex: 1 1 9rem; min-width: 0; }
+.act-out { font-size: 0.71rem; }
+.act-out.ok { color: #34d399; }
+.act-out.error { color: #f87171; }
+.act-out.running { color: #fbbf24; }
+ui-accordion-panel[hidden] { display: none; }
+.act-detail {
+  padding: 0.4rem 0.6rem 0.5rem 1.3rem; border-top: 1px dashed var(--term-line);
+  font-size: 0.7rem; color: #cbd5e1; white-space: pre-wrap;
+}
+.act-detail .cmd { color: #38bdf8; }
+.act-detail .exit-err { color: #f87171; }
+
+.pane-body { padding: 0.75rem 0.85rem; font-size: 0.74rem; line-height: 1.5; flex: 1; }
+.brief-id { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; margin-bottom: 0.18rem; }
+.brief-model { color: #ffffff; font-weight: 600; }
+.brief-timing { color: var(--term-muted); font-size: 0.7rem; margin-bottom: 0.65rem; }
+.brief-block { margin-bottom: 0.7rem; }
+.brief-h { font-size: 0.68rem; color: var(--term-muted); font-weight: 600; margin-bottom: 0.22rem; }
+.brief-mission { color: #ffffff; }
 .brief-ask {
-  border: 1px solid rgba(232, 121, 249, 0.45); background: rgba(232, 121, 249, 0.08);
-  padding: 0.5rem 0.6rem; border-radius: 5px; margin-bottom: 0.75rem;
+  border: 1px solid rgba(251, 146, 60, 0.42); background: rgba(251, 146, 60, 0.08);
+  border-radius: 8px; padding: 0.5rem 0.65rem; margin-bottom: 0.7rem;
 }
-.brief-ask .ask-t { color: var(--term-magenta); font-weight: 600; font-size: 0.72rem; }
-.brief-kv { display: grid; grid-template-columns: 5.8rem 1fr; gap: 0.2rem 0.5rem; font-size: 0.73rem; }
+.ask-t { color: #fb923c; font-weight: 600; font-size: 0.71rem; }
+.ask-q { color: #ffffff; margin: 0.2rem 0; }
+.ask-cmd { color: #38bdf8; font-size: 0.69rem; }
+.brief-kv { display: grid; grid-template-columns: 4.5rem 1fr; gap: 0.2rem 0.5rem; margin: 0; font-size: 0.72rem; }
 .brief-kv dt { color: var(--term-muted); }
 .brief-kv dd { margin: 0; color: var(--term-ink); word-break: break-word; }
+.brief-ms { font-size: 0.71rem; margin-bottom: 0.18rem; }
+.ev-file { color: #cbd5e1; font-size: 0.72rem; }
+.log-pre { margin: 0; white-space: pre-wrap; color: #cbd5e1; font-size: 0.72rem; }
+.c-green { color: #34d399; }
+.c-warn { color: #fbbf24; }
+.c-red { color: #f87171; }
+.c-muted { color: var(--term-muted); }
 
-.cockpit-footer {
-  padding: 0.45rem 0.9rem; border-top: 1px solid var(--term-border);
-  background: #080b10; font-size: 0.7rem; color: var(--term-muted);
-  display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.4rem 1rem;
+/* Apply Dialog */
+ui-dialog-backdrop { position: fixed; inset: 0; z-index: 300; background: rgba(0, 0, 0, 0.72); }
+ui-dialog-content {
+  position: fixed; inset: 0; margin: auto; z-index: 310;
+  width: min(33rem, calc(100vw - 2rem)); height: fit-content;
+  padding: 1.25rem 1.35rem; background: var(--term-bg); color: var(--term-ink);
+  border: 1px solid var(--term-line); border-radius: 14px;
+  font-family: var(--mono); font-size: 0.77rem;
 }
-.cockpit-note {
-  margin: 0.7rem 0 0; font: 400 0.84rem var(--mono); color: var(--muted);
+ui-dialog-title { display: block; font: 700 1rem var(--display); color: #ffffff; margin-bottom: 0.25rem; }
+ui-dialog-description { display: block; font-size: 0.73rem; color: var(--term-muted); margin-bottom: 0.85rem; }
+.dlg-blockers {
+  border: 1px solid rgba(248, 113, 113, 0.45); background: rgba(248, 113, 113, 0.08);
+  border-radius: 8px; padding: 0.5rem 0.65rem; margin-bottom: 0.7rem;
 }
+.dlg-actions {
+  display: flex; justify-content: flex-end; gap: 0.5rem;
+  margin-top: 1rem; padding-top: 0.8rem; border-top: 1px solid var(--term-line);
+}
+.dlg-btn {
+  font: 600 0.74rem var(--mono); padding: 0.4rem 0.9rem; border-radius: 999px;
+  cursor: pointer; border: 1px solid var(--term-line); background: var(--term-surface); color: var(--term-ink);
+}
+.dlg-btn.primary { background: #34d399; color: #052e16; border-color: #34d399; }
+.dlg-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.dlg-status { margin-top: 0.5rem; font-size: 0.73rem; color: #34d399; min-height: 1.1em; }
 
-/* Harness Switcher */
-.harness-tabs {
-  display: flex; flex-wrap: wrap; gap: 0.45rem; margin-bottom: 1.15rem;
-}
-.h-tab {
-  font: 500 0.84rem var(--mono); padding: 0.48rem 0.9rem;
-  background: var(--surface); color: var(--muted);
-  border: 1px solid var(--rule); border-radius: 6px; cursor: pointer;
-}
-.h-tab:hover { color: var(--ink); border-color: var(--accent); }
-.h-tab[aria-selected="true"] {
-  background: var(--accent-soft); color: var(--accent);
-  border-color: var(--accent); font-weight: 600;
-}
-.harness-card {
-  background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius);
-  padding: 1.35rem; display: grid; gap: 1.25rem;
-}
-@media (min-width: 54rem) {
-  .harness-card { grid-template-columns: 1.1fr 0.9fr; align-items: start; }
-}
-.h-specs {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(11.5rem, 1fr));
-  gap: 0.85rem; margin: 0;
-}
-.h-spec {
-  background: var(--bg); border: 1px solid var(--rule); border-radius: 6px;
-  padding: 0.7rem 0.8rem;
-}
-.h-spec dt {
-  font: 600 0.69rem var(--mono); text-transform: uppercase; letter-spacing: 0.06em;
-  color: var(--muted); margin-bottom: 0.25rem;
-}
-.h-spec dd { margin: 0; font-size: 0.88rem; color: var(--ink); }
+/* Use Cases (Satori #use-cases pattern) + Interactive Arbiter */
+.usecase-grid { display: grid; gap: 1.25rem; }
+@media (min-width: 58rem) { .usecase-grid { grid-template-columns: 1.15fr 0.85fr; align-items: start; } }
 
-/* Is / Is Not contrast */
-.contrast-grid {
-  display: grid; gap: 1rem; margin-top: 1.5rem;
+ui-tabs#usecase-tabs {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+  padding: 1.25rem; display: grid; gap: 1.1rem;
 }
-@media (min-width: 48rem) {
-  .contrast-grid { grid-template-columns: 1fr 1fr; }
+ui-tabs#usecase-tabs ui-tabs-list {
+  display: flex; flex-wrap: wrap; gap: 0.4rem;
 }
-.contrast-box {
-  border: 1px solid var(--rule); border-radius: var(--radius);
-  padding: 1.15rem 1.25rem; background: var(--surface);
+ui-tabs#usecase-tabs ui-tabs-tab button {
+  font: 500 0.82rem var(--sans); padding: 0.42rem 0.9rem; border-radius: 999px;
+  background: var(--surface-2); color: var(--muted); border: 1px solid var(--line); cursor: pointer;
 }
-.contrast-box h3 {
-  font: 600 0.86rem var(--mono); text-transform: uppercase; letter-spacing: 0.06em;
-  margin-bottom: 0.6rem;
+ui-tabs#usecase-tabs ui-tabs-tab button:hover { color: var(--ink); }
+ui-tabs#usecase-tabs ui-tabs-tab button[data-selected] {
+  background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600;
 }
-.contrast-box.is h3 { color: var(--ok); }
-.contrast-box.is-not h3 { color: var(--fail); }
-.contrast-box p { margin: 0; color: var(--muted); font-size: 0.95rem; }
-
-/* 6 Pillars Grid */
-.pillars {
-  display: grid; gap: 1rem;
-  grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
-}
-.pillar {
-  background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius);
-  padding: 1.25rem; display: flex; flex-direction: column; gap: 0.65rem;
-}
-.pillar-tag {
-  align-self: flex-start;
-  font: 600 0.7rem var(--mono); text-transform: uppercase; letter-spacing: 0.06em;
-  padding: 0.18rem 0.5rem; border-radius: 4px;
-  background: var(--accent-soft); color: var(--accent);
-}
-.pillar p { margin: 0; color: var(--muted); font-size: 0.93rem; }
-.pillar .cmds {
-  margin-top: auto; padding-top: 0.6rem; border-top: 1px solid var(--rule);
-  font: 500 0.76rem var(--mono); color: var(--ink);
-  display: flex; flex-wrap: wrap; gap: 0.35rem;
-}
-.pillar .cmds code {
-  background: var(--bg); border: 1px solid var(--rule);
-  padding: 0.12rem 0.4rem; border-radius: 4px;
+ui-tabs#usecase-tabs ui-tabs-panel[hidden] { display: none; }
+.uc-panel h3 { margin: 0 0 0.45rem; font: 700 1.28rem/1.2 var(--display); letter-spacing: -0.02em; }
+.uc-panel p { margin: 0 0 0.95rem; color: var(--muted); font-size: 0.96rem; max-width: 54ch; }
+.uc-cmd {
+  display: block; padding: 0.75rem 0.9rem; border-radius: 8px;
+  background: var(--term-bg); color: var(--term-ink); border: 1px solid var(--term-line);
+  font: 500 0.78rem/1.5 var(--mono); overflow-x: auto; white-space: nowrap;
 }
 
-/* Verifier-gated ladder */
-.ladder {
-  list-style: none; padding: 0; margin: 1.25rem 0 0;
-  display: grid; gap: 0.85rem;
+.arb-card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+  padding: 1.25rem; display: grid; gap: 0.9rem;
 }
-@media (min-width: 54rem) {
-  .ladder { grid-template-columns: repeat(3, 1fr); }
+.arb-card h3 { margin: 0; font: 700 1.12rem var(--display); }
+.arb-card p { margin: 0; font-size: 0.88rem; color: var(--muted); }
+ui-segmented-control#arbiter-step {
+  position: relative; display: grid; grid-template-columns: repeat(4, 1fr);
+  padding: 3px; background: var(--bg); border: 1px solid var(--line-strong); border-radius: 999px;
+  isolation: isolate;
 }
-.rung {
-  background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius);
-  padding: 1.15rem; position: relative;
+ui-segmented-control#arbiter-step ui-segmented-control-indicator {
+  position: absolute; z-index: -1; border-radius: 999px; background: var(--surface-2);
+  border: 1px solid var(--accent);
+  top: var(--segmented-control-indicator-top);
+  left: var(--segmented-control-indicator-left);
+  width: var(--segmented-control-indicator-width);
+  height: var(--segmented-control-indicator-height);
+  transition: left 170ms var(--ease-out), width 170ms var(--ease-out);
 }
-.rung-head {
-  display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.55rem;
+ui-segmented-control#arbiter-step ui-segmented-control-indicator[data-activation-direction="none"] { transition: none; }
+ui-segmented-control#arbiter-step ui-segmented-control-item {
+  text-align: center; padding: 0.34rem 0.15rem; cursor: pointer; user-select: none;
+  font: 600 0.72rem var(--mono); color: var(--muted);
 }
-.rung-code {
-  font: 600 0.78rem var(--mono); padding: 0.18rem 0.5rem; border-radius: 4px;
-  background: var(--ok-soft); color: var(--ok);
-}
-.rung:nth-child(2) .rung-code { background: var(--warn-soft); color: var(--warn); }
-.rung:nth-child(3) .rung-code { background: var(--ask-soft); color: var(--ask); }
-.rung p { margin: 0; font-size: 0.92rem; color: var(--muted); }
-.roles-strip {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
-  gap: 0.75rem; margin-top: 1.25rem;
-}
-.role-card {
-  border-top: 2px solid var(--rule); padding-top: 0.65rem;
-}
-.role-card dt { font: 600 0.86rem var(--mono); color: var(--ink); margin-bottom: 0.2rem; }
-.role-card dd { margin: 0; font-size: 0.88rem; color: var(--muted); }
+ui-segmented-control#arbiter-step ui-segmented-control-item[data-checked] { color: var(--ink); }
 
-/* Quickstart Code Switcher */
-.qs-box {
+.arb-stage {
   background: var(--term-bg); color: var(--term-ink);
-  border: 1px solid var(--term-border); border-radius: var(--radius);
-  overflow: hidden; box-shadow: var(--shadow);
+  border: 1px solid var(--term-line); border-radius: 8px;
+  padding: 0.95rem; font-family: var(--mono); display: grid; gap: 0.75rem;
 }
-.qs-tabs {
-  display: flex; flex-wrap: wrap; gap: 0.15rem; padding: 0.45rem 0.65rem;
-  background: #080b10; border-bottom: 1px solid var(--term-border);
+.arb-top { display: flex; justify-content: space-between; align-items: center; font-size: 0.76rem; }
+.arb-tag { color: var(--term-muted); font-weight: 600; }
+.arb-score.ok { color: #34d399; font-weight: 700; }
+.arb-score.warn { color: #fbbf24; font-weight: 700; }
+.arb-score.fail { color: #f87171; font-weight: 700; }
+.t-bars { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+.t-sq { height: 26px; border-radius: 4px; display: block; }
+.t-sq.ok { background: #34d399; }
+.t-sq.fail { background: transparent; border: 2px solid #f87171; }
+.arb-meta { display: grid; gap: 0.25rem; font-size: 0.73rem; }
+.arb-verdict.ok { color: #34d399; }
+.arb-verdict.warn { color: #fbbf24; }
+.arb-verdict.fail { color: #f87171; }
+.arb-head { color: var(--term-muted); font-size: 0.69rem; }
+.arb-cmd {
+  padding-top: 0.6rem; border-top: 1px solid var(--term-line);
+  font-size: 0.72rem; color: #739fdf; overflow-x: auto; white-space: nowrap;
 }
-.qs-tab {
-  font: 500 0.76rem var(--mono); padding: 0.35rem 0.65rem;
+
+/* Honest FAQ (Satori #free pattern) */
+.faq {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+  gap: 0.9rem; margin: 0;
+}
+.faq-item {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+  padding: 1.1rem 1.2rem;
+}
+.faq-item dt { font: 700 0.98rem var(--display); margin-bottom: 0.4rem; color: var(--ink); }
+.faq-item dd { margin: 0; font-size: 0.9rem; color: var(--muted); line-height: 1.55; }
+
+/* Closing Quickstart */
+.qs {
+  background: var(--term-bg); color: var(--term-ink);
+  border: 1px solid var(--term-line); border-radius: 14px; overflow: hidden;
+}
+.qs-top {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 0.4rem; padding: 0.5rem 0.8rem;
+  background: #08090c; border-bottom: 1px solid var(--term-line);
+}
+ui-tabs#quickstart-tabs ui-tabs-list { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+ui-tabs#quickstart-tabs ui-tabs-tab button {
+  font: 500 0.75rem var(--mono); padding: 0.34rem 0.65rem;
   background: transparent; color: var(--term-muted); border: 0;
   border-bottom: 2px solid transparent; cursor: pointer;
 }
-.qs-tab:hover { color: var(--term-ink); }
-.qs-tab[aria-selected="true"] {
-  color: var(--term-cyan); border-bottom-color: var(--term-cyan);
+ui-tabs#quickstart-tabs ui-tabs-tab button:hover { color: var(--term-ink); }
+ui-tabs#quickstart-tabs ui-tabs-tab button[data-selected] { color: var(--term-ink); border-bottom-color: var(--accent); }
+ui-tabs#quickstart-tabs ui-tabs-panel[hidden] { display: none; }
+.qs-pre {
+  margin: 0; padding: 1.1rem 1.2rem; overflow-x: auto;
+  font: 400 0.82rem/1.65 var(--mono); color: var(--term-ink);
 }
-.qs-body { position: relative; padding: 1.1rem 1.2rem; }
-.qs-body pre {
-  margin: 0; overflow-x: auto; font: 400 0.83rem/1.6 var(--mono);
-  color: var(--term-ink); max-width: 100%;
+.steps-row {
+  list-style: none; padding: 0; margin: 1.25rem 0 1.5rem;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 0.9rem;
 }
-.copy-btn {
-  position: absolute; top: 0.75rem; right: 0.85rem;
-  font: 500 0.74rem var(--mono); padding: 0.28rem 0.65rem;
-  background: var(--term-surface); color: var(--term-ink);
-  border: 1px solid var(--term-border); border-radius: 5px; cursor: pointer;
+.steps-row li {
+  border-top: 1px solid var(--line-strong); padding-top: 0.75rem;
 }
-.copy-btn:hover { border-color: var(--term-cyan); color: var(--term-cyan); }
-.qs-caption {
-  padding: 0.6rem 1.2rem; background: var(--term-surface);
-  border-top: 1px solid var(--term-border); font-size: 0.82rem; color: var(--term-muted);
-}
-
-/* Limits */
-.limits-list {
-  list-style: none; padding: 0; margin: 1rem 0 0;
-  display: grid; gap: 0.65rem;
-}
-@media (min-width: 48rem) {
-  .limits-list { grid-template-columns: 1fr 1fr; }
-}
-.limits-list li {
-  background: var(--surface); border: 1px solid var(--rule); border-radius: 6px;
-  padding: 0.85rem 1rem; font-size: 0.92rem; color: var(--muted);
-}
-.limits-list strong { color: var(--ink); }
+.steps-row h3 { margin: 0 0 0.25rem; font: 700 1rem var(--display); }
+.steps-row p { margin: 0; font-size: 0.9rem; color: var(--muted); }
 
 /* Footer */
 footer {
-  margin-top: clamp(3.5rem, 8vw, 5.5rem);
+  margin-top: clamp(3rem, 7vw, 5rem);
+  border-top: 1px solid var(--line);
   padding-block: 1.6rem calc(2rem + env(safe-area-inset-bottom, 0px));
-  border-top: 1px solid var(--rule);
   display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center;
-  gap: 0.6rem 1.5rem; font-size: 0.9rem; color: var(--muted);
+  gap: 0.75rem 1.5rem; font-size: 0.88rem; color: var(--muted);
 }
-footer p { margin: 0; }
-.footer-links { display: flex; flex-wrap: wrap; gap: 1rem; }
-.footer-links a { text-decoration: none; padding-block: 0.25rem; }
-.footer-links a:hover { color: var(--ink); text-decoration: underline; }
+.foot-links { display: flex; flex-wrap: wrap; gap: 1.2rem; font: 500 0.82rem var(--mono); }
+.foot-links a { text-decoration: none; }
+.foot-links a:hover { color: var(--ink); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}
 </style>
 </head>
 <body>
-<a class="skip" href="#main">Skip to main content</a>
+<a class="skip" href="#main">Skip to content</a>
 
-<header class="site-header">
-  <div class="wrap header-inner">
+<header class="topbar">
+  <div class="wrap topbar-in">
     <a class="brand" href="#main">
-      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span class="brand-seal" aria-hidden="true"></span>
       <span>claive</span>
     </a>
-    <nav class="nav-links" aria-label="Primary">
+    <nav class="nav" aria-label="Primary">
+      <a href="#why">Why claive</a>
+      <a href="#architecture">Architecture</a>
       <a href="#cockpit">Cockpit</a>
-      <a href="#harnesses">Harnesses</a>
-      <a href="#architecture">Platform</a>
-      <a href="#orchestration">Arbiter</a>
-      <a href="#quickstart">Quickstart</a>
+      <a href="#use-cases">Workflows</a>
+      <a href="#install">Install</a>
     </nav>
-    <div class="header-actions">
-      <button class="icon-btn" id="theme-toggle" type="button" aria-label="Toggle light or dark theme">Theme</button>
-      <a class="icon-btn" href="https://github.com/ham-zax/claive">GitHub</a>
+    <div class="top-acts">
+      <ui-toggle id="theme-toggle">
+        <button class="pill-btn" type="button" aria-label="Theme">Light</button>
+      </ui-toggle>
+      <a class="pill-btn" href="https://github.com/ham-zax/claive">GitHub</a>
     </div>
   </div>
 </header>
@@ -656,897 +817,563 @@ footer p { margin: 0; }
 <main id="main" class="wrap">
   <section class="hero">
     <div>
-      <p class="eyebrow">Multi-Harness Agent Runtime</p>
-      <h1>One shared rope for every coding agent.</h1>
+      <p class="hero-kicker">Multi-harness control plane for coding agents</p>
+      <h1>Stop babysitting five agent tabs<span class="seal-dot" aria-hidden="true"></span></h1>
       <p class="hero-lede">
-        <strong>claive</strong> is a harness-neutral outer cloth that wraps <strong>Codex</strong>, <strong>Claude Code</strong>, <strong>Pi</strong>, <strong>AGY</strong>, and <strong>Muse</strong>—so any parent agent can launch, steer, question, verify, and connect any other agent as a subagent without stripping native tools, skills, or prompt caching.
+        Your Codex session can't delegate to Claude Code. Your parallel agents clobber the same working tree. Your subagents claim &ldquo;done&rdquo; while breaking tests. <strong>claive</strong> ties Codex, Claude Code, Pi, AGY, and Muse into one shared rope&mdash;isolated Git worktrees, a native Rust cockpit, and test-gated merges with zero tool neutering.
       </p>
-      <div class="meta-pills">
-        <span class="pill"><span class="dot" aria-hidden="true"></span>Linux · Python 3 stdlib</span>
-        <span class="pill">Ratatui 0.30 Rust TUI</span>
-        <span class="pill">Flat-schema MCP server</span>
-        <span class="pill">MIT License</span>
+      <div class="hero-actions">
+        <a class="btn primary" href="#install">Try it on one repo</a>
+        <div class="install-pill" role="group" aria-label="Install command">
+          <span class="install-prompt" aria-hidden="true">$</span>
+          <code>just dash-build &amp;&amp; ./install.sh --with-tui</code>
+          <ui-button id="hero-copy"><button class="copy-chip" type="button">Copy</button></ui-button>
+        </div>
       </div>
-      <div class="cta-row">
-        <a class="btn" href="#cockpit">Try live cockpit</a>
-        <a class="btn alt" href="#quickstart">Install &amp; quickstart</a>
-        <a class="btn alt" href="https://github.com/ham-zax/claive/blob/main/docs/command-reference.md">Command reference</a>
-      </div>
+      <p class="hero-proof">
+        <strong>100% local on Linux &amp; WSL2.</strong> Python 3 stdlib + Ratatui Rust TUI. Keeps every harness's native tools, MCP servers, skills, and prompt caching intact.
+      </p>
     </div>
 
-    <aside class="topology" aria-label="Claive architecture topology">
-      <div class="topo-title">
-        <span>Shared Rope Topology</span>
-        <span>Zero tool neutering</span>
-      </div>
-      <div class="topo-tier">
-        <span class="topo-label">Any Parent Driver</span>
-        <div class="topo-nodes">
-          <span class="topo-node">Claude Code</span>
-          <span class="topo-node">Codex</span>
-          <span class="topo-node">Pi</span>
-          <span class="topo-node">AGY</span>
-          <span class="topo-node">Shell / MCP / systemd</span>
+    <figure class="compare-card" id="compare-card" data-mode="with-claive" aria-label="Animated comparison: running parallel agents with claive versus 5 manual tmux tabs">
+      <ui-tabs id="hero-compare" default-value="with-claive">
+        <ui-tabs-list aria-label="Workflow comparison">
+          <div class="cmp-tab-group">
+            <ui-tabs-tab value="with-claive"><button type="button">With claive</button></ui-tabs-tab>
+            <ui-tabs-tab value="manual-tabs"><button type="button">5 tmux tabs</button></ui-tabs-tab>
+          </div>
+          <span class="cmp-stat" id="cmp-stat">0 collisions · verified</span>
+        </ui-tabs-list>
+
+        <div class="cmp-goal-bar">
+          <span class="cmp-goal-lbl">Task</span>
+          <span class="cmp-goal-text"><span id="cmp-typed" data-text="Fix lock recovery in core + audit MCP schema in parallel">Fix lock recovery in core + audit MCP schema in parallel</span><span class="cmp-caret" aria-hidden="true"></span></span>
+        </div>
+
+        <ui-tabs-panel value="with-claive">
+          <ol class="cmp-stages" aria-label="Claive workflow stages">
+            <li data-st="1">1 Isolate</li>
+            <li data-st="2">2 Delegate</li>
+            <li data-st="3">3 Triage</li>
+            <li data-st="4">4 Verify</li>
+          </ol>
+          <ul class="cmp-list">
+            <li class="is-good" data-row="1"><span class="cmp-cmd">$ claive open --engine codex --worktree --alias core</span><span class="cmp-tag ok">isolated branch</span></li>
+            <li class="is-good" data-row="2"><span class="cmp-cmd">$ claive open --engine pi --read-only --alias scout</span><span class="cmp-tag ok">flash scout</span></li>
+            <li data-row="3"><span class="cmp-cmd">claive dash -&gt; ● ASK @core · ★ REVIEW @scout</span><span class="cmp-tag ask">1-glance triage</span></li>
+            <li class="is-good" data-row="4"><span class="cmp-cmd">$ claive verify @core &amp;&amp; claive worktree apply @core</span><span class="cmp-tag ok">verified merge</span></li>
+          </ul>
+        </ui-tabs-panel>
+
+        <ui-tabs-panel value="manual-tabs" hidden>
+          <ol class="cmp-stages is-bad" aria-label="Manual tmux failure stages">
+            <li data-st="1">1 Collide</li>
+            <li data-st="2">2 Hang</li>
+            <li data-st="3">3 Regress</li>
+            <li data-st="4">4 Copy-paste</li>
+          </ol>
+          <ul class="cmp-list">
+            <li class="is-bad" data-row="1"><span class="cmp-cmd">[pane 2] Codex &amp; Claude both edited context.ts</span><span class="cmp-tag fail">dirty collision</span></li>
+            <li class="is-warn" data-row="2"><span class="cmp-cmd">[pane 3] Subagent hung on silent test child 18m</span><span class="cmp-tag warn">orphan process</span></li>
+            <li class="is-bad" data-row="3"><span class="cmp-cmd">[pane 4] Agent said &ldquo;all fixed&rdquo; — 3 regressions</span><span class="cmp-tag fail">unverified</span></li>
+            <li class="is-warn" data-row="4"><span class="cmp-cmd">Copy-pasting diffs between Claude &amp; Codex</span><span class="cmp-tag warn">zero handoff</span></li>
+          </ul>
+        </ui-tabs-panel>
+      </ui-tabs>
+
+      <div class="cmp-meters" aria-label="Isolation and verification comparison">
+        <div class="cmp-meter-row is-claive">
+          <span class="cmp-meter-name">Claive</span>
+          <span class="cmp-meter-track"><span class="cmp-meter-fill" style="--w:22%"></span></span>
+          <span class="cmp-meter-val">0 collisions · verified</span>
+        </div>
+        <div class="cmp-meter-row is-manual">
+          <span class="cmp-meter-name">5 tabs</span>
+          <span class="cmp-meter-track"><span class="cmp-meter-fill" style="--w:100%"></span></span>
+          <span class="cmp-meter-val">dirty tree · 3 regressions</span>
         </div>
       </div>
-      <div class="topo-connector">CLI · claive-mcp · claive-tui</div>
-      <div class="topo-rope">
-        <span class="topo-label" style="color:var(--accent)">Claive Core (Shared Rope)</span>
-        <div class="topo-rope-grid">
-          <span>Isolated Git worktrees</span>
-          <span>systemd-run + subreaper</span>
-          <span>Atomic status.json</span>
-          <span>Verify &amp; apply gates</span>
-          <span>@alias &amp; conversations</span>
-          <span>Live progress signals</span>
-        </div>
-      </div>
-      <div class="topo-connector">Thin Native Engine Hooks</div>
-      <div class="topo-tier">
-        <span class="topo-label">Workers (Full Native Tools, MCP &amp; Skills Preserved)</span>
-        <div class="topo-nodes">
-          <span class="topo-node">codex</span>
-          <span class="topo-node">claude</span>
-          <span class="topo-node">pi</span>
-          <span class="topo-node">agy</span>
-          <span class="topo-node">muse</span>
-        </div>
-      </div>
-    </aside>
+
+      <figcaption class="cmp-foot">
+        <span class="cmp-live"><i class="live-dot" aria-hidden="true"></i>Full native tools &amp; prompt cache kept</span>
+        <ui-button id="cmp-replay"><button class="cmp-replay-btn" type="button">Replay trace</button></ui-button>
+      </figcaption>
+    </figure>
   </section>
 
-  <!-- Interactive Ratatui Cockpit Preview -->
-  <section id="cockpit">
-    <p class="eyebrow">Ratatui Triage Dashboard · claive dash</p>
-    <h2>Inspect every worker at a glance—without blocking your session.</h2>
-    <p class="section-lede">
-      <code>claive-tui</code> is a native Rust dashboard built on Ratatui 0.30. It runs read-only by default with zero locks, reacts to <code>inotify</code> registry updates, tails <code>events.jsonl</code> natively in Rust with automatic secret redaction, and unlocks safe operator controls with <code>--actions</code>. Click workers, tabs, filters, and action rows below to try the 3-column wide cockpit.
+  <div class="works-strip">
+    <strong>Works with</strong>
+    <ul>
+      <li>Codex</li>
+      <li>Claude Code</li>
+      <li>Pi</li>
+      <li>AGY</li>
+      <li>Muse</li>
+      <li>Any stdio MCP host</li>
+    </ul>
+    <span class="works-note">No account · Linux &amp; WSL2</span>
+  </div>
+
+  <section class="section" id="why">
+    <h2>Agents write fast. Uncoordinated agents wreck repos.</h2>
+    <p class="section-intro">
+      The moment you run more than one coding agent, your bottleneck stops being model intelligence&mdash;it becomes isolation, visibility, and verification.
     </p>
 
-    <div class="cockpit-shell" id="cockpit-demo" role="region" aria-label="Interactive claive-tui cockpit preview">
-      <div class="cockpit-chrome">
-        <div style="display:flex;align-items:center;gap:0.65rem">
-          <span class="chrome-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-          <span class="chrome-title">claive dash --all --actions</span>
+    <dl class="metrics">
+      <div class="metric">
+        <dt>Harnesses on one rope</dt>
+        <dd><span class="metric-fig">5 native</span><span class="metric-sub">Codex, Claude, Pi, AGY, Muse</span></dd>
+      </div>
+      <div class="metric">
+        <dt>Cockpit locking</dt>
+        <dd><span class="metric-fig">0 locks</span><span class="metric-sub">Rust inotify + native events.jsonl tailer</span></dd>
+      </div>
+      <div class="metric">
+        <dt>Zero-shell MCP</dt>
+        <dd><span class="metric-fig">10 tools</span><span class="metric-sub">Flat scalar schemas via claive-mcp</span></dd>
+      </div>
+      <div class="metric">
+        <dt>Regression guard</dt>
+        <dd><span class="metric-fig">Auto-revert</span><span class="metric-sub">Bad fixes reset &amp; shelved via Git</span></dd>
+      </div>
+    </dl>
+
+    <div class="receipts">
+      <article class="receipt">
+        <div class="receipt-head">
+          <strong>Without claive</strong>
+          <code>Manual tab chaos</code>
         </div>
-        <div class="chrome-controls">
-          <button class="term-toggle" id="btn-triage" type="button" aria-pressed="false">[t] Triage only</button>
-          <span style="font-size:0.7rem">160×40 wide split: Workers | Activity | Briefing</span>
+        <ul>
+          <li><b>Working-tree collisions:</b> two writers touch the same checkout and overwrite each other's uncommitted edits.</li>
+          <li><b>Silent hangs &amp; zombie trees:</b> background shells die or stall quietly while you think work is progressing.</li>
+          <li><b>Neutered wrapper sandboxes:</b> generic agent frameworks strip MCP servers, skills, and provider prompt caching.</li>
+          <li><b>&ldquo;Looks good to me&rdquo; merges:</b> one model grades its own homework and lands regressions straight onto your branch.</li>
+        </ul>
+      </article>
+
+      <article class="receipt is-claive">
+        <div class="receipt-head">
+          <strong>With claive</strong>
+          <code>Shared rope + gates</code>
+        </div>
+        <ul>
+          <li><b>Isolated worktrees on demand:</b> <code>--worktree --carry-dirty</code> gives every writer its own branch and safe <code>apply --dry-run</code>.</li>
+          <li><b>Process containment &amp; live triage:</b> <code>systemd-run --user --scope</code> + subreaper, surfaced instantly in <code>claive dash</code>.</li>
+          <li><b>Thin native hooks:</b> Codex, Claude, Pi, AGY, and Muse keep 100% of their native tools, skills, and caching.</li>
+          <li><b>Deterministic verification:</b> <code>claive verify</code> and <code>claive-orch</code> let your own test suite decide what survives.</li>
+        </ul>
+      </article>
+    </div>
+  </section>
+
+  <section class="section" id="architecture">
+    <h2>One control plane. Five native hooks. Zero shell polling.</h2>
+    <p class="section-intro">
+      Any parent agent or human operator drives Claive through CLI or MCP. Claive isolates worktrees, projects atomic <code>status.json</code> snapshots, and lets <code>claive-tui</code> stream <code>events.jsonl</code> straight from disk with zero locks.
+    </p>
+
+    <div class="diagram-frame">
+      <svg viewBox="0 0 1000 480" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="claive-arch-title claive-arch-desc">
+        <title id="claive-arch-title">Claive shared-rope architecture</title>
+        <desc id="claive-arch-desc">Architecture schematic showing any parent agent and the Rust TUI driving the Claive control plane, isolated Git worktrees and arbiter, native harness hooks for Codex, Claude, Pi, AGY, and Muse, and zero-lock state in $CLAIVE_DIR.</desc>
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#a8a59e"/>
+          </marker>
+          <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#e5553b"/>
+          </marker>
+          <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#739fdf"/>
+          </marker>
+        </defs>
+
+        <rect width="100%" height="100%" fill="#111215"/>
+
+        <!-- Zones (drawn before arrows and nodes) -->
+        <rect x="32" y="72" width="192" height="288" rx="8" fill="rgba(237,234,227,0.025)" stroke="rgba(237,234,227,0.12)" stroke-width="0.8"/>
+        <rect x="92" y="76" width="72" height="12" rx="2" fill="#111215"/>
+        <text x="128" y="85" fill="#9a9891" font-size="7" font-family="'IBM Plex Mono', monospace" text-anchor="middle" letter-spacing="0.14em">DRIVERS</text>
+
+        <rect x="592" y="72" width="192" height="288" rx="8" fill="rgba(237,234,227,0.025)" stroke="rgba(237,234,227,0.12)" stroke-width="0.8"/>
+        <rect x="624" y="76" width="128" height="12" rx="2" fill="#111215"/>
+        <text x="688" y="85" fill="#9a9891" font-size="7" font-family="'IBM Plex Mono', monospace" text-anchor="middle" letter-spacing="0.14em">NATIVE HARNESSES</text>
+
+        <rect x="820" y="72" width="148" height="288" rx="8" fill="rgba(237,234,227,0.025)" stroke="rgba(237,234,227,0.12)" stroke-width="0.8"/>
+        <rect x="864" y="76" width="60" height="12" rx="2" fill="#111215"/>
+        <text x="894" y="85" fill="#9a9891" font-size="7" font-family="'IBM Plex Mono', monospace" text-anchor="middle" letter-spacing="0.14em">STATE</text>
+
+        <!-- Arrows (drawn before boxes; 100% orthogonal, fanned ports, zero crossings) -->
+        <line x1="208" y1="132" x2="320" y2="132" stroke="#e5553b" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+        <line x1="412" y1="184" x2="412" y2="260" stroke="#e5553b" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+        <path d="M 208,298 H 248 Q 256,298 256,290 V 170 Q 256,162 264,162 H 320" fill="none" stroke="#a8a59e" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+        <line x1="504" y1="132" x2="608" y2="132" stroke="#a8a59e" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <path d="M 504,160 H 540 Q 548,160 548,168 V 276 Q 548,284 556,284 H 608" fill="none" stroke="#a8a59e" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="504" y1="312" x2="608" y2="312" stroke="#a8a59e" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+        <path d="M 768,146 H 886 Q 894,146 894,154 V 184" fill="none" stroke="#739fdf" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+        <path d="M 768,298 H 868 Q 876,298 876,290 V 260" fill="none" stroke="#739fdf" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+        <path d="M 912,260 V 372 Q 912,380 904,380 H 136 Q 128,380 128,372 V 336" fill="none" stroke="#a8a59e" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+
+        <!-- Masked arrow labels -->
+        <rect x="234" y="112" width="60" height="12" rx="2" fill="#111215"/>
+        <text x="264" y="121" fill="#e5553b" font-size="8" font-family="'IBM Plex Mono', monospace" text-anchor="middle" letter-spacing="0.06em">DELEGATE</text>
+
+        <rect x="420" y="216" width="56" height="12" rx="2" fill="#111215"/>
+        <text x="448" y="225" fill="#e5553b" font-size="8" font-family="'IBM Plex Mono', monospace" text-anchor="middle" letter-spacing="0.06em">ISOLATE</text>
+
+        <rect x="264" y="224" width="48" height="12" rx="2" fill="#111215"/>
+        <text x="288" y="233" fill="#9a9891" font-size="8" font-family="'IBM Plex Mono', monospace" text-anchor="middle" letter-spacing="0.06em">ACTIONS</text>
+
+        <rect x="532" y="112" width="48" height="12" rx="2" fill="#111215"/>
+        <text x="556" y="121" fill="#9a9891" font-size="8" font-family="'IBM Plex Mono', monospace" text-anchor="middle" letter-spacing="0.06em">SPAWN</text>
+
+        <rect x="524" y="320" width="64" height="12" rx="2" fill="#111215"/>
+        <text x="556" y="329" fill="#9a9891" font-size="8" font-family="'IBM Plex Mono', monospace" text-anchor="middle" letter-spacing="0.06em">WORKTREE</text>
+
+        <rect x="804" y="126" width="52" height="12" rx="2" fill="#111215"/>
+        <text x="830" y="135" fill="#739fdf" font-size="8" font-family="'IBM Plex Mono', monospace" text-anchor="middle" letter-spacing="0.06em">EVENTS</text>
+
+        <rect x="804" y="306" width="52" height="12" rx="2" fill="#111215"/>
+        <text x="830" y="315" fill="#739fdf" font-size="8" font-family="'IBM Plex Mono', monospace" text-anchor="middle" letter-spacing="0.06em">STATUS</text>
+
+        <rect x="460" y="388" width="120" height="12" rx="2" fill="#111215"/>
+        <text x="520" y="397" fill="#9a9891" font-size="8" font-family="'IBM Plex Mono', monospace" text-anchor="middle" letter-spacing="0.06em">INOTIFY · 0 LOCKS</text>
+
+        <!-- Nodes -->
+        <rect x="48" y="108" width="160" height="76" rx="6" fill="#111215"/>
+        <rect x="48" y="108" width="160" height="76" rx="6" fill="rgba(237,234,227,0.04)" stroke="#a8a59e" stroke-width="1"/>
+        <rect x="56" y="116" width="44" height="12" rx="2" fill="transparent" stroke="rgba(237,234,227,0.28)" stroke-width="0.8"/>
+        <text x="78" y="125" fill="#9a9891" font-size="7" font-family="'IBM Plex Mono', monospace" text-anchor="middle" letter-spacing="0.08em">PARENT</text>
+        <text x="128" y="150" fill="#edeae3" font-size="12" font-weight="600" font-family="'IBM Plex Sans', sans-serif" text-anchor="middle">Any Parent Agent</text>
+        <text x="128" y="168" fill="#a8a59e" font-size="9" font-family="'IBM Plex Mono', monospace" text-anchor="middle">Claude · Codex · Pi · MCP</text>
+
+        <rect x="48" y="260" width="160" height="76" rx="6" fill="#111215"/>
+        <rect x="48" y="260" width="160" height="76" rx="6" fill="rgba(237,234,227,0.04)" stroke="#a8a59e" stroke-width="1"/>
+        <rect x="56" y="268" width="48" height="12" rx="2" fill="transparent" stroke="rgba(237,234,227,0.28)" stroke-width="0.8"/>
+        <text x="80" y="277" fill="#9a9891" font-size="7" font-family="'IBM Plex Mono', monospace" text-anchor="middle" letter-spacing="0.08em">COCKPIT</text>
+        <text x="128" y="302" fill="#edeae3" font-size="12" font-weight="600" font-family="'IBM Plex Sans', sans-serif" text-anchor="middle">claive-tui</text>
+        <text x="128" y="320" fill="#a8a59e" font-size="9" font-family="'IBM Plex Mono', monospace" text-anchor="middle">Rust · native tailer</text>
+
+        <rect x="320" y="108" width="184" height="76" rx="6" fill="#111215"/>
+        <rect x="320" y="108" width="184" height="76" rx="6" fill="rgba(229,85,59,0.10)" stroke="#e5553b" stroke-width="1.2"/>
+        <rect x="328" y="116" width="36" height="12" rx="2" fill="transparent" stroke="rgba(229,85,59,0.55)" stroke-width="0.8"/>
+        <text x="346" y="125" fill="#e5553b" font-size="7" font-family="'IBM Plex Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ROPE</text>
+        <text x="412" y="150" fill="#edeae3" font-size="12" font-weight="600" font-family="'IBM Plex Sans', sans-serif" text-anchor="middle">Claive Control Plane</text>
+        <text x="412" y="168" fill="#a8a59e" font-size="9" font-family="'IBM Plex Mono', monospace" text-anchor="middle">cli · claive-mcp · systemd</text>
+
+        <rect x="320" y="260" width="184" height="76" rx="6" fill="#111215"/>
+        <rect x="320" y="260" width="184" height="76" rx="6" fill="rgba(229,85,59,0.10)" stroke="#e5553b" stroke-width="1.2"/>
+        <rect x="328" y="268" width="44" height="12" rx="2" fill="transparent" stroke="rgba(229,85,59,0.55)" stroke-width="0.8"/>
+        <text x="350" y="277" fill="#e5553b" font-size="7" font-family="'IBM Plex Mono', monospace" text-anchor="middle" letter-spacing="0.08em">GATES</text>
+        <text x="412" y="302" fill="#edeae3" font-size="12" font-weight="600" font-family="'IBM Plex Sans', sans-serif" text-anchor="middle">Worktrees &amp; Arbiter</text>
+        <text x="412" y="320" fill="#a8a59e" font-size="9" font-family="'IBM Plex Mono', monospace" text-anchor="middle">verify · apply · claive-orch</text>
+
+        <rect x="608" y="108" width="160" height="76" rx="6" fill="#111215"/>
+        <rect x="608" y="108" width="160" height="76" rx="6" fill="#191b20" stroke="#edeae3" stroke-width="1"/>
+        <rect x="616" y="116" width="36" height="12" rx="2" fill="transparent" stroke="rgba(237,234,227,0.35)" stroke-width="0.8"/>
+        <text x="634" y="125" fill="#edeae3" font-size="7" font-family="'IBM Plex Mono', monospace" text-anchor="middle" letter-spacing="0.08em">HOOK</text>
+        <text x="688" y="150" fill="#edeae3" font-size="12" font-weight="600" font-family="'IBM Plex Sans', sans-serif" text-anchor="middle">Codex &amp; Claude</text>
+        <text x="688" y="168" fill="#a8a59e" font-size="9" font-family="'IBM Plex Mono', monospace" text-anchor="middle">steer · skills · cache</text>
+
+        <rect x="608" y="260" width="160" height="76" rx="6" fill="#111215"/>
+        <rect x="608" y="260" width="160" height="76" rx="6" fill="#191b20" stroke="#edeae3" stroke-width="1"/>
+        <rect x="616" y="268" width="36" height="12" rx="2" fill="transparent" stroke="rgba(237,234,227,0.35)" stroke-width="0.8"/>
+        <text x="634" y="277" fill="#edeae3" font-size="7" font-family="'IBM Plex Mono', monospace" text-anchor="middle" letter-spacing="0.08em">HOOK</text>
+        <text x="688" y="302" fill="#edeae3" font-size="12" font-weight="600" font-family="'IBM Plex Sans', sans-serif" text-anchor="middle">Pi · AGY · Muse</text>
+        <text x="688" y="320" fill="#a8a59e" font-size="9" font-family="'IBM Plex Mono', monospace" text-anchor="middle">flash · multi-provider</text>
+
+        <rect x="832" y="184" width="124" height="76" rx="6" fill="#111215"/>
+        <rect x="832" y="184" width="124" height="76" rx="6" fill="rgba(115,159,223,0.08)" stroke="#739fdf" stroke-width="1"/>
+        <rect x="840" y="192" width="36" height="12" rx="2" fill="transparent" stroke="rgba(115,159,223,0.45)" stroke-width="0.8"/>
+        <text x="858" y="201" fill="#739fdf" font-size="7" font-family="'IBM Plex Mono', monospace" text-anchor="middle" letter-spacing="0.08em">DISK</text>
+        <text x="894" y="226" fill="#edeae3" font-size="12" font-weight="600" font-family="'IBM Plex Sans', sans-serif" text-anchor="middle">$CLAIVE_DIR</text>
+        <text x="894" y="244" fill="#a8a59e" font-size="9" font-family="'IBM Plex Mono', monospace" text-anchor="middle">status · events.jsonl</text>
+
+        <!-- Bottom legend strip -->
+        <line x1="32" y1="416" x2="968" y2="416" stroke="rgba(237,234,227,0.12)" stroke-width="0.8"/>
+        <text x="32" y="434" fill="#9a9891" font-size="8" font-family="'IBM Plex Mono', monospace" letter-spacing="0.16em">LEGEND</text>
+
+        <rect x="32" y="446" width="14" height="10" rx="2" fill="rgba(229,85,59,0.10)" stroke="#e5553b" stroke-width="1"/>
+        <text x="52" y="454" fill="#a8a59e" font-size="8.5" font-family="'IBM Plex Sans', sans-serif">Focal control plane &amp; gates</text>
+
+        <rect x="236" y="446" width="14" height="10" rx="2" fill="#191b20" stroke="#edeae3" stroke-width="1"/>
+        <text x="256" y="454" fill="#a8a59e" font-size="8.5" font-family="'IBM Plex Sans', sans-serif">Native harness hooks (full tools kept)</text>
+
+        <rect x="492" y="446" width="14" height="10" rx="2" fill="rgba(115,159,223,0.08)" stroke="#739fdf" stroke-width="1"/>
+        <text x="512" y="454" fill="#a8a59e" font-size="8.5" font-family="'IBM Plex Sans', sans-serif">Atomic local state</text>
+
+        <line x1="656" y1="451" x2="684" y2="451" stroke="#a8a59e" stroke-width="1" stroke-dasharray="4,3"/>
+        <text x="692" y="454" fill="#a8a59e" font-size="8.5" font-family="'IBM Plex Sans', sans-serif">Async / zero-lock read</text>
+      </svg>
+    </div>
+
+    <div class="arch-strip">
+      <div class="arch-item"><h3>Shared Rope</h3><p>Uniform CLI, <code>@alias</code> routing, live steering, and bounded multi-model conversations.</p></div>
+      <div class="arch-item"><h3>Isolated Worktrees</h3><p>Writers branch cleanly with <code>--carry-dirty</code> and merge only after verification passes.</p></div>
+      <div class="arch-item"><h3>Native Hooks</h3><p>Every engine keeps its full native tools, MCP servers, Skillshare skills, and prompt cache.</p></div>
+      <div class="arch-item"><h3>Zero-Lock Cockpit</h3><p>Rust <code>claive-tui</code> tails <code>events.jsonl</code> directly with secret redaction and <code>inotify</code>.</p></div>
+    </div>
+  </section>
+
+  <section class="section" id="cockpit">
+    <h2>See every blocked, running, and verified agent in one glance.</h2>
+    <p class="section-intro">
+      <code>claive dash</code> stays read-only by default and unlocks safe operator controls with <code>--actions</code>. Click rows, switch tabs, filter milestones, or test the gated <strong>Apply preview</strong> modal below (powered by <code>@ui-sdk/web</code>).
+    </p>
+
+    <div class="cockpit" role="region" aria-label="Interactive claive-tui cockpit">
+      <div class="ck-bar">
+        <div class="ck-counts" id="cockpit-counts"></div>
+        <div class="ck-tools">
+          <ui-toggle id="triage-toggle">
+            <button class="term-btn" type="button">Actionable only</button>
+          </ui-toggle>
+          <ui-dialog id="apply-dialog">
+            <ui-dialog-trigger>
+              <button class="term-btn" type="button">Apply preview</button>
+            </ui-dialog-trigger>
+            <ui-dialog-backdrop hidden></ui-dialog-backdrop>
+            <ui-dialog-content hidden>
+              <ui-dialog-title>Worktree apply demo</ui-dialog-title>
+              <ui-dialog-description>Confirmation stays locked until verification passes and open ASK questions are answered.</ui-dialog-description>
+              <div id="apply-preview-body"></div>
+              <div id="apply-status" class="dlg-status" aria-live="polite"></div>
+              <div class="dlg-actions">
+                <ui-dialog-close><button class="dlg-btn" type="button">Close</button></ui-dialog-close>
+                <ui-button id="apply-confirm-btn">
+                  <button class="dlg-btn primary" type="button" data-agent-confirm="Simulate applying this worker's worktree diff?">Simulate apply</button>
+                </ui-button>
+              </div>
+            </ui-dialog-content>
+          </ui-dialog>
         </div>
       </div>
 
-      <div class="cockpit-status-bar">
-        <div class="status-row-1" id="cockpit-counts"></div>
-        <div class="status-row-2" id="cockpit-scope">Scope: session=all · ws=all · mode=recent · ACTIONS-ON · native Rust events tailer · watchers=1</div>
-      </div>
-
-      <div class="cockpit-grid">
-        <!-- Column 1: Workers -->
+      <div class="ck-grid">
         <div class="pane">
-          <div class="pane-head">
-            <span id="workers-title">Workers (4)</span>
-            <span class="sub">STATE · WORKER · NOW · SEEN</span>
-          </div>
-          <ul class="worker-list" id="worker-list" role="listbox" aria-label="Demo workers"></ul>
+          <div class="pane-top"><strong id="workers-title">Workers (4)</strong><span>↑/↓ navigate · LAUNCHED</span></div>
+          <ui-listbox id="worker-listbox" aria-label="Workers" default-value="ace72d874787"></ui-listbox>
         </div>
 
-        <!-- Column 2: Inspector (Activity / Evidence / Summary & Logs / Briefing) -->
         <div class="pane">
-          <div class="pane-head">
-            <span id="inspector-title">Inspector</span>
-            <span class="sub" id="inspector-id"></span>
-          </div>
-          <div class="tab-bar" role="tablist" aria-label="Inspector tabs">
-            <button class="tab-btn" role="tab" data-tab="briefing" aria-selected="false">1 Briefing</button>
-            <button class="tab-btn" role="tab" data-tab="evidence" aria-selected="false">2 Evidence</button>
-            <button class="tab-btn" role="tab" data-tab="activity" aria-selected="true">3 Activity</button>
-            <button class="tab-btn" role="tab" data-tab="logs" aria-selected="false">4 Summary/Logs</button>
-          </div>
-          <div class="pane-body" id="inspector-body" role="tabpanel"></div>
+          <div class="pane-top"><strong id="inspector-title">Inspector: @core-cli</strong><span>1–4 tabs</span></div>
+          <ui-tabs id="inspector-tabs" default-value="activity">
+            <ui-tabs-list aria-label="Inspector views">
+              <ui-tabs-tab value="briefing"><button type="button">1 Briefing</button></ui-tabs-tab>
+              <ui-tabs-tab value="evidence"><button type="button">2 Evidence</button></ui-tabs-tab>
+              <ui-tabs-tab value="activity"><button type="button">3 Activity</button></ui-tabs-tab>
+              <ui-tabs-tab value="logs"><button type="button">4 Summary/Logs</button></ui-tabs-tab>
+            </ui-tabs-list>
+            <ui-tabs-panel value="briefing" hidden><div id="panel-briefing-content"></div></ui-tabs-panel>
+            <ui-tabs-panel value="evidence" hidden><div id="panel-evidence-content"></div></ui-tabs-panel>
+            <ui-tabs-panel value="activity">
+              <div class="seg-bar">
+                <span id="activity-meta"></span>
+                <ui-segmented-control id="activity-filter" class="ck-seg" aria-label="Activity filter" default-value="actions">
+                  <ui-segmented-control-indicator></ui-segmented-control-indicator>
+                  <ui-segmented-control-item value="actions">Actions</ui-segmented-control-item>
+                  <ui-segmented-control-item value="milestones">Milestones</ui-segmented-control-item>
+                  <ui-segmented-control-item value="all">All</ui-segmented-control-item>
+                </ui-segmented-control>
+              </div>
+              <ui-accordion id="activity-accordion" multiple aria-label="Activity items"></ui-accordion>
+            </ui-tabs-panel>
+            <ui-tabs-panel value="logs" hidden>
+              <div class="seg-bar">
+                <span>View</span>
+                <ui-segmented-control id="log-kind" class="ck-seg" aria-label="Log view" default-value="summary">
+                  <ui-segmented-control-indicator></ui-segmented-control-indicator>
+                  <ui-segmented-control-item value="summary">Summary</ui-segmented-control-item>
+                  <ui-segmented-control-item value="prompt">Prompt</ui-segmented-control-item>
+                  <ui-segmented-control-item value="stderr">Stderr</ui-segmented-control-item>
+                  <ui-segmented-control-item value="supervisor">Supervisor</ui-segmented-control-item>
+                </ui-segmented-control>
+              </div>
+              <pre id="log-output" class="log-pre"></pre>
+            </ui-tabs-panel>
+          </ui-tabs>
         </div>
 
-        <!-- Column 3: Persistent Right-Hand Briefing Pane -->
         <div class="pane">
-          <div class="pane-head">
-            <span id="briefing-title">Briefing</span>
-            <span class="sub">Right-anchored context</span>
-          </div>
+          <div class="pane-top"><strong id="briefing-title">Briefing: @core-cli</strong><span>Right-anchored</span></div>
           <div class="pane-body" id="briefing-body"></div>
         </div>
       </div>
-
-      <div class="cockpit-footer">
-        <span>[j/k] nav · [1-4] tabs · [f] filter Actions/Milestones/All · [Space] expand · [L] Summary/Prompt/Stderr/Supervisor · [a] answer · [A] apply dry-run</span>
-        <span>Interactive preview (sample worker data)</span>
-      </div>
-    </div>
-    <p class="cockpit-note">
-      Need a minimal tmux bar instead? Run <code>claive-codex</code> or <code>CLAIVE_TMUX_TUI=1 claive-codex</code> for the 5-row <code>--compact</code> passive pane.
-    </p>
-  </section>
-
-  <!-- Five Harnesses -->
-  <section id="harnesses">
-    <p class="eyebrow">Engine Adapters · bin/claivelib/engines/</p>
-    <h2>Five harnesses, one contract—without lowest-common-denominator compromises.</h2>
-    <p class="section-lede">
-      Each adapter is a thin hook tuned to its harness's real CLI and streaming protocol. Unified config keys in <code>~/.config/claive/config.yaml</code> (or JSON) and per-launch <code>--set</code> overrides govern models, efforts, and providers across every engine.
-    </p>
-
-    <div class="harness-tabs" role="tablist" aria-label="Supported harnesses">
-      <button class="h-tab" role="tab" data-engine="codex" aria-selected="true">Codex</button>
-      <button class="h-tab" role="tab" data-engine="claude" aria-selected="false">Claude Code</button>
-      <button class="h-tab" role="tab" data-engine="pi" aria-selected="false">Pi</button>
-      <button class="h-tab" role="tab" data-engine="agy" aria-selected="false">AGY</button>
-      <button class="h-tab" role="tab" data-engine="muse" aria-selected="false">Muse</button>
-    </div>
-
-    <div class="harness-card" id="harness-panel" role="tabpanel"></div>
-
-    <div class="contrast-grid">
-      <div class="contrast-box is">
-        <h3>What claive is</h3>
-        <p>An outer control plane for process lifecycles, isolated Git worktrees, cross-agent messaging, structured progress signals, verification/acceptance gates, and terminal triage. Any agent that can run a shell command or speak MCP can drive it.</p>
-      </div>
-      <div class="contrast-box is-not">
-        <h3>What claive is not</h3>
-        <p>Not a replacement coding agent and not a restricted sandbox that strips tools. Workers keep their native toolsets, MCP servers, prompt caching, Skillshare skills, and repo instruction files (<code>AGENTS.md</code>, <code>CLAUDE.md</code>, <code>GEMINI.md</code>).</p>
-      </div>
     </div>
   </section>
 
-  <!-- 6 Core Capabilities -->
-  <section id="architecture">
-    <p class="eyebrow">The Whole Platform</p>
-    <h2>Everything needed to delegate, observe, verify, and integrate real work.</h2>
-    <p class="section-lede">
-      Start with a single reusable worker or coordinate parallel multi-model specialists across worktrees, MCP, and unattended server queues.
+  <section class="section" id="use-cases">
+    <h2>Use claive when one agent isn't enough.</h2>
+    <p class="section-intro">
+      Pick a workflow on the left, or step through how the deterministic <code>claive-orch</code> arbiter reverts bad fixes on the right.
     </p>
 
-    <div class="pillars">
-      <article class="pillar">
-        <span class="pillar-tag">01 · Messaging &amp; Specialists</span>
-        <h3>Named workers &amp; cross-engine conversations</h3>
-        <p>Bind persistent <code>@aliases</code> to reusable sessions. Send notes or wake idle workers, ask questions with optional JSON schemas, steer running turns live, or run bounded multi-round conversations across different model families.</p>
-        <div class="cmds"><code>claive open</code><code>@alias</code><code>send / ask</code><code>conversation start</code><code>steer</code></div>
-      </article>
+    <div class="usecase-grid">
+      <ui-tabs id="usecase-tabs" default-value="parallel">
+        <ui-tabs-list aria-label="Workflows">
+          <ui-tabs-tab value="parallel"><button type="button">Parallel features</button></ui-tabs-tab>
+          <ui-tabs-tab value="review"><button type="button">Cross-family review</button></ui-tabs-tab>
+          <ui-tabs-tab value="scouts"><button type="button">Cheap scouts</button></ui-tabs-tab>
+          <ui-tabs-tab value="overnight"><button type="button">Overnight queue</button></ui-tabs-tab>
+          <ui-tabs-tab value="mcp"><button type="button">Zero-shell MCP</button></ui-tabs-tab>
+        </ui-tabs-list>
 
-      <article class="pillar">
-        <span class="pillar-tag">02 · Live Triage TUI</span>
-        <h3>Dark Cockpit dashboard in Rust</h3>
-        <p>Zero-lock <code>inotify</code> reader with native incremental <code>events.jsonl</code> tailing, secret redaction before clipping, paired action→outcome timelines, and optional <code>--actions</code> with dual-driver hijack confirmation.</p>
-        <div class="cmds"><code>claive dash</code><code>--triage</code><code>--actions</code><code>--compact</code><code>peek --structured</code></div>
-      </article>
+        <ui-tabs-panel value="parallel" class="uc-panel">
+          <h3>Ship two subsystems at once with zero Git collisions.</h3>
+          <p>Give each writer its own managed worktree and branch from your current dirty checkout. Verify independently, then preview and apply cleanly.</p>
+          <code class="uc-cmd">$ claive open --engine codex --worktree --carry-dirty --alias core --prompt-file task.md</code>
+        </ui-tabs-panel>
 
-      <article class="pillar">
-        <span class="pillar-tag">03 · Isolation &amp; Containment</span>
-        <h3>Managed Git worktrees &amp; acceptance gates</h3>
-        <p>Run writers on isolated <code>claive/&lt;id&gt;</code> branches with optional <code>--carry-dirty</code> and <code>--link-deps</code>. Process trees stay contained under <code>systemd-run --user --scope</code> + subreaper, and <code>apply --dry-run</code> enforces verification and ownership gates before merging.</p>
-        <div class="cmds"><code>--worktree</code><code>--carry-dirty</code><code>claive verify</code><code>worktree apply</code><code>claive-memcap</code></div>
-      </article>
+        <ui-tabs-panel value="review" class="uc-panel" hidden>
+          <h3>Make Claude critique Codex before you even read the diff.</h3>
+          <p>Run bounded multi-round conversations across different model families. Every turn records a receipt, and peer replies never escalate permissions.</p>
+          <code class="uc-cmd">$ claive conversation start @proposer @critic @reviewer --rounds 2 --message-file pr.md</code>
+        </ui-tabs-panel>
 
-      <article class="pillar">
-        <span class="pillar-tag">04 · Zero-Shell MCP</span>
-        <h3>Flat-schema MCP stdio server</h3>
-        <p>Expose 10 clean scalar-schema tools (<code>claive_start</code>, <code>claive_peek</code>, <code>claive_steer</code>, <code>claive_wait</code>, <code>claive_verify</code>, <code>claive_apply</code>, and more) backed by atomic <code>status.json</code> snapshots—no fragile shell polling.</p>
-        <div class="cmds"><code>claive-mcp</code><code>claive mcp</code><code>status.json</code></div>
-      </article>
+        <ui-tabs-panel value="scouts" class="uc-panel" hidden>
+          <h3>Stop burning frontier quota reading 40 files.</h3>
+          <p>Dispatch read-only Pi or AGY flash scouts to map unfamiliar code, then hand the tight brief to Codex or Claude Code for the final implementation.</p>
+          <code class="uc-cmd">$ claive open --engine pi --model openrouter/flash --read-only --alias scout --prompt-file map.md</code>
+        </ui-tabs-panel>
 
-      <article class="pillar">
-        <span class="pillar-tag">05 · Verified Arbiter</span>
-        <h3>Deterministic test-gated refinement</h3>
-        <p><code>claive-orch</code> is plain code—not an LLM—that steps workers through L0 direct execution, L1 cross-family critique and repair with automatic <code>git reset</code> on regressions, and L2 selective breadth only when refining stalls.</p>
-        <div class="cmds"><code>claive-orch init</code><code>next</code><code>report</code><code>integrate</code></div>
-      </article>
+        <ui-tabs-panel value="overnight" class="uc-panel" hidden>
+          <h3>Queue goals on a server. Wake up to verified branches.</h3>
+          <p><code>claive serve</code> works a durable queue under systemd with wall-clock budgets, workspace allowlists, provider backoff, and parked-question inbox alerts.</p>
+          <code class="uc-cmd">$ claive goal add --title "Audit deps" --workspace /abs/repo --budget 2h --prompt-file goal.md &amp;&amp; claive serve</code>
+        </ui-tabs-panel>
 
-      <article class="pillar">
-        <span class="pillar-tag">06 · Unattended Queue</span>
-        <h3>Durable server runner via systemd</h3>
-        <p>When no parent session is open, <code>claive serve</code> works a durable <code>$CLAIVE_DIR/goals/</code> queue with wall-clock budgets, workspace allowlists, provider backoff, parked-question inbox events, and a clean stop switch.</p>
-        <div class="cmds"><code>claive goal add</code><code>goal answer</code><code>claive serve</code><code>claive-serve.service</code></div>
-      </article>
+        <ui-tabs-panel value="mcp" class="uc-panel" hidden>
+          <h3>Let your parent agent drive workers without brittle bash loops.</h3>
+          <p><code>claive-mcp</code> exposes 10 flat scalar tools backed by atomic <code>status.json</code> snapshots so Claude Code or Codex never wastes turns polling terminals.</p>
+          <code class="uc-cmd">claive_start({ engine: "codex", worktree: true, carry_dirty: true, alias: "backend" })</code>
+        </ui-tabs-panel>
+      </ui-tabs>
+
+      <div class="arb-card">
+        <h3>Tests decide, not another AI's opinion.</h3>
+        <p>Step through <code>claive-orch</code>: worse fixes revert automatically via Git and stay shelved for inspection.</p>
+        <ui-segmented-control id="arbiter-step" aria-label="Arbiter step" default-value="write">
+          <ui-segmented-control-indicator></ui-segmented-control-indicator>
+          <ui-segmented-control-item value="write">1 Fail</ui-segmented-control-item>
+          <ui-segmented-control-item value="revert">2 Revert</ui-segmented-control-item>
+          <ui-segmented-control-item value="fix">3 Fix</ui-segmented-control-item>
+          <ui-segmented-control-item value="breadth">4 Lane B</ui-segmented-control-item>
+        </ui-segmented-control>
+        <div id="arbiter-stage" class="arb-stage"></div>
+      </div>
     </div>
   </section>
 
-  <!-- Verifier-Gated Orchestration -->
-  <section id="orchestration">
-    <p class="eyebrow">Verified Orchestration · claive-orch</p>
-    <h2>Models propose. Plain code and your tests decide.</h2>
-    <p class="section-lede">
-      For verifier-gated coding tasks, <code>claive-orch</code> climbs a deterministic three-rung ladder and stops the moment your test command passes. Worse attempts are reverted automatically and shelved under a Git ref for inspection.
+  <section class="section" id="faq">
+    <h2>Local, open source, honest about limits.</h2>
+    <p class="section-intro">What to know before you run it on your repo.</p>
+    <dl class="faq">
+      <div class="faq-item">
+        <dt>Does it strip my agents' native tools or prompt cache?</dt>
+        <dd>Never. Codex, Claude Code, Pi, AGY, and Muse keep their native tools, MCP servers, Skillshare skills, repo instruction files, and provider caching.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>What stops two agents clobbering my uncommitted edits?</dt>
+        <dd><code>--worktree --carry-dirty</code> forks each writer into its own isolated Git worktree and branch. Changes merge back only after <code>claive verify</code> and <code>apply --dry-run</code>.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>Which harnesses enforce read-only strictly?</dt>
+        <dd>Codex and Muse enforce read-only at the harness level. Claude Code, Pi, and AGY use soft-read instructions; pass <code>--require-read-only</code> when a hard write block is mandatory.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>Does it need an account, API key, or cloud backend?</dt>
+        <dd>No. Claive is MIT licensed, Python 3 stdlib + Rust TUI, and runs 100% locally on Linux &amp; WSL2 using the agent CLIs you already authenticate.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>How does the Rust cockpit stay fast with live workers?</dt>
+        <dd><code>claive-tui</code> uses Linux <code>inotify</code>, zero file locks, and a native incremental Rust <code>events.jsonl</code> tailer with automatic secret redaction.</dd>
+      </div>
+      <div class="faq-item">
+        <dt>Are there published benchmark win rates?</dt>
+        <dd>No. The earlier TTC benchmark study is intentionally deferred (<code>docs/experiment/README.md</code>). Claive ships deterministic isolation, triage, and test-gated rollback&mdash;never fabricated numbers.</dd>
+      </div>
+    </dl>
+  </section>
+
+  <section class="section" id="install">
+    <h2>Try it on one repo in 60 seconds.</h2>
+    <p class="section-intro">
+      Clone, build the optional Rust cockpit, run <code>claive doctor</code>, and delegate your first isolated worker.
     </p>
 
-    <ol class="ladder">
-      <li class="rung">
-        <div class="rung-head">
-          <h3>Direct</h3>
-          <span class="rung-code">L0</span>
+    <div class="qs">
+      <ui-tabs id="quickstart-tabs" default-value="install">
+        <div class="qs-top">
+          <ui-tabs-list aria-label="Quickstart commands">
+            <ui-tabs-tab value="install"><button type="button">Install</button></ui-tabs-tab>
+            <ui-tabs-tab value="worker"><button type="button">Worker</button></ui-tabs-tab>
+            <ui-tabs-tab value="dash"><button type="button">Cockpit</button></ui-tabs-tab>
+            <ui-tabs-tab value="conv"><button type="button">Conversations</button></ui-tabs-tab>
+            <ui-tabs-tab value="mcp"><button type="button">MCP</button></ui-tabs-tab>
+            <ui-tabs-tab value="orch"><button type="button">Arbiter &amp; Serve</button></ui-tabs-tab>
+          </ui-tabs-list>
+          <ui-button id="qs-copy">
+            <button class="term-btn" type="button">Copy snippet</button>
+          </ui-button>
         </div>
-        <p>One worker implements the task in an isolated lane and your verifier command runs. If the checks pass, the run completes immediately without extra spend.</p>
-      </li>
-      <li class="rung">
-        <div class="rung-head">
-          <h3>Cross-Family Refine</h3>
-          <span class="rung-code">L1</span>
-        </div>
-        <p>On failure, a read-only critic from a <strong>different model family</strong> names concrete defects. The same worker session fixes them. Better or equal scores checkpoint; regressions revert via Git and stay under <code>refs/claive-orch/&lt;run&gt;/&lt;lane&gt;/rejected-rN</code>.</p>
-      </li>
-      <li class="rung">
-        <div class="rung-head">
-          <h3>Selective Breadth</h3>
-          <span class="rung-code">L2</span>
-        </div>
-        <p>Only after refining stalls (two rounds without improvement, including reverts) does arm D launch a deliberately different second lane in its own worktree. Your verifier picks the winner—never a guess.</p>
-      </li>
+
+        <ui-tabs-panel value="install"><pre class="qs-pre"><code>git clone https://github.com/ham-zax/claive.git &amp;&amp; cd claive
+just dash-build &amp;&amp; ./install.sh --with-tui
+claive doctor</code></pre></ui-tabs-panel>
+
+        <ui-tabs-panel value="worker" hidden><pre class="qs-pre"><code>claive open --detach --engine codex --worktree --carry-dirty \
+  --alias backend --workspace /abs/repo --prompt-file /tmp/task.md
+
+claive wait @backend &amp;&amp; claive verify @backend &amp;&amp; claive worktree apply @backend --dry-run</code></pre></ui-tabs-panel>
+
+        <ui-tabs-panel value="dash" hidden><pre class="qs-pre"><code>claive dash                    # read-only Rust cockpit (0 locks, native tailer)
+claive dash --triage           # show only ASK / UNWATCHED / LOST / FAIL / REVIEW
+claive dash --actions          # interactive answer / steer / verify / apply
+CLAIVE_TMUX_TUI=1 claive-codex # 5-row compact tmux status pane</code></pre></ui-tabs-panel>
+
+        <ui-tabs-panel value="conv" hidden><pre class="qs-pre"><code>claive conversation start @proposer @critic @reviewer \
+  --message-file /abs/design-question.md --rounds 2 --timeout 300</code></pre></ui-tabs-panel>
+
+        <ui-tabs-panel value="mcp" hidden><pre class="qs-pre"><code># Configure claive-mcp in Claude Code, Codex, or any stdio MCP host:
+claive-mcp
+
+# 10 flat-schema tools: claive_start · claive_peek · claive_steer · claive_wait
+# claive_verify · claive_apply · claive_followup · claive_list · claive_cancel · claive_close</code></pre></ui-tabs-panel>
+
+        <ui-tabs-panel value="orch" hidden><pre class="qs-pre"><code># Verifier-gated arbiter (L0 -&gt; L1 refine -&gt; L2 breadth):
+claive-orch init --repo /abs/repo --task-file /abs/task.md --verify 'pytest -q' --arm D
+claive-orch next RUN &amp;&amp; claive-orch integrate RUN
+
+# Unattended server queue (systemd/claive-serve.service):
+claive goal add --title "Audit deps" --workspace /abs/repo --prompt-file /abs/goal.md &amp;&amp; claive serve</code></pre></ui-tabs-panel>
+      </ui-tabs>
+    </div>
+
+    <ol class="steps-row">
+      <li><h3>1. Install once</h3><p>Installs Python launchers + native Rust <code>claive-tui</code> into <code>~/.local/bin</code> with zero root access.</p></li>
+      <li><h3>2. Delegate isolated work</h3><p>Launch Codex, Claude, Pi, AGY, or Muse in managed Git worktrees from CLI or MCP.</p></li>
+      <li><h3>3. Triage &amp; apply cleanly</h3><p>Watch live progress in <code>claive dash</code>, run <code>claive verify</code>, and merge only verified diffs.</p></li>
     </ol>
 
-    <dl class="roles-strip">
-      <div class="role-card"><dt>Parent</dt><dd>Claude Code, Codex, Pi, AGY, or a shell script delegating tasks.</dd></div>
-      <div class="role-card"><dt>Worker</dt><dd>Reusable session writing code inside a workspace or isolated worktree.</dd></div>
-      <div class="role-card"><dt>Critic</dt><dd>Read-only reviewer from a distinct model family naming exact defects.</dd></div>
-      <div class="role-card"><dt>Verifier</dt><dd>Your own test/check command—the sole source of truth for keeping changes.</dd></div>
-      <div class="role-card"><dt>Arbiter</dt><dd><code>claive-orch</code>: plain Python state machine enforcing one legal step at a time.</dd></div>
-    </dl>
-    <p class="cockpit-note">
-      Note on benchmarking: the earlier TTC benchmark experiment is intentionally deferred (see <code>docs/experiment/README.md</code>). <code>claive-orch</code> remains available as an everyday verifier-gated workflow, and this page makes no unverified benchmark or win-rate claims.
-    </p>
-  </section>
-
-  <!-- Quickstart -->
-  <section id="quickstart">
-    <p class="eyebrow">Quickstart</p>
-    <h2>Up and running in two minutes.</h2>
-    <p class="section-lede">
-      Requires Linux and Python 3 (standard library only), plus whichever coding harness CLI(s) you already use. Add Cargo to compile the optional native Ratatui dashboard.
-    </p>
-
-    <div class="qs-box">
-      <div class="qs-tabs" role="tablist" aria-label="Quickstart examples">
-        <button class="qs-tab" role="tab" data-qs="install" aria-selected="true">Install</button>
-        <button class="qs-tab" role="tab" data-qs="worker" aria-selected="false">Workers &amp; @aliases</button>
-        <button class="qs-tab" role="tab" data-qs="dash" aria-selected="false">Triage Dashboard</button>
-        <button class="qs-tab" role="tab" data-qs="conv" aria-selected="false">Conversations</button>
-        <button class="qs-tab" role="tab" data-qs="mcp" aria-selected="false">MCP Server</button>
-        <button class="qs-tab" role="tab" data-qs="orch" aria-selected="false">Arbiter &amp; Serve</button>
-      </div>
-      <div class="qs-body">
-        <button class="copy-btn" id="qs-copy" type="button">Copy</button>
-        <pre><code id="qs-code"></code></pre>
-      </div>
-      <div class="qs-caption" id="qs-caption"></div>
+    <div class="hero-actions">
+      <a class="btn primary" href="https://github.com/ham-zax/claive">View source on GitHub</a>
+      <a class="btn" href="https://github.com/ham-zax/claive/blob/main/docs/command-reference.md">Read command reference</a>
     </div>
-  </section>
-
-  <!-- Honest Limits -->
-  <section id="limits">
-    <p class="eyebrow">Scope &amp; Honest Limits</p>
-    <h2>What to know before adopting claive.</h2>
-    <ul class="limits-list">
-      <li><strong>Linux-first process containment:</strong> Designed for Linux (including WSL2) using <code>systemd-run --user --scope</code>, <code>/proc</code> liveness checks, and <code>inotify</code>. macOS and native Windows are not supported targets.</li>
-      <li><strong>Soft vs. enforced read-only:</strong> Codex and Muse enforce read-only at the harness level; Pi, Claude Code, and AGY use soft-read instructions unless you require strict enforcement via <code>--require-read-only</code>.</li>
-      <li><strong>Engine binaries are installed separately:</strong> Claive wraps the CLIs you already authenticate and pay for (<code>codex</code>, <code>claude</code>, <code>pi</code>, <code>agy</code>, <code>muse</code>). Free-tier routes on Pi can rate-limit or change availability.</li>
-      <li><strong>No fabricated benchmarks:</strong> No win-rate or cost-savings claims are published here; the TTC research experiment is deferred until a settled corpus and protocol are explicitly resumed.</li>
-    </ul>
   </section>
 </main>
 
 <footer class="wrap">
-  <p><strong>claive</strong> by Hamza (<a href="https://github.com/ham-zax">ham-zax</a>) · MIT License</p>
-  <div class="footer-links">
+  <span><strong>claive</strong> by Hamza (<a href="https://github.com/ham-zax">ham-zax</a>) · MIT License · Linux &amp; WSL2</span>
+  <div class="foot-links">
     <a href="https://github.com/ham-zax/claive">Source</a>
-    <a href="https://github.com/ham-zax/claive/blob/main/docs/command-reference.md">Command reference</a>
+    <a href="https://github.com/ham-zax/claive/blob/main/docs/command-reference.md">Commands</a>
     <a href="https://github.com/ham-zax/claive/blob/main/docs/engine-configuration.md">Engine config</a>
     <a href="https://github.com/ham-zax/claive/blob/main/docs/harness-integration.md">Harness integration</a>
-    <span>Updated 2026-11-24</span>
   </div>
 </footer>
 
-<script>
-(() => {
-  // ---- Theme toggle ----
-  const root = document.documentElement;
-  const themeBtn = document.getElementById('theme-toggle');
-  const savedTheme = (() => { try { return localStorage.getItem('claive-theme'); } catch { return null; } })();
-  if (savedTheme === 'light' || savedTheme === 'dark') {
-    root.dataset.theme = savedTheme;
-  }
-  function currentTheme() {
-    if (root.dataset.theme === 'light' || root.dataset.theme === 'dark') return root.dataset.theme;
-    return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-  }
-  function syncThemeLabel() {
-    const t = currentTheme();
-    themeBtn.textContent = t === 'dark' ? 'Light mode' : 'Dark mode';
-  }
-  syncThemeLabel();
-  themeBtn.addEventListener('click', () => {
-    const next = currentTheme() === 'dark' ? 'light' : 'dark';
-    root.dataset.theme = next;
-    try { localStorage.setItem('claive-theme', next); } catch {}
-    syncThemeLabel();
-  });
-
-  // ---- Interactive Cockpit Demo Data ----
-  const WORKERS = [
-    {
-      id: 'ace72d874787',
-      alias: '@core-cli',
-      badge: 'ASK',
-      badgeClass: 'ask',
-      actionable: true,
-      engine: 'codex/gpt-6.1-terra (xhigh)',
-      workspace: 'repo/satori',
-      turn: 1,
-      elapsed: '8m35s',
-      seen: '12s',
-      watchedBy: 'codex-parent',
-      mission: 'Fix worktree lock recovery & add focused CLI regression tests',
-      now: 'ASK: Should recovery always back off for live PIDs, or add a helper-age threshold?',
-      stage: 'blocked',
-      intent: 'Core and CLI fixes pass tests; waiting on parent decision for live-PID lock recovery.',
-      lastCheck: { status: 'passed', summary: '47 passed (tsx --test)' },
-      filesTotal: 5,
-      verify: 'passed',
-      accept: 'pending',
-      branch: 'claive/ace72d874787',
-      baseCommit: '9f4b21c8a012',
-      cmdFailures: 1,
-      ask: {
-        kind: 'needs_decision',
-        question: 'Should lock recovery always back off while the recorded PID is alive, or introduce a separate helper-age ceiling?',
-        cmd: 'claive answer ace72d874787 --message ""'
-      },
-      changedFiles: [
-        'packages/core/src/core/context.ts',
-        'packages/core/src/lock/recovery.ts',
-        'packages/cli/src/commands/gc.ts',
-        'packages/cli/src/gc.test.ts',
-        'packages/core/src/lock/recovery.test.ts'
-      ],
-      actions: [
-        { id: 34, cat: 'test', tag: 'TEST ', summary: 'node --import tsx --test packages/core/src/lock/recovery.test.ts', outcome: '46 passed', status: 'ok', milestone: true,
-          cmd: 'node --import tsx --test packages/core/src/lock/recovery.test.ts', exit: 0, output: '# tests 46\n# pass 46\n# fail 0\n# duration_ms 412.4' },
-        { id: 35, cat: 'read', tag: 'READ ', summary: 'rg reuse|shardReuse in packages/core/src', outcome: '14 lines', status: 'ok', milestone: false,
-          cmd: "rg -n 'reuse|shardReuse' packages/core/src", exit: 0, output: 'packages/core/src/core/context.ts:55: relationshipVersion' },
-        { id: 36, cat: 'edit', tag: 'EDIT ', summary: 'packages/cli/src/gc.test.ts (2 edits)', outcome: 'applied', status: 'ok', milestone: true,
-          cmd: null, exit: 0, output: 'Updated lock-owner liveness fixture and live-PID regression test.' },
-        { id: 37, cat: 'build', tag: 'BUILD', summary: 'pnpm --filter @satori/cli build', outcome: 'ok', status: 'ok', milestone: true,
-          cmd: 'pnpm --filter @satori/cli build', exit: 0, output: '> @satori/cli build\n> tsc -b' },
-        { id: 38, cat: 'test', tag: 'TEST ', summary: 'node --import tsx --test packages/cli/src/gc.test.ts', outcome: '47 passed', status: 'ok', milestone: true,
-          cmd: 'node --import tsx --test packages/cli/src/gc.test.ts', exit: 0, output: '# tests 47\n# pass 47\n# fail 0' },
-        { id: 39, cat: 'say', tag: 'SAY  ', summary: 'Core build and focused suite pass; pausing for lock-recovery decision.', outcome: null, status: 'done', milestone: true,
-          cmd: null, exit: null, output: 'Core build and 47 tests pass. Found one design fork around live-PID lock backoff vs helper-age ceiling; escalating with needs_decision.' }
-      ],
-      logs: {
-        summary: '# Result Summary\n- Updated `context.ts` and `recovery.ts` for deterministic lock cleanup.\n- Verified `47 passed` in focused core + CLI test suites.\n- Escalated `needs_decision` before altering live-PID backoff policy.',
-        prompt: '# Mission\nImplement lock recovery fixes in `packages/core` and `packages/cli`.\nDo not commit or stage. Escalate with `needs_decision` if policy changes are needed.',
-        stderr: '(stderr.log is empty)',
-        supervisor: '[08:01:12] spawned codex worker ace72d874787 in worktree claive/ace72d874787\n[08:09:47] turn 1 settled with needs_parent (needs_decision)'
-      }
-    },
-    {
-      id: '92113e98e291',
-      alias: '@api-refactor',
-      badge: 'RUN',
-      badgeClass: 'run',
-      actionable: false,
-      engine: 'claude/claude-haiku-5-5 (xhigh)',
-      workspace: 'repo/gateway',
-      turn: 2,
-      elapsed: '2m14s',
-      seen: '2s',
-      watchedBy: 'claude-main',
-      mission: 'Split connector-policy parser into pure validator + unit tests',
-      now: '[TESTING] pytest tests/test_connector_policy.py',
-      stage: 'testing',
-      intent: 'Extracted policy validator; running edge-case test matrix now.',
-      lastCheck: { status: 'failed', summary: 'exit 1: 1 failed (missing default fallback)' },
-      filesTotal: 3,
-      verify: 'not_run',
-      accept: 'pending',
-      branch: 'claive/92113e98e291',
-      baseCommit: '3c8d09e14b77',
-      cmdFailures: 1,
-      ask: null,
-      changedFiles: [
-        'lib/bridge/connector-policy.mjs',
-        'lib/bridge/policy-schema.mjs',
-        'tests/test_connector_policy.mjs'
-      ],
-      actions: [
-        { id: 12, cat: 'edit', tag: 'EDIT ', summary: 'lib/bridge/connector-policy.mjs (1 edit)', outcome: 'applied', status: 'ok', milestone: true,
-          cmd: null, exit: 0, output: 'Split parseConnectorPolicy() into pure validatePolicy() helper.' },
-        { id: 13, cat: 'test', tag: 'TEST ', summary: 'just test-fast', outcome: 'exit 1: 1 failed', status: 'error', milestone: true,
-          cmd: 'just test-fast', exit: 1, output: 'FAIL tests/test_connector_policy.mjs\nAssertionError: expected default policy when env unset' },
-        { id: 14, cat: 'edit', tag: 'EDIT ', summary: 'lib/bridge/connector-policy.mjs (1 edit)', outcome: 'applied', status: 'ok', milestone: true,
-          cmd: null, exit: 0, output: 'Restored default fallback when CONNECTOR_POLICY is empty.' },
-        { id: 15, cat: 'test', tag: 'TEST ', summary: 'just test-fast', outcome: 'running...', status: 'running', milestone: true,
-          cmd: 'just test-fast', exit: null, output: 'Running 28 test cases...' }
-      ],
-      logs: {
-        summary: '(turn 2 still running — result.txt updates on settlement)',
-        prompt: '# Turn 2 Follow-up\nExtract connector policy validation into a pure function and cover missing-env defaults.',
-        stderr: '(no stderr warnings)',
-        supervisor: '[08:08:11] turn 2 started (--enable-steering active)\n[08:10:23] active tool: bash (just test-fast)'
-      }
-    },
-    {
-      id: '7d40a1f8c302',
-      alias: '@auth-audit',
-      badge: 'REVIEW',
-      badgeClass: 'review',
-      actionable: true,
-      engine: 'pi/mimo-v2.6-flash-free',
-      workspace: 'repo/claive',
-      turn: 1,
-      elapsed: '4m48s',
-      seen: '1m05s',
-      watchedBy: '',
-      mission: 'Add secret redaction coverage for multi-byte UTF-8 inputs',
-      now: 'check ok: 32/32 Rust tests passed · ready for apply dry-run',
-      stage: 'done',
-      intent: 'All 32 Rust unit & integration tests pass with clippy -D warnings clean.',
-      lastCheck: { status: 'passed', summary: '32 passed, 0 failed' },
-      filesTotal: 2,
-      verify: 'passed',
-      accept: 'pending',
-      branch: 'claive/7d40a1f8c302',
-      baseCommit: '11a7e4f9c203',
-      cmdFailures: 0,
-      ask: null,
-      changedFiles: [
-        'tui/src/events.rs',
-        'tui/tests/phase1_integration.rs'
-      ],
-      actions: [
-        { id: 8, cat: 'edit', tag: 'EDIT ', summary: 'tui/src/events.rs (2 edits)', outcome: 'applied', status: 'ok', milestone: true,
-          cmd: null, exit: 0, output: 'Switched issuer-token scanner to byte slices so multi-byte UTF-8 prefixes never panic.' },
-        { id: 9, cat: 'test', tag: 'TEST ', summary: 'cargo test --manifest-path tui/Cargo.toml', outcome: '32 passed', status: 'ok', milestone: true,
-          cmd: 'cargo test --manifest-path tui/Cargo.toml', exit: 0, output: 'test result: ok. 20 unit + 8 phase1 + 4 phase2_3 passed' },
-        { id: 10, cat: 'build', tag: 'BUILD', summary: 'cargo clippy --all-targets -- -D warnings', outcome: 'ok', status: 'ok', milestone: true,
-          cmd: 'cargo clippy --manifest-path tui/Cargo.toml --all-targets -- -D warnings', exit: 0, output: 'Finished dev profile cleanly with 0 warnings.' },
-        { id: 11, cat: 'say', tag: 'SAY  ', summary: 'Verified UTF-8 redaction safety; worktree ready for claive apply --dry-run.', outcome: null, status: 'done', milestone: true,
-          cmd: null, exit: null, output: 'All 32 Rust tests and clippy checks passed. Worktree is clean and ready for parent review/apply.' }
-      ],
-      logs: {
-        summary: '# Verification Ready\n- Hardened `redact_secrets` against multi-byte UTF-8 boundaries.\n- `just dash-test`: 32/32 passed.\n- `cargo clippy --all-targets -- -D warnings`: clean.\n- Press `[A]` in `--actions` mode to inspect `claive apply --dry-run`.',
-        prompt: '# Mission\nAudit `tui/src/events.rs` secret redaction for UTF-8 boundary panics and add regression coverage.',
-        stderr: '(stderr.log is empty)',
-        supervisor: '[08:04:10] spawned pi worker 7d40a1f8c302\n[08:08:58] verification passed -> status REVIEW'
-      }
-    },
-    {
-      id: '4f91b2e60019',
-      alias: '@spec-scout',
-      badge: 'DONE',
-      badgeClass: 'done',
-      actionable: false,
-      engine: 'agy/gemini-3.8-flash-high',
-      workspace: 'repo/claive',
-      turn: 1,
-      elapsed: '1m42s',
-      seen: '18m',
-      watchedBy: '',
-      mission: 'Read-only audit of MCP tool schemas for flat scalar compliance',
-      now: 'All 10 claive-mcp tool definitions comply with flat scalar schema rules',
-      stage: 'done',
-      intent: 'Confirmed zero nested object/anyOf/oneOf keys across all 10 MCP tools.',
-      lastCheck: { status: 'passed', summary: '10/10 tools flat-schema compliant' },
-      filesTotal: 0,
-      verify: 'passed',
-      accept: 'accepted',
-      branch: '(detached read-only)',
-      baseCommit: '11a7e4f9c203',
-      cmdFailures: 0,
-      ask: null,
-      changedFiles: [],
-      actions: [
-        { id: 1, cat: 'read', tag: 'READ ', summary: 'bin/claivelib/mcp_server.py', outcome: '210 lines', status: 'ok', milestone: false,
-          cmd: null, exit: 0, output: 'Read TOOL_DEFINITIONS and FORBIDDEN_SCHEMA_KEYS.' },
-        { id: 2, cat: 'test', tag: 'TEST ', summary: 'just test-one tests/test_mcp_server.py', outcome: '19 passed', status: 'ok', milestone: true,
-          cmd: 'just test-one tests/test_mcp_server.py', exit: 0, output: 'Ran 19 tests in 0.84s — OK' },
-        { id: 3, cat: 'say', tag: 'SAY  ', summary: 'All 10 MCP tools use flat scalar schemas with zero forbidden JSON Schema keywords.', outcome: null, status: 'done', milestone: true,
-          cmd: null, exit: null, output: 'Audit complete: claive_start, claive_peek, claive_steer, claive_wait, claive_cancel, claive_verify, claive_list, claive_followup, claive_apply, claive_close are all flat-schema compliant.' }
-      ],
-      logs: {
-        summary: '# Read-Only Audit\nConfirmed all 10 `claive-mcp` tools avoid `anyOf`, `oneOf`, `$ref`, and nested objects.',
-        prompt: '# Read-Only Scout\nVerify every tool in `bin/claivelib/mcp_server.py` obeys flat-schema constraints.',
-        stderr: '(stderr.log is empty)',
-        supervisor: '[07:50:02] spawned read-only agy worker 4f91b2e60019\n[07:51:44] settled (done)'
-      }
-    }
-  ];
-
-  let selectedId = WORKERS[0].id;
-  let activeTab = 'activity';
-  let actFilter = 'actions';
-  let logKind = 'summary';
-  let triageOnly = false;
-  const expanded = new Set([34]);
-
-  const countsEl = document.getElementById('cockpit-counts');
-  const workersTitleEl = document.getElementById('workers-title');
-  const workerListEl = document.getElementById('worker-list');
-  const inspectorTitleEl = document.getElementById('inspector-title');
-  const inspectorIdEl = document.getElementById('inspector-id');
-  const inspectorBodyEl = document.getElementById('inspector-body');
-  const briefingTitleEl = document.getElementById('briefing-title');
-  const briefingBodyEl = document.getElementById('briefing-body');
-  const triageBtn = document.getElementById('btn-triage');
-
-  function esc(str) {
-    return String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
-
-  function renderBriefingHtml(w) {
-    let html = `<div style="margin-bottom:0.65rem">
-      <span class="t-badge ${w.badgeClass}">${esc(w.badge)}</span>
-      <span style="color:#fff;margin-left:0.35rem">${esc(w.engine)}</span>
-      <span style="color:var(--term-muted)"> · ${esc(w.workspace)} · t${w.turn} · ${esc(w.elapsed)}</span>
-    </div>`;
-
-    if (w.ask) {
-      html += `<div class="brief-ask">
-        <div class="ask-t">[ASK] NEEDS PARENT (${esc(w.ask.kind)})</div>
-        <div style="color:#fff;margin:0.25rem 0">${esc(w.ask.question)}</div>
-        <div style="color:var(--term-cyan);font-size:0.7rem">[a] answer · [y] ${esc(w.ask.cmd)}</div>
-      </div>`;
-    }
-
-    html += `<div class="brief-block">
-      <div class="brief-h">Mission</div>
-      <div style="color:#fff">${esc(w.mission)}</div>
-    </div>`;
-
-    html += `<div class="brief-block">
-      <div class="brief-h">Now &amp; Area</div>
-      <dl class="brief-kv">
-        <dt>Stage</dt><dd style="color:var(--term-cyan)">[${esc(w.stage.toUpperCase())}]</dd>
-        <dt>Intent</dt><dd>${esc(w.intent)}</dd>
-        <dt>Last check</dt><dd style="color:${w.lastCheck.status === 'passed' ? 'var(--term-green)' : 'var(--term-red)'}">${esc(w.lastCheck.status)} — ${esc(w.lastCheck.summary)}</dd>
-        <dt>Worktree</dt><dd>${w.filesTotal} files · verify=${esc(w.verify)} · accept=${esc(w.accept)}</dd>
-      </dl>
-    </div>`;
-
-    const milestones = w.actions.filter(a => a.milestone).slice(-3);
-    html += `<div class="brief-block">
-      <div class="brief-h">Recent Milestones</div>`;
-    for (const m of milestones) {
-      const outHtml = m.outcome
-        ? ` <span style="color:var(--term-muted)">-&gt;</span> <span class="act-out ${m.status}">${esc(m.outcome)}</span>`
-        : '';
-      html += `<div style="font-size:0.72rem;margin-bottom:0.2rem">
-        <span class="cat-tag cat-${m.cat}">${esc(m.tag.trim())}</span> ${esc(m.summary)}${outHtml}
-      </div>`;
-    }
-    html += `</div>`;
-    return html;
-  }
-
-  function renderCockpit() {
-    const visible = triageOnly ? WORKERS.filter(w => w.actionable) : WORKERS;
-    if (!visible.some(w => w.id === selectedId) && visible.length) {
-      selectedId = visible[0].id;
-    }
-    const w = visible.find(x => x.id === selectedId) || WORKERS[0];
-
-    countsEl.innerHTML = `
-      <span class="t-badge brand-b">CLAIVE</span>
-      <span class="t-badge ask">ASK:1</span>
-      <span class="t-badge review">REVIEW:1</span>
-      <span style="color:var(--term-ink)">run:1 idle:0 done:1</span>
-      ${triageOnly ? '<span class="t-badge warn">TRIAGE-ONLY</span>' : ''}
-    `;
-
-    workersTitleEl.textContent = `Workers (${visible.length}${triageOnly ? ' actionable' : ''})`;
-    workerListEl.innerHTML = visible.map(item => `
-      <li>
-        <button class="worker-item" type="button" role="option" data-wid="${item.id}" aria-selected="${item.id === w.id}">
-          <div class="worker-top">
-            <span class="t-badge ${item.badgeClass}">${esc(item.badge)}</span>
-            <span class="worker-name">${esc(item.alias)}</span>
-            <span class="worker-seen">${esc(item.seen)}</span>
-          </div>
-          <div class="worker-now">${esc(item.now)}</div>
-          <div class="worker-sub">${esc(item.workspace)} · ${esc(item.mission)}</div>
-        </button>
-      </li>
-    `).join('');
-
-    workerListEl.querySelectorAll('[data-wid]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        selectedId = btn.dataset.wid;
-        renderCockpit();
-      });
-    });
-
-    inspectorTitleEl.textContent = `Inspector: ${w.alias}`;
-    inspectorIdEl.textContent = w.id;
-    briefingTitleEl.textContent = `Briefing: ${w.alias}`;
-    briefingBodyEl.innerHTML = renderBriefingHtml(w);
-
-    document.querySelectorAll('#cockpit-demo .tab-btn').forEach(btn => {
-      btn.setAttribute('aria-selected', String(btn.dataset.tab === activeTab));
-    });
-
-    if (activeTab === 'briefing') {
-      inspectorBodyEl.innerHTML = renderBriefingHtml(w);
-    } else if (activeTab === 'evidence') {
-      const filesHtml = w.changedFiles.length
-        ? w.changedFiles.map(f => `<div style="color:#cbd5e1">  ${esc(f)}</div>`).join('')
-        : '<div style="color:var(--term-muted)">  (none — read-only turn)</div>';
-      inspectorBodyEl.innerHTML = `
-        <dl class="brief-kv" style="margin-bottom:0.8rem">
-          <dt>Verification</dt><dd style="color:${w.verify === 'passed' ? 'var(--term-green)' : 'var(--term-yellow)'}">${esc(w.verify)}</dd>
-          <dt>Acceptance</dt><dd style="color:${w.accept === 'accepted' ? 'var(--term-green)' : 'var(--term-ink)'}">${esc(w.accept)}</dd>
-          <dt>Cmd failures</dt><dd>${w.cmdFailures}</dd>
-          <dt>Branch</dt><dd>${esc(w.branch)}</dd>
-          <dt>Base commit</dt><dd>${esc(w.baseCommit)}</dd>
-        </dl>
-        <div class="brief-h">Changed files (${w.filesTotal})</div>
-        ${filesHtml}
-      `;
-    } else if (activeTab === 'activity') {
-      const filtered = w.actions.filter(a => actFilter === 'milestones' ? a.milestone : true);
-      const hiddenCount = w.actions.length - filtered.length;
-      inspectorBodyEl.innerHTML = `
-        <div style="margin-bottom:0.45rem;color:#fff"><strong>Now:</strong> ${esc(w.intent)}</div>
-        <div class="filter-strip">
-          <span>${filtered.length} items${hiddenCount ? ` (${hiddenCount} hidden)` : ''}</span>
-          <button class="filter-pill" type="button" data-af="actions" aria-pressed="${actFilter === 'actions'}">Actions</button>
-          <button class="filter-pill" type="button" data-af="milestones" aria-pressed="${actFilter === 'milestones'}">Milestones</button>
-          <button class="filter-pill" type="button" data-af="all" aria-pressed="${actFilter === 'all'}">All</button>
-        </div>
-        <ul class="act-list">
-          ${filtered.map(a => {
-            const isOpen = expanded.has(a.id);
-            const outSpan = a.outcome
-              ? `<span style="color:var(--term-muted)">-&gt;</span><span class="act-out ${a.status}">${esc(a.outcome)}</span>`
-              : '';
-            const detailHtml = isOpen ? `<div class="act-detail">${a.cmd ? `<div class="cmd">$ ${esc(a.cmd)}</div>` : ''}${a.exit !== null ? `<div class="${a.exit !== 0 ? 'exit-err' : ''}">exit ${a.exit} (${esc(a.status)})</div>` : ''}<div>${esc(a.output)}</div></div>` : '';
-            return `<li class="act-row ${isOpen ? 'open' : ''}">
-              <button class="act-btn" type="button" data-aid="${a.id}" aria-expanded="${isOpen}">
-                <span style="color:var(--term-cyan)">${isOpen ? 'v' : '+'}</span>
-                <span style="color:var(--term-muted)">${a.id}</span>
-                <span class="cat-tag cat-${a.cat}">${esc(a.tag.trim())}</span>
-                <span class="act-sum">${esc(a.summary)}</span>
-                ${outSpan}
-              </button>
-              ${detailHtml}
-            </li>`;
-          }).join('')}
-        </ul>
-      `;
-      inspectorBodyEl.querySelectorAll('[data-af]').forEach(b => {
-        b.addEventListener('click', () => { actFilter = b.dataset.af; renderCockpit(); });
-      });
-      inspectorBodyEl.querySelectorAll('[data-aid]').forEach(b => {
-        b.addEventListener('click', () => {
-          const id = Number(b.dataset.aid);
-          if (expanded.has(id)) expanded.delete(id); else expanded.add(id);
-          renderCockpit();
-        });
-      });
-    } else if (activeTab === 'logs') {
-      const kinds = [
-        ['summary', 'Summary (result.txt)'],
-        ['prompt', 'Prompt'],
-        ['stderr', 'Stderr'],
-        ['supervisor', 'Supervisor']
-      ];
-      inspectorBodyEl.innerHTML = `
-        <div class="filter-strip">
-          <span>[L] View:</span>
-          ${kinds.map(([k, lbl]) => `<button class="filter-pill" type="button" data-lk="${k}" aria-pressed="${logKind === k}">${lbl}</button>`).join('')}
-        </div>
-        <pre style="margin:0;white-space:pre-wrap;color:#cbd5e1;font-size:0.74rem">${esc(w.logs[logKind])}</pre>
-      `;
-      inspectorBodyEl.querySelectorAll('[data-lk]').forEach(b => {
-        b.addEventListener('click', () => { logKind = b.dataset.lk; renderCockpit(); });
-      });
-    }
-  }
-
-  document.querySelectorAll('#cockpit-demo .tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => { activeTab = btn.dataset.tab; renderCockpit(); });
-  });
-  triageBtn.addEventListener('click', () => {
-    triageOnly = !triageOnly;
-    triageBtn.setAttribute('aria-pressed', String(triageOnly));
-    renderCockpit();
-  });
-  renderCockpit();
-
-  // ---- Harness Switcher ----
-  const HARNESSES = {
-    codex: {
-      name: 'Codex',
-      summary: 'Runs headless `codex exec --json` (or App Server transport when `--enable-steering` is set). Preserves skills, repo `AGENTS.md`, live web search, and thread-ID resumption.',
-      specs: [
-        ['Default model', 'gpt-6.1-terra (xhigh)'],
-        ['Allowed models', 'gpt-6.1-terra, gpt-6-luna, gpt-6.1-sol'],
-        ['Live steering', 'Supported via App Server (--enable-steering)'],
-        ['Read-only mode', 'Enforced read-only sandbox'],
-        ['Instruction files', 'AGENTS.md + skills (optional user config.toml)'],
-        ['Native TUI tailer', 'Paired item.id events in Rust']
-      ]
-    },
-    claude: {
-      name: 'Claude Code',
-      summary: 'Runs headless `claude -p` with stream-json events, `--output-schema` validation, context budget mode (handoff into fresh session before compaction), and isolated `--setting-sources ""`.',
-      specs: [
-        ['Default model', 'claude-haiku-5-5 (configurable via models list)'],
-        ['Reasoning effort', 'low through max (default xhigh)'],
-        ['Live steering', 'Supported via stream-json (--enable-steering)'],
-        ['Read-only mode', 'Soft-read instruction (use --require-read-only to gate)'],
-        ['Instruction files', 'Worker CLAUDE.md + workspace hierarchy + skills/MCP'],
-        ['Native TUI tailer', 'Paired tool_use id -> tool_result in Rust']
-      ]
-    },
-    pi: {
-      name: 'Pi',
-      summary: 'Runs any provider configured in Pi\'s `models.json` (`--provider NAME` or `--model provider/id`), including flash-class and free-tier routes for cost-conscious scouting and cross-family critique.',
-      specs: [
-        ['Default model', 'Inherits last explicit Pi model (initial muse-spark-1.3-contributor-free)'],
-        ['Provider management', 'claive pi provider list | add | remove | check'],
-        ['Live steering', 'RPC / message queue via claive send'],
-        ['Read-only mode', 'Soft-read instruction (Pi has no native write lock)'],
-        ['Instruction files', 'Workspace rules + Pi skills (recursion-guarded)'],
-        ['Native TUI tailer', 'Paired toolCallId events in Rust']
-      ]
-    },
-    agy: {
-      name: 'AGY',
-      summary: 'Supports the AGY 1.5.10 catalog (Gemini 3.8/4, orchestrator, Claude, and GPT-OSS models) with per-model native effort mapping, managed worktrees, and per-turn `native_cache_read_tokens`.',
-      specs: [
-        ['Default model', 'gemini-3.8-flash-high'],
-        ['Model catalog', 'gemini-3.8-flash, gemini-4-{carbon,argon,hydrogen}, claude-*, gpt-oss-120b'],
-        ['Session reuse', 'open --detach + followup resumes conversation'],
-        ['Read-only mode', 'Soft-read (use --require-read-only when hard block needed)'],
-        ['Instruction files', '~/.gemini/GEMINI.md, repo AGENTS.md/GEMINI.md, ~/.agents/skills'],
-        ['Native TUI tailer', 'Paired conversation_id:step_index + live text deltas']
-      ]
-    },
-    muse: {
-      name: 'Muse',
-      summary: 'Built-in default engine when no host config selects another harness. Preserves Muse\'s native sandbox, enforces `:read-only --disable-write` on read-only turns, and tracks cached token usage.',
-      specs: [
-        ['Default model', 'muse-spark-1.3-contributor'],
-        ['Structured output', 'Supports --output-schema and --max-model-steps'],
-        ['Session reuse', 'Preserves Muse session UUID across follow-ups'],
-        ['Read-only mode', 'Enforced (--permission-profile :read-only --disable-write)'],
-        ['Offline testing', '--provider echo transport fixture'],
-        ['TUI integration', 'Automatic fallback to claive peek --json --structured']
-      ]
-    }
-  };
-
-  const harnessPanel = document.getElementById('harness-panel');
-  function renderHarness(key) {
-    const h = HARNESSES[key];
-    document.querySelectorAll('.h-tab').forEach(b => {
-      b.setAttribute('aria-selected', String(b.dataset.engine === key));
-    });
-    harnessPanel.innerHTML = `
-      <div>
-        <h3 style="font-size:1.3rem;margin-bottom:0.5rem">${esc(h.name)} adapter</h3>
-        <p style="margin:0;color:var(--muted);line-height:1.6">${esc(h.summary).replace(/`([^`]+)`/g, '<code>$1</code>')}</p>
-      </div>
-      <dl class="h-specs">
-        ${h.specs.map(([k, v]) => `<div class="h-spec"><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join('')}
-      </dl>
-    `;
-  }
-  document.querySelectorAll('.h-tab').forEach(b => {
-    b.addEventListener('click', () => renderHarness(b.dataset.engine));
-  });
-  renderHarness('codex');
-
-  // ---- Quickstart Code Switcher ----
-  const QS = {
-    install: {
-      caption: 'Installs Python runtime + launchers into ~/.local/bin and builds the optional native Rust Ratatui dashboard.',
-      code: `git clone https://github.com/ham-zax/claive.git && cd claive
-./install.sh --dry-run                       # inspect destinations first
-just dash-build                              # build native Rust claive-tui (optional)
-./install.sh --with-tui                      # install launchers, skills & claive-tui
-claive doctor                                # verify available harnesses & config`
-    },
-    worker: {
-      caption: 'Open a reusable worker in an isolated Git worktree, bind an @alias, inspect structured steps, verify, and apply.',
-      code: `claive open --detach --engine codex --worktree --carry-dirty \\
-  --alias backend --workspace /abs/repo --prompt-file /tmp/task.md
-
-claive peek @backend --steps 12 --json --structured
-claive wait @backend                         # exit 0 done, 3 needs_parent, 124 timeout
-claive answer @backend --message "Use option B."
-claive verify @backend && claive worktree apply @backend --dry-run`
-    },
-    dash: {
-      caption: 'Read-only by default with zero locks and native incremental Rust events.jsonl tailing.',
-      code: `claive dash                                  # read-only triage cockpit
-claive dash --triage                         # show only ASK / UNWATCHED / FAIL / REVIEW
-claive dash --actions                        # enable answer / send / steer / verify / apply
-CLAIVE_TMUX_TUI=1 claive-codex               # Codex + 5-row Ratatui --compact tmux bar`
-    },
-    conv: {
-      caption: 'Run bounded multi-round discussions between reusable specialists across different engines and model families.',
-      code: `claive conversation start @proposer @critic @reviewer \\
-  --message-file /abs/design-question.md \\
-  --rounds 2 --timeout 300
-
-claive conversation show CONVERSATION_ID --json`
-    },
-    mcp: {
-      caption: 'Flat-schema stdio MCP server so Claude Code, Codex, or any MCP client drives workers without shell polling.',
-      code: `# Start the stdio MCP server (configure in your harness's MCP settings):
-claive-mcp
-
-# 10 flat-schema tools exposed:
-# claive_start · claive_peek · claive_steer · claive_wait · claive_cancel
-# claive_verify · claive_list · claive_followup · claive_apply · claive_close`
-    },
-    orch: {
-      caption: 'Use claive-orch for verifier-gated refinement, or claive serve for a durable unattended server queue.',
-      code: `# Deterministic verifier-gated arbiter (L0 -> L1 refine -> L2 breadth):
-claive-orch init --repo /abs/repo --task-file /abs/task.md \\
-  --verify 'python3 -m pytest -q' --arm D
-claive-orch next RUN && claive-orch integrate RUN
-
-# Unattended server goal queue (with systemd/claive-serve.service):
-claive goal add --title "Audit deps" --workspace /abs/repo --prompt-file /abs/goal.md
-claive serve`
-    }
-  };
-
-  const qsCode = document.getElementById('qs-code');
-  const qsCaption = document.getElementById('qs-caption');
-  const qsCopy = document.getElementById('qs-copy');
-  let activeQs = 'install';
-
-  function renderQs(key) {
-    activeQs = key;
-    document.querySelectorAll('.qs-tab').forEach(b => {
-      b.setAttribute('aria-selected', String(b.dataset.qs === key));
-    });
-    qsCode.textContent = QS[key].code;
-    qsCaption.textContent = QS[key].caption;
-    qsCopy.textContent = 'Copy';
-  }
-  document.querySelectorAll('.qs-tab').forEach(b => {
-    b.addEventListener('click', () => renderQs(b.dataset.qs));
-  });
-  qsCopy.addEventListener('click', async () => {
-    try {
-      await navigator.clipboard.writeText(QS[activeQs].code);
-      qsCopy.textContent = 'Copied';
-      setTimeout(() => { qsCopy.textContent = 'Copy'; }, 1600);
-    } catch {
-      qsCopy.textContent = 'Select & copy';
-    }
-  });
-  renderQs('install');
-})();
-</script>
+<script type="module" src="./assets/app.js"></script>
 </body>
 </html>

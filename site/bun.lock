@@ -1,0 +1,18 @@
+{
+  "lockfileVersion": 2,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "claive-site",
+      "dependencies": {
+        "@ui-sdk/core": "0.1.0-beta.16",
+        "@ui-sdk/web": "0.1.0-beta.16",
+      },
+    },
+  },
+  "packages": {
+    "@ui-sdk/core": ["@ui-sdk/core@0.1.0-beta.16", "", {}, "sha512-I2GMqOviLS/lYfIj2lTqKLbae0V9uSnysK+bSdbhuw2De8zNvrLZiDTc0qzsPNiZvB/bMmUZJS5UDA5Q2Pq4Ng=="],
+
+    "@ui-sdk/web": ["@ui-sdk/web@0.1.0-beta.16", "", { "peerDependencies": { "@ui-sdk/core": "^0.1.0-beta.16" } }, "sha512-nnHnx06aEQ7CWjK3cNG8vIRhvKleAdrc3scxgIyLAMpDI+J0Zo0XqvN4xUwLq1rIEvLb1ZKikE5NCJuzgnWaBA=="],
+  }
+}

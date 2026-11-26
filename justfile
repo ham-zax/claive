@@ -22,3 +22,7 @@ dash-build:
 dash-test:
     cargo test --manifest-path tui/Cargo.toml
 
+# Bundle the static website (`site/src/app.js` -> `site/assets/app.js`) using `@ui-sdk/web`.
+site-build:
+    cd site && bun run build
+

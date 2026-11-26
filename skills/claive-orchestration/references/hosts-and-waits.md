@@ -6,9 +6,24 @@ Full CLI syntax and exit codes live in `~/repo/claive/docs/command-reference.md`
 
 - **Antigravity (AGY):** `claive start` exits in ~50ms. Arm `claive wait ID ... --all --heartbeat 600 --timeout 1800` via `run_command` with `WaitMsBeforeAsync: 500` before ending your turn. On `exit 125`, inspect the preview, steer/cancel if stuck, and re-arm.
 - **Claude Code:** Run `claive wait ... --all --heartbeat 600` in Bash with `run_in_background: true` (or foreground `--timeout 540` with Bash `timeout: 600000`). Foreground `sleep` is blocked. Consumer: `claude` (or `--session`).
-- **T3 Code:** Delegate to the configured Claive ACP provider for a native task row and completion wake. For Claive launches from the shell, use the wait or park behavior of the thread's harness.
+- **T3 Code:** See [direct CLI](#t3-code-direct-cli) for completion-driven work using T3's managed shell.
 - **Codex CLI:** Use `claive-worker` in a managed shell session with a short initial yield, keeping both worker ID and shell session ID (`claive-routing-codex` covers Codex-host specifics). Non-reactive after turn end: wait in-turn or `--park`.
 - **Pi / OpenCode / shell:** Run via bash (`--session` auto-tags `$PI_SESSION_ID` / `$OPENCODE_SESSION_ID`).
+
+### T3 Code direct CLI
+
+For a one-shot task, run `claive run` in the thread's managed shell tool with a short initial yield (for example, `yield_time_ms: 1000` in Codex):
+
+```sh
+claive run --engine codex --workspace /absolute/project --turn-timeout 600 \
+  --label 'Review integration' --read-only --prompt-file /absolute/task.md
+```
+
+If the tool returns a running shell session, record the Claive worker ID from its startup output and yield the parent when it has no independent work left. T3 tracks the command and sends the parent a completion event with the exit code and an output tail. Read the full worker result by ID when the tail is insufficient, and verify the requested deliverable. Run the command directly so its exit status reaches T3. The background row represents the shell command. Use `claive show ID` or `claive peek ID` when a specific intermediate check is useful. This workflow uses T3's completion event without ACP, polling, or a live progress wrapper.
+
+Codex workers normally inherit the T3 provider's `CODEX_HOME`. To select a different signed-in Codex account for a run, use the same binary and add `--set '{"engines":{"codex":{"env":{"CODEX_HOME":"/absolute/account-home"}}}}'`. Use the original account home when resuming a retained Codex session under a new Claive worker.
+
+For a reusable worker, use `claive open --detach` and `claive followup ID` as needed. After assigning each turn, run `claive wait ID --heartbeat 600 --timeout 1800` as the managed shell command T3 tracks. A detached launch or queued follow-up exits before the worker settles. If the wait wakes early with exit `125`, review the preview and re-arm the wait while the turn remains active. Cancel an active worker with `claive cancel ID` and check its settled status.
 
 ## Hooks, parking, and push notifications
 

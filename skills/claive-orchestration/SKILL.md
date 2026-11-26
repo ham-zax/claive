@@ -26,6 +26,7 @@ Checkout and docs live at `/home/hamza/repo/claive` (laptop) or `/home/ubuntu/re
 
 ## Launch, wait, and wake reliably
 
+- **T3 Code, direct CLI:** Use `claive run` in a managed shell command for one-shot work and yield so T3 can wake the parent when the command exits. For reusable workers, track a managed `claive wait` for each assigned turn. See [host wait mechanics](references/hosts-and-waits.md#t3-code-direct-cli).
 - **Identity and scoping:** Pass `--alias NAME` (`--reuse-alias` safely rebinds a settled alias with no open `ASK` or unaccepted dirty worktree). Launches auto-tag `parent_session` from harness env (`$CLAUDE_SESSION_ID`, `$CODEX_THREAD_ID`, `$ANTIGRAVITY_CONVERSATION_ID`, `$OPENCODE_SESSION_ID`, `$PI_SESSION_ID`) or `--session S`.
 - **Detached launches do not auto-wake idle turns:** `claive start`, `open --detach`, and `batch start` exit `0` in ~50ms. Before ending a turn with active non-parked workers, arm a background `claive wait` (reactive harnesses) or wait in-turn (non-reactive harnesses); otherwise use `claive park ID` (`--park`) for intentional handoffs.
 - **Always use `--heartbeat 600`:** Run `claive wait ID1 ID2 ... --all --heartbeat 600 --timeout 1800` (`--any` for first settled). `inotify` wakes in `<5ms` on settlement (`0` done, `1` failed, `3` `ASK`); `125` prints a compact progress preview (`phase`, `steps`, `changed_files`, `active_tool`) and the exact `Re-arm wait:` command.

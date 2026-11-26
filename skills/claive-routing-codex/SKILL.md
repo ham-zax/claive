@@ -59,7 +59,7 @@ Config reloads when a command needs policy. `enabled: false` disables an engine.
 Codex steering and fork turns refuse nonempty `extra_args`.
 Exact options: `docs/command-reference.md`.
 
-For routine work from the Codex parent, favor `claive-worker` in Codex's managed
+In T3 Code, follow the [direct CLI completion workflow](../claive-orchestration/references/hosts-and-waits.md#t3-code-direct-cli) for Claive tasks. In standalone Codex, favor `claive-worker` in its managed
 shell so its session remains visible in `/ps`; use `claive start` or
 `claive open --detach` only when genuinely detached execution is needed.
 Keep the terminal session ID, Claive worker ID, and engine session UUID distinct.
@@ -121,7 +121,7 @@ Request a concise report: outcome, files changed, checks with results, supportin
 
 ## Launch and observe workers
 
-Default to `claive-worker` inside Codex's managed shell tool. The launcher opens a reusable worker and remains alive between related turns, so a yielded shell call is a managed background terminal and appears in the native running-terminal indicator and `/ps`. The installed manager is `claive`; its generic supervisor owns state, follow-ups, cancellation, and logs, while each engine adapter builds its commands and interprets its events and usage. Private logs are retained under `${XDG_STATE_HOME:-$HOME/.local/state}/claive`. `CLAIVE_DIR` can select another absolute registry directory. The custom dashboard and tmux pane are optional additional views.
+In standalone Codex, default to `claive-worker` inside the managed shell tool. The launcher opens a reusable worker and remains alive between related turns, so a yielded shell call is a managed background terminal and appears in the native running-terminal indicator and `/ps`. The installed manager is `claive`; its generic supervisor owns state, follow-ups, cancellation, and logs, while each engine adapter builds its commands and interprets its events and usage. Private logs are retained under `${XDG_STATE_HOME:-$HOME/.local/state}/claive`. `CLAIVE_DIR` can select another absolute registry directory. The custom dashboard and tmux pane are optional additional views.
 
 ```bash
 exec claive-worker \

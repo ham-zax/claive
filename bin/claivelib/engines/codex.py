@@ -58,9 +58,17 @@ def _web_home():
                                str(Path.home() / ".local/share/claive/codex-web-home"))).expanduser().resolve()
 
 
-def _home(model=None):
-    return (_web_home() if _web_model(model) else
-            Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser())
+def _home(model=None, workspace=None, env=None):
+    if _web_model(model):
+        return _web_home()
+    env = config.engine_env("codex") if env is None else env
+    home = env.get("CODEX_HOME", os.environ.get("CODEX_HOME"))
+    path = Path(home).expanduser() if home else Path(env.get("HOME") or Path.home()) / ".codex"
+    return (Path(workspace or Path.cwd()) / path).resolve()
+
+
+def _session_dir(model, workspace=None):
+    return _home(model, workspace) / "sessions"
 
 
 def _yolo(request):
@@ -73,6 +81,18 @@ def _yolo(request):
 def _use_user_config():
     return engine_policy("codex").get("user_config", False) or os.environ.get(
         "CLAIVE_CODEX_USE_USER_CONFIG", "").lower() in {"1", "true", "yes"}
+
+
+def _tool_failure(item):
+    if item.get("type") == "command_execution" and item.get("exit_code") not in (None, 0):
+        return f"exit {item['exit_code']}"
+    status = item.get("status")
+    if status in ("failed", "declined", "error"):
+        error = item.get("error")
+        if isinstance(error, dict):
+            error = error.get("message")
+        return str(error or status)
+    return None
 
 
 class CodexEngine(WorkerEngine):
@@ -94,9 +114,13 @@ class CodexEngine(WorkerEngine):
             "App Server acknowledgement does not establish model consumption.",))
 
     def child_env_for_turn(self, request):
-        if not _web_model(request.model):
-            return super().child_env_for_turn(request)
-        return {**super().child_env_for_turn(request), "CODEX_HOME": str(_web_home())}
+        env = super().child_env_for_turn(request)
+        directory = getattr(request, "session_dir", None)
+        if directory:
+            env["CODEX_HOME"] = str(Path(directory).parent)
+        elif _web_model(request.model) or "CODEX_HOME" in env:
+            env["CODEX_HOME"] = str(_home(request.model, getattr(request, "workspace", None), env))
+        return env
 
     def defaults(self):
         return dict(super().defaults(), binary=default_binary(), provider=CODEX_PROVIDER,
@@ -113,20 +137,20 @@ class CodexEngine(WorkerEngine):
         self._peek_message = None
 
     def resolve_session_id(self, value, session_logging=True):
-        if not session_logging:
-            return None
-        return str(uuid.UUID(value)) if value else str(uuid.uuid4())
+        return str(uuid.UUID(value)) if value and session_logging else None
 
     def resolve_launch(self, **options):
+        model = options.get("model") or CODEX_MODEL
         return {
             "binary": config.engine_setting(self.name, "binary", default_binary()),
             "steering": bool(options.get("steering")),
             "provider": options.get("provider") or config.engine_setting(self.name, "provider", CODEX_PROVIDER),
-            "model": options.get("model") or CODEX_MODEL,
+            "model": model,
             "read_only": bool(options.get("read_only")),
             "web": bool(options.get("web")),
             "output_schema": options.get("output_schema"),
             "session_logging": bool(options.get("session_logging", True)),
+            "session_dir": str(options.get("fork_session_dir") or _session_dir(model, options.get("workspace"))),
             "isolation": dict(options.get("isolation") or {}),
         }
 
@@ -136,9 +160,9 @@ class CodexEngine(WorkerEngine):
             raise ValueError("Codex binary must be an absolute executable file")
         self._check_model(launch.get("model"))
         if _web_model(launch.get("model")):
-            home = _web_home()
+            home = Path(launch["session_dir"]).parent if launch.get("session_dir") else _web_home()
             native = (Path.home() / ".codex").resolve()
-            if home == native:
+            if home in {native, _home()}:
                 raise ValueError("ChatGPT Web needs an isolated CODEX_HOME; native Codex must remain untouched")
             path = home / "config.toml"
             if not path.is_file():
@@ -182,31 +206,40 @@ class CodexEngine(WorkerEngine):
             raise ValueError("Codex does not support --max-model-steps")
 
     @staticmethod
-    def _session_file(identifier, model=None):
+    def _session_file(identifier, directory):
         """The retained rollout for a Codex thread, or None before its first turn has run."""
-        matches = sorted((_home(model) / "sessions").glob(f"**/rollout-*-{identifier}.jsonl"))
+        matches = sorted(Path(directory).glob(f"**/rollout-*-{identifier}.jsonl"))
         return matches[0] if matches else None
 
     def build_command(self, request):
         self.validate_turn(request)
         model = _canonical_model(request.model)
-        use_user_config = _web_model(request.model) or _use_user_config()
+        is_web = _web_model(request.model)
+        use_user_config = is_web or _use_user_config()
+        tier = None if is_web else config.engine_setting(self.name, "service_tier")
+        session = request.session_id if not request.fork_session_id else None
+        if session:
+            directory = request.session_dir or _session_dir(request.model, request.workspace)
+            if not self._session_file(session, directory):
+                raise ValueError(f"retained Codex session {session} is unavailable in {directory}")
         sandbox = "read-only" if request.read_only else "workspace-write"
         if request.steering or request.fork_session_id:
             if _yolo(request):
                 sandbox = "danger-full-access"
             wrapper = Path(__file__).with_name("codex_appserver.py")
             command = [sys.executable, str(wrapper), "--binary", request.binary,
-                       "--cwd", request.workspace, "--model", model,
+                       "--cwd", request.workspace, "--model", model, "--provider", request.provider,
                        "--sandbox", sandbox]
+            if tier is not None:
+                command += ["--service-tier", tier]
             if request.reasoning_effort is not None:
                 command += ["--effort", request.reasoning_effort]
             if request.fork_session_id:
                 command.extend(["--fork", request.fork_session_id])
                 if not request.steering:
                     command.extend(["--initial-prompt-file", request.prompt_file])
-            elif request.session_id and self._session_file(request.session_id, request.model):
-                command.extend(["--resume", request.session_id])
+            elif session:
+                command.extend(["--resume", session])
             if not request.session_logging:
                 command.append("--ephemeral")
             if use_user_config:
@@ -221,7 +254,8 @@ class CodexEngine(WorkerEngine):
         shared = [
             "--json", "--skip-git-repo-check",
             *(["--ignore-user-config"] if ignore_user_config else []), "--ignore-rules",
-            "-m", model,
+            "-m", model, "-c", f"model_provider={json.dumps(request.provider)}",
+            *(["-c", f"service_tier={json.dumps(tier)}"] if tier is not None else []),
             *(["-c", f'model_reasoning_effort="{request.reasoning_effort}"']
               if request.reasoning_effort is not None else []),
             *guard,
@@ -232,8 +266,8 @@ class CodexEngine(WorkerEngine):
         prompt = Path(request.prompt_file).read_text(encoding="utf-8")
         # Codex picks its own thread ID. The supervisor swaps it into the job's session_id on
         # thread.started, so a follow-up carries a real thread whose rollout exists to resume.
-        if request.session_id and self._session_file(request.session_id, request.model):
-            return [request.binary, "exec", "resume", *shared, request.session_id, "--", prompt]
+        if session:
+            return [request.binary, "exec", "resume", *shared, session, "--", prompt]
         return [request.binary, "exec", *shared, "--cd", request.workspace, "--", prompt]
 
     def dedupe_key(self, event):
@@ -275,7 +309,7 @@ class CodexEngine(WorkerEngine):
                     return [{"kind": "tool_call", "text":
                              ("shell" if item_kind == "command_execution" else item_kind) + " " + compact(details)}]
                 if kind == "item.completed":
-                    failed = item_kind == "command_execution" and item.get("exit_code") not in (None, 0)
+                    failed = _tool_failure(item)
                     return [{"kind": "tool_result", "text": ("error: " if failed else "") + compact(details)}]
         if kind == "turn.failed":
             error = event.get("error")
@@ -312,11 +346,14 @@ class CodexEngine(WorkerEngine):
             if item_kind == "agent_message" and isinstance(item.get("text"), str):
                 self._last_text = item["text"]
                 return [{"type": "output_delta", "native_kind": kind, "text": item["text"]}]
-            if item_kind == "command_execution" and item.get("exit_code") not in (None, 0):
-                return [{"type": "task_warning", "native_kind": kind, "tool": "shell", "tool_id": item.get("id"),
-                         "command": item.get("command"), "reason": f"exit {item['exit_code']}"}]
             if item_kind in {"command_execution", "mcp_tool_call", "file_change"}:
-                return [{"type": "tool_completed", "native_kind": kind, "tool": item_kind, "tool_id": item.get("id")}]
+                reason = _tool_failure(item)
+                if reason:
+                    return [{"type": "task_warning", "native_kind": kind,
+                             "tool": "shell" if item_kind == "command_execution" else item_kind,
+                             "tool_id": item.get("id"), "command": item.get("command"), "reason": reason}]
+                return [{"type": "tool_completed", "native_kind": kind, "tool": item_kind,
+                         "tool_id": item.get("id"), "command": item.get("command")}]
         if kind == "turn.completed":
             return [{"type": "terminal_completed", "native_kind": kind, "terminal": "completed",
                      "reason": None, "text": self._last_text}]
@@ -334,7 +371,9 @@ class CodexEngine(WorkerEngine):
         identifier = session_id(state)
         if not identifier or not launch_config(state).get("session_logging", True):
             raise ValueError("Codex usage needs a retained session")
-        path = self._session_file(identifier, launch_config(state).get("model"))
+        launch = launch_config(state)
+        directory = launch.get("session_dir") or _session_dir(launch.get("model"), state.get("workspace"))
+        path = self._session_file(identifier, directory)
         if path is None:
             raise ValueError("retained Codex session file is unavailable")
         calls, total = [], None

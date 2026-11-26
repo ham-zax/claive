@@ -32,9 +32,9 @@ class CodexWebChecks(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.engine = CodexEngine()
 
-    def request(self, model=CODEX_WEB_ALIAS, effort="high", steering=False, read_only=False):
+    def request(self, model=CODEX_WEB_ALIAS, effort="high", steering=False, read_only=False, session_id=None):
         return TurnRequest(binary=str(self.binary), workspace=str(self.root),
-                           prompt_file=str(self.prompt), session_id="01a1184e-d220-7891-95de-8dee4b56367e",
+                           prompt_file=str(self.prompt), session_id=session_id,
                            provider="openai", model=model, reasoning_effort=effort,
                            max_model_steps=None, read_only=read_only, web=False,
                            output_schema=None, session_logging=True, isolation={}, steering=steering)
@@ -84,8 +84,8 @@ class CodexWebChecks(unittest.TestCase):
             self.engine.validate_turn(self.request(model=CODEX_WEB_ALIAS, effort="max"))
 
     def test_web_retain_uses_only_isolated_home(self):
-        request = self.request()
-        ident = request.session_id
+        ident = "01a1184e-d220-7891-95de-8dee4b56367e"
+        request = self.request(session_id=ident)
         for home in (self.home, self.native):
             record = home / "sessions" / "2026" / "11" / "03" / f"rollout-2026-11-03T00-00-00-{ident}.jsonl"
             record.parent.mkdir(parents=True)
@@ -93,9 +93,9 @@ class CodexWebChecks(unittest.TestCase):
         web = self.engine.build_command(request)
         self.assertIn("resume", web)
         (self.home / "sessions" / "2026" / "11" / "03" / f"rollout-2026-11-03T00-00-00-{ident}.jsonl").unlink()
-        web = self.engine.build_command(request)
-        self.assertNotIn("resume", web)
-        native = self.engine.build_command(self.request(model=CODEX_MODEL, effort="xhigh"))
+        with self.assertRaisesRegex(ValueError, "retained Codex session .* is unavailable"):
+            self.engine.build_command(request)
+        native = self.engine.build_command(self.request(model=CODEX_MODEL, effort="xhigh", session_id=ident))
         self.assertIn("resume", native)
 
 

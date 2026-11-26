@@ -50,7 +50,7 @@ class CodexChecks(unittest.TestCase):
 
     def request(self, **overrides):
         values = dict(binary=str(self.binary), workspace=str(self.root), prompt_file=str(self.prompt),
-                      session_id=THREAD, provider="openai", model=CODEX_MODEL,
+                      session_id=None, provider="openai", model=CODEX_MODEL,
                       reasoning_effort="max", max_model_steps=None, read_only=False, web=False,
                       output_schema=None, session_logging=True, isolation={})
         values.update(overrides)
@@ -162,11 +162,47 @@ class CodexChecks(unittest.TestCase):
         rollout = self.root / f"home/sessions/2026/10/08/rollout-2026-10-08T00-00-00-{THREAD}.jsonl"
         rollout.parent.mkdir(parents=True)
         rollout.write_text("")
-        resumed = self.engine.build_command(self.request())
+        resumed = self.engine.build_command(self.request(session_id=THREAD))
         self.assertEqual(resumed[1:3], ["exec", "resume"])
         self.assertEqual(resumed[resumed.index(THREAD) - 1], 'web_search="live"')
         self.assertIn("--ephemeral", self.engine.build_command(
             self.request(session_id=None, session_logging=False)))
+
+    def test_missing_requested_session_is_rejected(self):
+        for steering in (False, True):
+            with self.subTest(steering=steering):
+                with self.assertRaisesRegex(ValueError, f"retained Codex session {THREAD} is unavailable"):
+                    self.engine.build_command(self.request(session_id=THREAD, steering=steering))
+
+    def test_configured_home_is_pinned_for_resume_and_usage(self):
+        config_file = self.root / "config.json"
+        home = self.root / "configured"
+        sessions = home / "sessions"
+        sessions.mkdir(parents=True)
+        (sessions / f"rollout-fixture-{THREAD}.jsonl").write_text("")
+        policy = {"binary": str(self.binary), "env": {"CODEX_HOME": str(home)}}
+        config_file.write_text(json.dumps({"engines": {"codex": policy}}))
+        with patch.dict(os.environ, CLAIVE_CONFIG=str(config_file), CLAIVE_DIR=str(self.root / "state")):
+            args = cli.parser().parse_args(["run", "--engine", "codex", "--workspace", str(self.root),
+                                            "--prompt-file", str(self.prompt), "--session-id", THREAD])
+            _, state = cli.create_job(args)
+            self.assertEqual(state["command"][1:3], ["exec", "resume"])
+            policy["env"]["CODEX_HOME"] = str(self.root / "other")
+            config_file.write_text(json.dumps({"engines": {"codex": policy}}))
+            request = cli.turn_request(state)
+            self.assertEqual(self.engine.child_env_for_turn(request)["CODEX_HOME"], str(home))
+            self.assertEqual(self.engine.build_command(request)[1:3], ["exec", "resume"])
+            self.assertEqual(self.engine.session_usage(state)["model_calls"], 0)
+
+    def test_exec_applies_configured_provider_and_fast_mode(self):
+        config_file = self.root / "config.json"
+        config_file.write_text(json.dumps({"engines": {"codex": {"provider": "fixture", "service_tier": "fast"}}}))
+        self.write_rollout()
+        with patch.dict(os.environ, CLAIVE_CONFIG=str(config_file)):
+            for session in (None, THREAD):
+                command = self.engine.build_command(self.request(provider="fixture", session_id=session))
+                self.assertIn('model_provider="fixture"', command)
+                self.assertIn('service_tier="fast"', command)
 
     def test_fork_uses_app_server_thread_fork_for_both_turn_modes(self):
         forked = self.engine.build_command(self.request(fork_session_id=THREAD))
@@ -192,7 +228,8 @@ class CodexChecks(unittest.TestCase):
 
     def test_yolo_opt_out_keeps_the_sandboxed_command(self):
         expected = [str(self.binary), "exec", "--json", "--skip-git-repo-check", "--ignore-user-config",
-                    "--ignore-rules", "-m", CODEX_MODEL, "-c", 'model_reasoning_effort="max"',
+                    "--ignore-rules", "-m", CODEX_MODEL, "-c", 'model_provider="openai"',
+                    "-c", 'model_reasoning_effort="max"',
                     "-c", 'sandbox_mode="workspace-write"', "-c", 'approval_policy="never"',
                     "-c", 'web_search="live"', "--cd", str(self.root), "--", "--do the thing\n"]
         for value in ("0", "no", "off", "FALSE"):
@@ -235,13 +272,14 @@ class CodexChecks(unittest.TestCase):
 
     def assert_yolo_swaps_the_sandbox_overrides(self, shape):
         os.environ["CLAIVE_CODEX_YOLO"] = "0"
-        plain = self.engine.build_command(self.request())
+        request = self.request(session_id=THREAD if "resume" in shape else None)
+        plain = self.engine.build_command(request)
         start = plain.index('sandbox_mode="workspace-write"') - 1
         self.assertEqual(plain[1:1 + len(shape)], shape)
         self.assertEqual(plain[start:start + 4],
                          ["-c", 'sandbox_mode="workspace-write"', "-c", 'approval_policy="never"'])
         os.environ.pop("CLAIVE_CODEX_YOLO")
-        yolo = self.engine.build_command(self.request())
+        yolo = self.engine.build_command(request)
         self.assertEqual(yolo[1:1 + len(shape)], shape)
         self.assertEqual(yolo, plain[:start] + [YOLO] + plain[start + 4:])
         self.assertFalse([part for part in yolo if "sandbox_mode" in part or "approval_policy" in part])
@@ -272,10 +310,20 @@ class CodexChecks(unittest.TestCase):
             with self.subTest(resume=resumable):
                 if resumable:
                     self.write_rollout()
-                command = self.engine.build_command(self.request(read_only=True))
+                command = self.engine.build_command(self.request(read_only=True, session_id=THREAD if resumable else None))
                 self.assertIn('sandbox_mode="read-only"', command)
                 self.assertIn('approval_policy="never"', command)
                 self.assertNotIn(YOLO, command)
+
+    def test_successful_check_replaces_earlier_failure(self):
+        state = {"workspace": str(self.root)}
+        for exit_code, status in ((1, "fail"), (0, "pass")):
+            event = {"type": "item.completed", "item": {"type": "command_execution", "id": "check",
+                     "command": "pytest tests/test_sample.py", "exit_code": exit_code}}
+            for normalized in self.engine.normalize_event(event):
+                cli.event_update(state, normalized)
+            self.assertEqual(state["last_check"]["status"], status)
+        self.assertEqual(state["turn_task_failures"], 1)
 
     def test_events_normalize_and_bind_the_thread(self):
         events = [

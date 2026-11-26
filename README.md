@@ -66,6 +66,7 @@ Codex exec launches use the ordinary transport.
 The App Server path links the user's `auth.json`, sessions and skills into a
 private `CODEX_HOME`. It reads the repo's `AGENTS.md`.
 Every Codex turn sets `web_search="live"`.
+Set `engines.codex.service_tier: fast` in Claive's config to request Fast mode for native Codex workers, including steering and fork turns. Use `default` to request standard processing, or omit the setting to use Codex's own default.
 
 Workers use their engine's default tools. Claive supplies no restricted tool list.
 `--web` is accepted and has no effect on Claude, Codex and Muse. Pi refuses it.

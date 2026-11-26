@@ -33,11 +33,12 @@ for line in sys.stdin:
  m=json.loads(line);method=m.get("method");identifier=m.get("id")
  if method=="initialize":emit(dict(id=identifier,result={"userAgent":"fixture"}))
  if method in ("thread/start","thread/resume"):
-  assert m["params"]["model"]==MODEL and m["params"]["modelProvider"]=="openai"
+  assert m["params"]["model"]==MODEL and m["params"]["modelProvider"]==os.environ.get("CODEX_FIXTURE_PROVIDER","openai")
   if method=="thread/resume":assert m["params"]["threadId"]==THREAD
   emit(dict(id=identifier,result={"thread":{"id":THREAD}}))
  if method=="turn/start":
   assert m["params"]["threadId"]==THREAD
+  assert m["params"].get("serviceTier")==os.environ.get("CODEX_FIXTURE_TIER")
   emit(dict(id=identifier,result={"turn":{"id":TURN,"status":"inProgress"}}))
   emit(dict(method="turn/started",params={"threadId":THREAD,"turn":{"id":TURN,"status":"inProgress"}}))
   emit(dict(method="item/started",params={"threadId":THREAD,"turnId":TURN,"item":{"type":"commandExecution","id":"toolA","command":"echo running"}}))
@@ -132,10 +133,18 @@ class CodexSteeringChecks(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["status"], "unconfirmed")
 
     def test_codex_resume_reuses_thread_with_new_receipt(self):
+        configured_home = self.workspace / "configured-home"
+        config = self.workspace / "config.json"
+        config.write_text(json.dumps({"engines": {"codex": {
+            "provider": "fixture", "service_tier": "fast", "env": {"CODEX_HOME": str(configured_home)},
+        }}}))
+        self.env.update(CLAIVE_CONFIG=str(config), CODEX_FIXTURE_PROVIDER="fixture", CODEX_FIXTURE_TIER="fast")
         identifier = self.launch("open")
         self.assertEqual(self.cli("steer", identifier, "--message", "first", "--wait", "5").returncode, 0)
         self.assertEqual(self.cli("wait", identifier, "--timeout", "5").returncode, 0)
-        rollout = self.home / "sessions" / f"rollout-{THREAD}.jsonl"
+        self.assertTrue((configured_home / "sessions").is_dir())
+        self.assertFalse((self.home / "sessions").exists())
+        rollout = configured_home / "sessions" / f"rollout-fixture-{THREAD}.jsonl"
         rollout.parent.mkdir(parents=True, exist_ok=True)
         rollout.write_text("")
         self.assertEqual(self.cli("followup", identifier, "--prompt-file", str(self.prompt)).returncode, 0)
@@ -145,6 +154,7 @@ class CodexSteeringChecks(unittest.TestCase):
                 break
             time.sleep(0.03)
         self.assertEqual(state["turn"], 2)
+        self.assertIn("--resume", state["command"])
         self.assertEqual(self.cli("steer", identifier, "--message", "second", "--wait", "5").returncode, 0)
         self.assertEqual(self.cli("wait", identifier, "--timeout", "5").returncode, 0)
         self.assertEqual((self.registry / identifier / "turn-0002.txt").read_text(), "steered second")

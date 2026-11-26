@@ -134,11 +134,13 @@ ENGINE_KEYS = {
     "user_config": bool, "extra_args": list, "budget": (bool, dict),
     "fallback_models": list, "providers": dict, "default_provider": str,
     "binary": str, "provider": str, "env": dict, "prompt_limit": int, "extra_models": dict,
+    "service_tier": str,
 }
 # Every engine accepts these; each engine module declares the default it falls back to.
 UNIFORM_ENGINE_KEYS = ("binary", "provider", "env", "prompt_limit")
 # Engine policy keys that only one engine accepts.
-ENGINE_ONLY_KEYS = {"user_config": "codex", "budget": "claude", "default_provider": "pi"}
+ENGINE_ONLY_KEYS = {"user_config": "codex", "service_tier": "codex",
+                    "budget": "claude", "default_provider": "pi"}
 CLAUDE_BUDGET_DEFAULTS = {
     "default": {"warn": 140000, "stop": 150000, "max_handoffs": 7},
     "claude-haiku-5-5": {"warn": 90000, "stop": 100000, "max_handoffs": 7},
@@ -399,6 +401,8 @@ def validate(data, path):
                                  f"in {where}.providers")
         if "budget" in policy:
             _validate_claude_budget(policy["budget"], f"{where}.budget")
+        if "service_tier" in policy and policy["service_tier"] not in {"default", "fast", "priority"}:
+            raise ValueError(f"{where}.service_tier must be default, fast, or priority")
         extra = policy.get("extra_args", [])
         if not all(isinstance(item, str) and item for item in extra):
             raise ValueError(f"{where}.extra_args must hold nonempty strings")
@@ -966,6 +970,7 @@ engines:
   codex:
     enabled: true
     # user_config: false
+    # service_tier: fast           # opt in to Fast mode for native Codex workers
   agy:
     enabled: true
     # prompt_limit: 100000

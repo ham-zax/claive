@@ -272,6 +272,8 @@ def _write_turn_event(state):
                      acceptance=evidence["acceptance"]["status"], turn_task_failures=state.get("turn_task_failures"))
         event["digest"] = inbox_mod.build_digest(event, state=state)
         inbox_mod.append(event)
+        from claivelib import telemetry
+        telemetry.record_turn(state, job_dir=job_path(state["id"]), evidence=evidence)
     except Exception:
         pass
 
@@ -1583,9 +1585,19 @@ def supervise(job_id, control=None):
                     except Exception as error:
                         state["fallback_error"] = str(error)
                         break
-                    fallbacks.append({"model": state.get("model"),
+                    prev_model = state.get("model")
+                    fallbacks.append({"model": prev_model,
                                       "failure_kind": state.get("failure_kind"),
                                       "error": state.get("error")})
+                    from claivelib import telemetry
+                    telemetry.record_fallback(
+                        state,
+                        from_model=prev_model,
+                        to_model=fresh_launch.get("model"),
+                        failure_kind=state.get("failure_kind"),
+                        error=state.get("error"),
+                        attempt=attempt,
+                    )
                     state["fallbacks"] = fallbacks
                     state["model"] = fresh_launch.get("model")
                     state["launch"] = fresh_launch
@@ -2366,8 +2378,9 @@ def reusable_worker(job_id, resume_idle=False):
         state.update(status="idle", phase=f"turn {state['turn']} {state['last_turn_status']}; ready for follow-up")
         state.update(supervisor_pid=os.getpid(), supervisor_identity=identity(os.getpid()))
         save(path / "state.json", state)
-        print(f"Worker {job_id}: turn {state['turn']} {state['last_turn_status']}; "
-              f"idle in session {worker_session_id(state)}", flush=True)
+        identifier = worker_session_id(state)
+        session_label = f"in session {identifier}" if identifier else "without a retained session"
+        print(f"Worker {job_id}: turn {state['turn']} {state['last_turn_status']}; idle {session_label}", flush=True)
         report(state)
         idle_started = time.monotonic()
         while not control["stopping"]:
@@ -2522,7 +2535,9 @@ def reusable_worker(job_id, resume_idle=False):
                 state.update(status=state["last_turn_status"], phase="session closed", ended_at=time.time())
                 release_worktree(state)
                 save(path / "state.json", state)
-                print(f"Worker {job_id} closed; durable session {worker_session_id(state)} retained", flush=True)
+                identifier = worker_session_id(state)
+                retained = f"; durable session {identifier} retained" if identifier else ""
+                print(f"Worker {job_id} closed{retained}", flush=True)
                 return outcome_code(state)
             from claivelib import idle_sessions
             idle_age = time.monotonic() - idle_started
@@ -2814,6 +2829,7 @@ def _create_job(args):
         isolation=isolation, session_id=session_id, session_root=str(root() / "sessions"),
         steering=bool(requested_steering if requested_steering is not None else default_steering),
         workspace=str(workspace), remember_model=bool(requested_model and getattr(args, "remember_model", True)),
+        fork_session_dir=getattr(args, "fork_session_dir", None),
         **budget_options,
     )
     launch["read_mode"] = "enforced" if read_only and engine.read_only_enforced else "soft" if read_only else "write"
@@ -4464,6 +4480,24 @@ def parser():
     answer.add_argument("--idempotency-key", help="optional caller key to prevent duplicate answer queueing")
     tmux = commands.add_parser("tmux", help="open Codex with a live worker pane and status bar")
     tmux.add_argument("codex_args", nargs=argparse.REMAINDER)
+    tel = commands.add_parser("telemetry", help="inspect compact local telemetry logs (summary, tail, path, clear)")
+    tel_sub = tel.add_subparsers(dest="telemetry_action")
+    tel_sum = tel_sub.add_parser("summary", help="summarize turns, model reliability, and top failure signatures")
+    tel_sum.add_argument("--days", type=float, help="limit to the last N days")
+    tel_sum.add_argument("--engine", help="filter by engine name")
+    tel_sum.add_argument("--json", action="store_true")
+    tel_tail = tel_sub.add_parser("tail", help="show recent telemetry events")
+    tel_tail.add_argument("-n", "--lines", type=int, default=20, help="number of recent events (default 20)")
+    tel_tail.add_argument("--days", type=float, help="limit to the last N days")
+    tel_tail.add_argument("--engine", help="filter by engine name")
+    tel_tail.add_argument("--event", choices=("turn", "fallback", "cli_error"), help="filter by event type")
+    tel_tail.add_argument("--failures", action="store_true", help="only failed turns, fallbacks, and CLI errors")
+    tel_tail.add_argument("--json", action="store_true")
+    tel_sub.add_parser("path", help="print telemetry log file path and size")
+    tel_sub.add_parser("clear", help="delete local telemetry log files")
+    tel.add_argument("--days", type=float, help="limit summary to the last N days")
+    tel.add_argument("--engine", help="filter summary by engine name")
+    tel.add_argument("--json", action="store_true")
     return result
 
 
@@ -5540,6 +5574,41 @@ def main(launcher=None):
             return mission_mod.cmd_list(all_missions=args.all_missions, json_output=args.json)
         if args.mission_action == "close":
             return mission_mod.cmd_close(args.id)
+    elif args.action == "telemetry":
+        from claivelib import telemetry
+        sub = getattr(args, "telemetry_action", None) or "summary"
+        if sub == "path":
+            cur = telemetry.telemetry_path(create=False)
+            arch = telemetry.archive_path(create=False)
+            cur_sz = cur.stat().st_size if cur.is_file() else 0
+            arch_sz = arch.stat().st_size if arch.is_file() else 0
+            print(f"{cur} ({cur_sz} B)" + (f" | archive: {arch} ({arch_sz} B)" if arch_sz else ""))
+            return 0
+        if sub == "clear":
+            removed = telemetry.clear()
+            print(f"Cleared {len(removed)} telemetry file(s)." if removed else "No telemetry files to clear.")
+            return 0
+        if sub == "tail":
+            if args.lines < 1:
+                raise ValueError("--lines must be positive")
+            events = telemetry.read_events(
+                since_days=args.days,
+                engine=args.engine,
+                event_type=args.event,
+                failures_only=args.failures,
+            )[-args.lines:]
+            if args.json:
+                print(json.dumps(events, indent=2))
+            elif not events:
+                print("No matching telemetry events.")
+            else:
+                for item in events:
+                    print(telemetry.format_tail_line(item))
+            return 0
+        events = telemetry.read_events(since_days=args.days, engine=args.engine)
+        tel_summary = telemetry.summarize(events)
+        print(json.dumps(tel_summary, indent=2) if args.json else telemetry.format_summary(tel_summary))
+        return 0
     return 0
 
 
@@ -5550,6 +5619,12 @@ def entrypoint(launcher):
     except KeyboardInterrupt:
         return 130
     except (ValueError, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        try:
+            from claivelib import telemetry
+            action = next((arg for arg in sys.argv[1:] if not arg.startswith("-")), "unknown")
+            telemetry.record_cli_error(action, error)
+        except Exception:
+            pass
         print(f"claive: {error}", file=sys.stderr)
         return 1
 

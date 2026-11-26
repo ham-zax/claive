@@ -348,17 +348,27 @@ Add **Local ACP command** under **Settings → Providers → Add provider → Sh
 more**. Set the executable to the absolute path of `bin/claive-acp` in your
 checkout. Leave **Arguments** and **Variables** empty to discover the enabled
 engines and models reported by Claive. The picker labels models by engine and
-provider so you can choose the route for each delegate. Claive applies its
-configured reasoning defaults for the selected model. Refresh the provider in
-T3 to pick up catalog changes. An existing provider pinned with `--model`
-continues to offer that model.
+provider so you can choose the route for each delegate. Refresh the provider in
+T3 to discover the current model catalog and options. An existing provider
+pinned with `--model` continues to offer that model.
 
 Choose this provider when creating a T3 delegate. T3 owns the delegate row and
-delivers the result to its parent. The bridge launches one Claive worker per
-text prompt and forwards cancellation. It requests approval through ACP and
-uses the selected engine's `--read-only` policy, which Pi treats as a prompt
-constraint. Each prompt is a fresh worker turn. Shell-launched workers remain
-visible through Claive's own status and inbox.
+delivers the result to its parent. Select **Writable** under **Worker access**
+for an editing task and choose a **Reasoning effort** supported by the model.
+For example, with `codex/gpt-6.2-sol` registered, pass
+`{"mode":"code","reasoning_effort":"low"}` in `target.options` for a writable
+delegate at low effort. Read-only is the default and uses the engine's normal
+read-only policy. Writable uses the engine's configured tools, sandbox, and
+approval policy, including any workspace restrictions. Provider arguments
+`--mode code` and `--reasoning-effort low` can set the initial selections.
+
+The bridge requests approval through ACP, then uses `claive open` for the
+first prompt and `claive followup` for later prompts with the same model and
+access. A clarification and its reply can therefore share the same worker and
+native conversation. An access change reopens the retained native conversation
+with the new policy. A model change starts a new conversation. ACP cancellation
+uses `claive cancel`, and closing the ACP session tells Claive to close the
+worker. Workers also remain visible through Claive's own status and inbox.
 
 ## Execution, verification, and parent acceptance
 

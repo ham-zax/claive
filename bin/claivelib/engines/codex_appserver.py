@@ -99,8 +99,11 @@ def run(args):
         def start_turn():
             nonlocal prompt
             if thread_id and prompt is not None:
-                send("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": prompt}],
-                                    "model": args.model, "effort": args.effort}, "turn")
+                params = {"threadId": thread_id, "input": [{"type": "text", "text": prompt}],
+                          "model": args.model, "effort": args.effort}
+                if args.service_tier is not None:
+                    params["serviceTier"] = args.service_tier
+                send("turn/start", params, "turn")
                 prompt = None
 
         def drain_steers():
@@ -162,18 +165,14 @@ def run(args):
                             result = event.get("result") or {}
                             if identifier == "initialize":
                                 send("initialized")
+                                params = {"cwd": args.cwd, "model": args.model, "sandbox": args.sandbox,
+                                          "modelProvider": args.provider, "approvalPolicy": "never"}
                                 if args.fork:
-                                    send("thread/fork", {"threadId": args.fork, "model": args.model,
-                                                         "cwd": args.cwd, "sandbox": args.sandbox,
-                                                         "modelProvider": "openai", "approvalPolicy": "never"}, "thread")
+                                    send("thread/fork", {**params, "threadId": args.fork}, "thread")
                                 elif args.resume:
-                                    send("thread/resume", {"threadId": args.resume, "model": args.model,
-                                                           "cwd": args.cwd, "sandbox": args.sandbox,
-                                                           "modelProvider": "openai", "approvalPolicy": "never"}, "thread")
+                                    send("thread/resume", {**params, "threadId": args.resume}, "thread")
                                 else:
-                                    send("thread/start", {"cwd": args.cwd, "model": args.model,
-                                                          "sandbox": args.sandbox, "modelProvider": "openai",
-                                                          "approvalPolicy": "never", "ephemeral": args.ephemeral}, "thread")
+                                    send("thread/start", {**params, "ephemeral": args.ephemeral}, "thread")
                             elif identifier == "thread":
                                 thread_id = result.get("thread", {}).get("id")
                                 if not thread_id:
@@ -201,9 +200,12 @@ def run(args):
                                     "fileChange": "file_change", "agentMessage": "agent_message"}.get(item.get("type"), item.get("type"))
                             if kind == "agent_message" and method == "item/completed":
                                 last_text = item.get("text") or last_text
+                            details = {key: item[key] for key in ("id", "command", "text", "status", "error", "server", "tool")
+                                       if key in item}
+                            if "exitCode" in item:
+                                details["exit_code"] = item["exitCode"]
                             emit({"type": "item.started" if method == "item/started" else "item.completed",
-                                  "item": {"type": kind, "id": item.get("id"), "command": item.get("command"),
-                                           "text": item.get("text"), "exit_code": item.get("exitCode")}})
+                                  "item": {"type": kind, **details}})
                         elif method == "turn/completed":
                             if data.get("threadId") != thread_id or (turn_id and data.get("turn", {}).get("id") != turn_id):
                                 continue
@@ -235,6 +237,8 @@ def main():
     parser = argparse.ArgumentParser()
     for name in ("binary", "cwd", "model", "effort", "sandbox"):
         parser.add_argument("--" + name, required=True)
+    parser.add_argument("--provider", default="openai")
+    parser.add_argument("--service-tier")
     session_action = parser.add_mutually_exclusive_group()
     session_action.add_argument("--resume")
     session_action.add_argument("--fork")

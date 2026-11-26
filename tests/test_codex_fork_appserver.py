@@ -10,6 +10,8 @@ import unittest
 
 REPO = Path(__file__).resolve().parents[1]
 CODEX_APP_SERVER = REPO / "bin/claivelib/engines/codex_appserver.py"
+sys.path.insert(0, str(REPO / "bin"))
+from claivelib.engines.codex import CodexEngine
 
 
 class CodexForkAppServerChecks(unittest.TestCase):
@@ -40,6 +42,8 @@ for line in sys.stdin:
     elif identifier == "turn":
         output({"id": identifier, "result": {"turn": {"id": "fork-turn"}}})
         output({"method": "turn/started", "params": {"threadId": "forked-thread", "turn": {"id": "fork-turn"}}})
+        output({"method": "item/completed", "params": {"threadId": "forked-thread", "item": {
+            "type": "mcpToolCall", "id": "mcp-1", "status": "failed", "error": {"message": "fixture failure"}}}})
         output({"method": "item/completed", "params": {"threadId": "forked-thread", "item": {"type": "agentMessage", "text": "copied branch"}}})
         output({"method": "turn/completed", "params": {"threadId": "forked-thread", "turn": {"id": "fork-turn", "status": "completed"}}})
 """)
@@ -50,6 +54,7 @@ for line in sys.stdin:
             result = subprocess.run(
                 [sys.executable, str(CODEX_APP_SERVER), "--binary", str(binary), "--cwd", str(root),
                  "--model", "gpt-6-luna", "--effort", "max", "--sandbox", "read-only",
+                 "--provider", "fixture", "--service-tier", "fast",
                  "--fork", "source-thread", "--initial-prompt-file", str(prompt)],
                 input="", env=env, text=True, capture_output=True, timeout=10,
             )
@@ -60,12 +65,17 @@ for line in sys.stdin:
             self.assertIn({"type": "turn.completed"}, events)
             self.assertIn({"type": "item.completed", "item": {"type": "agent_message",
                                                                    "text": "copied branch"}}, events)
+            failure = next(e for e in events if e.get("item", {}).get("id") == "mcp-1")
+            warning, = CodexEngine().normalize_event(failure)
+            self.assertEqual((warning["type"], warning["reason"]), ("task_warning", "fixture failure"))
             requests = [json.loads(line) for line in capture.read_text().splitlines()]
             self.assertEqual(json.loads(env_capture.read_text())["CLAIVE_BIN"], launcher)
             fork_request = next(request for request in requests if request.get("method") == "thread/fork")
             self.assertEqual(fork_request["params"]["threadId"], "source-thread")
+            self.assertEqual(fork_request["params"]["modelProvider"], "fixture")
             turn_request = next(request for request in requests if request.get("method") == "turn/start")
             self.assertEqual(turn_request["params"]["threadId"], "forked-thread")
+            self.assertEqual(turn_request["params"]["serviceTier"], "fast")
             self.assertEqual(turn_request["params"]["input"], [{"type": "text", "text": "branch prompt\n"}])
 
 
